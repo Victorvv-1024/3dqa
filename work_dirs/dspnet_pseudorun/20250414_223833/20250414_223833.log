@@ -1,0 +1,682 @@
+2025/04/14 22:38:33 - mmengine - INFO - 
+------------------------------------------------------------
+System environment:
+    sys.platform: linux
+    Python: 3.10.16 (main, Dec 11 2024, 16:24:50) [GCC 11.2.0]
+    CUDA available: True
+    MUSA available: False
+    numpy_random_seed: 42
+    GPU 0: NVIDIA GeForce RTX 4080 SUPER
+    CUDA_HOME: /usr/local/cuda
+    NVCC: Cuda compilation tools, release 11.8, V11.8.89
+    GCC: gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0
+    PyTorch: 2.2.0
+    PyTorch compiling details: PyTorch built with:
+  - GCC 9.3
+  - C++ Version: 201703
+  - Intel(R) oneAPI Math Kernel Library Version 2023.1-Product Build 20230303 for Intel(R) 64 architecture applications
+  - Intel(R) MKL-DNN v3.3.2 (Git Hash 2dc95a2ad0841e29db8b22fbccaf3e5da7992b01)
+  - OpenMP 201511 (a.k.a. OpenMP 4.5)
+  - LAPACK is enabled (usually provided by MKL)
+  - NNPACK is enabled
+  - CPU capability usage: AVX2
+  - CUDA Runtime 11.8
+  - NVCC architecture flags: -gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_60,code=sm_60;-gencode;arch=compute_61,code=sm_61;-gencode;arch=compute_70,code=sm_70;-gencode;arch=compute_75,code=sm_75;-gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_86,code=sm_86;-gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_37,code=compute_37
+  - CuDNN 8.7
+  - Magma 2.6.1
+  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, CUDA_VERSION=11.8, CUDNN_VERSION=8.7.0, CXX_COMPILER=/opt/rh/devtoolset-9/root/usr/bin/c++, CXX_FLAGS= -D_GLIBCXX_USE_CXX11_ABI=0 -fabi-version=11 -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOROCTRACER -DUSE_FBGEMM -DUSE_QNNPACK -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-type-limits -Wno-array-bounds -Wno-unknown-pragmas -Wno-unused-parameter -Wno-unused-function -Wno-unused-result -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=pedantic -Wno-error=old-style-cast -Wno-missing-braces -fdiagnostics-color=always -faligned-new -Wno-unused-but-set-variable -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, PERF_WITH_AVX512=1, TORCH_VERSION=2.2.0, USE_CUDA=ON, USE_CUDNN=ON, USE_EXCEPTION_PTR=1, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=ON, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, 
+
+    TorchVision: 0.17.0
+    OpenCV: 4.11.0
+    MMEngine: 0.10.7
+
+Runtime environment:
+    cudnn_benchmark: False
+    mp_cfg: {'mp_start_method': 'fork', 'opencv_num_threads': 0}
+    dist_cfg: {'backend': 'nccl'}
+    seed: 42
+    diff_rank_seed: True
+    Distributed launcher: none
+    Distributed training: False
+    GPU number: 1
+------------------------------------------------------------
+
+2025/04/14 22:38:33 - mmengine - INFO - Config:
+backbone_lidar_inchannels = 6
+backend_args = None
+classes = (
+    'cabinet',
+    'bed',
+    'chair',
+    'sofa',
+    'table',
+    'door',
+    'window',
+    'bookshelf',
+    'picture',
+    'counter',
+    'desk',
+    'curtain',
+    'refrigerator',
+    'shower curtain',
+    'toilet',
+    'sink',
+    'bathtub',
+    'others',
+)
+compile_options = dict(backend='inductor', mode='max-autotune')
+custom_hooks = [
+    dict(after_iter=True, type='EmptyCacheHook'),
+]
+data_root = 'data'
+dataset_type = 'MultiViewScanQADataset'
+default_hooks = dict(
+    checkpoint=dict(
+        interval=1,
+        max_keep_ckpts=3,
+        rule='greater',
+        save_best='EM@1',
+        type='CheckpointHook'),
+    logger=dict(interval=50, type='LoggerHook'),
+    param_scheduler=dict(type='ParamSchedulerHook'),
+    sampler_seed=dict(type='DistSamplerSeedHook'),
+    timer=dict(type='IterTimerHook'))
+default_scope = 'embodiedqa'
+env_cfg = dict(
+    cudnn_benchmark=False,
+    dist_cfg=dict(backend='nccl'),
+    mp_cfg=dict(mp_start_method='fork', opencv_num_threads=0))
+find_unused_parameters = True
+launcher = 'none'
+load_from = './work_dirs/scannet-det/scannet-votenet-12xb12/epoch_12.pth'
+log_level = 'INFO'
+log_processor = dict(by_epoch=True, type='LogProcessor', window_size=50)
+lr = 0.0001
+max_epochs = 12
+model = dict(
+    backbone=dict(
+        add_map=True,
+        frozen=True,
+        name='microsoft/swin-base-patch4-window7-224-in22k',
+        out_channels=[
+            1024,
+        ],
+        type='SwinModelWrapper'),
+    backbone_fusion=dict(
+        hidden_size=768,
+        num_attention_heads=12,
+        num_hidden_layers=4,
+        type='CrossModalityEncoder'),
+    backbone_lidar=dict(
+        fp_channels=(
+            (
+                256,
+                256,
+            ),
+            (
+                256,
+                256,
+            ),
+        ),
+        frozen=False,
+        in_channels=6,
+        norm_cfg=dict(type='BN2d'),
+        num_points=(
+            2048,
+            1024,
+            512,
+            256,
+        ),
+        num_samples=(
+            64,
+            32,
+            16,
+            16,
+        ),
+        radius=(
+            0.2,
+            0.4,
+            0.8,
+            1.2,
+        ),
+        sa_cfg=dict(
+            normalize_xyz=True,
+            pool_mod='max',
+            type='PointSAModule',
+            use_xyz=True),
+        sa_channels=(
+            (
+                64,
+                64,
+                128,
+            ),
+            (
+                128,
+                128,
+                256,
+            ),
+            (
+                128,
+                128,
+                256,
+            ),
+            (
+                128,
+                128,
+                256,
+            ),
+        ),
+        type='PointNet2SASSG'),
+    backbone_text=dict(
+        frozen=False,
+        name='sentence-transformers/all-mpnet-base-v2',
+        type='TextModelWrapper'),
+    coord_type='DEPTH',
+    data_preprocessor=dict(
+        bgr_to_rgb=True,
+        furthest_point_sample=True,
+        mean=[
+            123.675,
+            116.28,
+            103.53,
+        ],
+        num_points=40000,
+        pad_size_divisor=32,
+        std=[
+            58.394,
+            57.12,
+            57.375,
+        ],
+        type='Det3DDataPreprocessor',
+        use_imagenet_default_mean_std=True),
+    qa_head=dict(
+        dropout=0.3,
+        hidden_channels=768,
+        in_channels=768,
+        num_classes=8864,
+        type='QAHead'),
+    target_bbox_head=dict(
+        bbox_coder=dict(
+            mean_sizes=[
+                [
+                    0.775,
+                    0.949,
+                    0.9654,
+                ],
+                [
+                    1.869,
+                    1.8321,
+                    1.1922,
+                ],
+                [
+                    0.6121,
+                    0.6193,
+                    0.7048,
+                ],
+                [
+                    1.4411,
+                    1.6045,
+                    0.8365,
+                ],
+                [
+                    1.0478,
+                    1.2016,
+                    0.6346,
+                ],
+                [
+                    0.561,
+                    0.6085,
+                    1.7195,
+                ],
+                [
+                    1.0789,
+                    0.8203,
+                    1.1692,
+                ],
+                [
+                    0.8417,
+                    1.3505,
+                    1.6899,
+                ],
+                [
+                    0.2305,
+                    0.4764,
+                    0.5657,
+                ],
+                [
+                    1.4548,
+                    1.9712,
+                    0.2864,
+                ],
+                [
+                    1.0786,
+                    1.5371,
+                    0.865,
+                ],
+                [
+                    1.4312,
+                    0.7692,
+                    1.6498,
+                ],
+                [
+                    0.6297,
+                    0.7087,
+                    1.3143,
+                ],
+                [
+                    0.4393,
+                    0.4157,
+                    1.7,
+                ],
+                [
+                    0.585,
+                    0.5788,
+                    0.7203,
+                ],
+                [
+                    0.5116,
+                    0.5096,
+                    0.3129,
+                ],
+                [
+                    1.1732,
+                    1.0599,
+                    0.5181,
+                ],
+                [
+                    0.4329,
+                    0.5193,
+                    0.4844,
+                ],
+            ],
+            num_dir_bins=10,
+            num_sizes=18,
+            type='PartialBinBasedBBoxCoder',
+            with_rot=True),
+        dropout=0.3,
+        hidden_channels=768,
+        in_channels=768,
+        loss_weight=1.0,
+        num_classes=1,
+        train_cfg=dict(neg_distance_thr=0.6, pos_distance_thr=0.3),
+        type='RefLocHead'),
+    target_cls_head=dict(
+        dropout=0.3,
+        hidden_channels=768,
+        in_channels=1536,
+        loss_weight=1.0,
+        num_classes=18,
+        type='RefClsHead'),
+    test_cfg=dict(
+        nms_thr=0.25,
+        per_class_proposal=True,
+        sample_mode='seed',
+        score_thr=0.05),
+    text_max_length=512,
+    train_cfg=dict(
+        neg_distance_thr=0.6, pos_distance_thr=0.3, sample_mode='seed'),
+    type='MultiViewVLMBase3DQA',
+    voxel_size=0.01)
+n_points = 40000
+optim_wrapper = dict(
+    accumulative_counts=1,
+    clip_grad=dict(max_norm=10, norm_type=2),
+    optimizer=dict(lr=0.0001, type='AdamW', weight_decay=1e-05),
+    paramwise_cfg=dict(
+        bypass_duplicate=True,
+        custom_keys=dict(text_encoder=dict(lr_mult=0.1))),
+    type='OptimWrapper')
+param_scheduler = [
+    dict(
+        T_max=12,
+        begin=0,
+        by_epoch=True,
+        convert_to_iter_based=True,
+        end=12,
+        eta_min_ratio=0.05,
+        type='CosineAnnealingLR'),
+    dict(begin=0, by_epoch=False, end=500, start_factor=0.05, type='LinearLR'),
+]
+randomness = dict(diff_rank_seed=True, seed=42)
+resume = False
+test_cfg = dict(type='TestLoop')
+test_dataloader = dict(
+    batch_size=12,
+    dataset=dict(
+        ann_file='mv_scannetv2_infos_val.pkl',
+        anno_indices=None,
+        box_type_3d='Depth',
+        data_root='data',
+        filter_empty_gt=False,
+        metainfo=dict(
+            classes=(
+                'cabinet',
+                'bed',
+                'chair',
+                'sofa',
+                'table',
+                'door',
+                'window',
+                'bookshelf',
+                'picture',
+                'counter',
+                'desk',
+                'curtain',
+                'refrigerator',
+                'shower curtain',
+                'toilet',
+                'sink',
+                'bathtub',
+                'others',
+            )),
+        pipeline=[
+            dict(type='LoadAnnotations3D', with_answer_labels=True),
+            dict(
+                n_images=20,
+                ordered=True,
+                transforms=[
+                    dict(backend_args=None, type='LoadImageFromFile'),
+                    dict(backend_args=None, type='LoadDepthFromFile'),
+                    dict(
+                        coord_type='CAMERA',
+                        type='ConvertRGBDToPoints',
+                        use_color=0),
+                    dict(num_points=4000, type='PointSample'),
+                    dict(keep_ratio=False, scale=(
+                        224,
+                        224,
+                    ), type='Resize'),
+                ],
+                type='MultiViewPipeline'),
+            dict(
+                coord_type='DEPTH',
+                save_views_points=True,
+                type='AggregateMultiViewPoints',
+                use_clean_global_points=True,
+                use_color=True),
+            dict(
+                keys=[
+                    'img',
+                    'points',
+                    'gt_bboxes_3d',
+                    'gt_labels_3d',
+                    'gt_answer_labels',
+                ],
+                type='Pack3DDetInputs'),
+        ],
+        qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+        remove_dontcare=False,
+        test_mode=True,
+        type='MultiViewScanQADataset'),
+    drop_last=False,
+    num_workers=12,
+    persistent_workers=True,
+    pin_memory=True,
+    sampler=dict(round_up=False, shuffle=False, type='DefaultSampler'))
+test_evaluator = dict(format_only=True, type='ScanQAMetric')
+test_pipeline = [
+    dict(type='LoadAnnotations3D', with_answer_labels=True),
+    dict(
+        n_images=20,
+        ordered=True,
+        transforms=[
+            dict(backend_args=None, type='LoadImageFromFile'),
+            dict(backend_args=None, type='LoadDepthFromFile'),
+            dict(coord_type='CAMERA', type='ConvertRGBDToPoints', use_color=0),
+            dict(num_points=4000, type='PointSample'),
+            dict(keep_ratio=False, scale=(
+                224,
+                224,
+            ), type='Resize'),
+        ],
+        type='MultiViewPipeline'),
+    dict(
+        coord_type='DEPTH',
+        save_views_points=True,
+        type='AggregateMultiViewPoints',
+        use_clean_global_points=True,
+        use_color=True),
+    dict(
+        keys=[
+            'img',
+            'points',
+            'gt_bboxes_3d',
+            'gt_labels_3d',
+            'gt_answer_labels',
+        ],
+        type='Pack3DDetInputs'),
+]
+train_cfg = dict(max_epochs=12, type='EpochBasedTrainLoop', val_interval=1)
+train_dataloader = dict(
+    batch_size=12,
+    dataset=dict(
+        dataset=dict(
+            ann_file='mv_scannetv2_infos_train.pkl',
+            anno_indices=None,
+            box_type_3d='Depth',
+            data_root='data',
+            filter_empty_gt=True,
+            metainfo=dict(
+                classes=(
+                    'cabinet',
+                    'bed',
+                    'chair',
+                    'sofa',
+                    'table',
+                    'door',
+                    'window',
+                    'bookshelf',
+                    'picture',
+                    'counter',
+                    'desk',
+                    'curtain',
+                    'refrigerator',
+                    'shower curtain',
+                    'toilet',
+                    'sink',
+                    'bathtub',
+                    'others',
+                )),
+            pipeline=[
+                dict(
+                    type='LoadAnnotations3D',
+                    with_answer_labels=True,
+                    with_target_objects_mask=True),
+                dict(
+                    n_images=20,
+                    transforms=[
+                        dict(backend_args=None, type='LoadImageFromFile'),
+                        dict(backend_args=None, type='LoadDepthFromFile'),
+                        dict(
+                            coord_type='CAMERA',
+                            type='ConvertRGBDToPoints',
+                            use_color=0),
+                        dict(num_points=4000, type='PointSample'),
+                        dict(
+                            keep_ratio=False,
+                            scale=(
+                                224,
+                                224,
+                            ),
+                            type='Resize'),
+                    ],
+                    type='MultiViewPipeline'),
+                dict(
+                    coord_type='DEPTH',
+                    save_views_points=True,
+                    type='AggregateMultiViewPoints',
+                    use_clean_global_points=True,
+                    use_color=True),
+                dict(num_points=40000, type='PointSample'),
+                dict(
+                    rot_range=[
+                        -0.087266,
+                        0.087266,
+                    ],
+                    scale_ratio_range=[
+                        0.9,
+                        1.1,
+                    ],
+                    shift_height=False,
+                    translation_std=[
+                        0.1,
+                        0.1,
+                        0.1,
+                    ],
+                    type='GlobalRotScaleTrans'),
+                dict(
+                    keys=[
+                        'img',
+                        'points',
+                        'gt_bboxes_3d',
+                        'gt_labels_3d',
+                        'gt_answer_labels',
+                        'target_objects_mask',
+                    ],
+                    type='Pack3DDetInputs'),
+            ],
+            qa_file='qa/ScanQA_v1.0_train.json',
+            remove_dontcare=True,
+            test_mode=False,
+            type='MultiViewScanQADataset'),
+        times=1,
+        type='RepeatDataset'),
+    drop_last=True,
+    num_workers=12,
+    persistent_workers=True,
+    pin_memory=True,
+    sampler=dict(shuffle=True, type='DefaultSampler'))
+train_pipeline = [
+    dict(
+        type='LoadAnnotations3D',
+        with_answer_labels=True,
+        with_target_objects_mask=True),
+    dict(
+        n_images=20,
+        transforms=[
+            dict(backend_args=None, type='LoadImageFromFile'),
+            dict(backend_args=None, type='LoadDepthFromFile'),
+            dict(coord_type='CAMERA', type='ConvertRGBDToPoints', use_color=0),
+            dict(num_points=4000, type='PointSample'),
+            dict(keep_ratio=False, scale=(
+                224,
+                224,
+            ), type='Resize'),
+        ],
+        type='MultiViewPipeline'),
+    dict(
+        coord_type='DEPTH',
+        save_views_points=True,
+        type='AggregateMultiViewPoints',
+        use_clean_global_points=True,
+        use_color=True),
+    dict(num_points=40000, type='PointSample'),
+    dict(
+        rot_range=[
+            -0.087266,
+            0.087266,
+        ],
+        scale_ratio_range=[
+            0.9,
+            1.1,
+        ],
+        shift_height=False,
+        translation_std=[
+            0.1,
+            0.1,
+            0.1,
+        ],
+        type='GlobalRotScaleTrans'),
+    dict(
+        keys=[
+            'img',
+            'points',
+            'gt_bboxes_3d',
+            'gt_labels_3d',
+            'gt_answer_labels',
+            'target_objects_mask',
+        ],
+        type='Pack3DDetInputs'),
+]
+use_clean_global_points = True
+use_color = True
+val_cfg = dict(type='ValLoop')
+val_dataloader = dict(
+    batch_size=12,
+    dataset=dict(
+        ann_file='mv_scannetv2_infos_val.pkl',
+        anno_indices=None,
+        box_type_3d='Depth',
+        data_root='data',
+        filter_empty_gt=True,
+        metainfo=dict(
+            classes=(
+                'cabinet',
+                'bed',
+                'chair',
+                'sofa',
+                'table',
+                'door',
+                'window',
+                'bookshelf',
+                'picture',
+                'counter',
+                'desk',
+                'curtain',
+                'refrigerator',
+                'shower curtain',
+                'toilet',
+                'sink',
+                'bathtub',
+                'others',
+            )),
+        pipeline=[
+            dict(type='LoadAnnotations3D', with_answer_labels=True),
+            dict(
+                n_images=20,
+                ordered=True,
+                transforms=[
+                    dict(backend_args=None, type='LoadImageFromFile'),
+                    dict(backend_args=None, type='LoadDepthFromFile'),
+                    dict(
+                        coord_type='CAMERA',
+                        type='ConvertRGBDToPoints',
+                        use_color=0),
+                    dict(num_points=4000, type='PointSample'),
+                    dict(keep_ratio=False, scale=(
+                        224,
+                        224,
+                    ), type='Resize'),
+                ],
+                type='MultiViewPipeline'),
+            dict(
+                coord_type='DEPTH',
+                save_views_points=True,
+                type='AggregateMultiViewPoints',
+                use_clean_global_points=True,
+                use_color=True),
+            dict(
+                keys=[
+                    'img',
+                    'points',
+                    'gt_bboxes_3d',
+                    'gt_labels_3d',
+                    'gt_answer_labels',
+                ],
+                type='Pack3DDetInputs'),
+        ],
+        qa_file='qa/ScanQA_v1.0_val.json',
+        remove_dontcare=True,
+        test_mode=True,
+        type='MultiViewScanQADataset'),
+    drop_last=False,
+    num_workers=12,
+    persistent_workers=True,
+    pin_memory=True,
+    sampler=dict(round_up=False, shuffle=False, type='DefaultSampler'))
+val_evaluator = dict(
+    result_dir='work_dirs/dspnet_pseudorun', type='ScanQAMetric')
+voxel_size = 0.01
+work_dir = 'work_dirs/dspnet_pseudorun'
+
+2025/04/14 22:38:33 - mmengine - WARNING - Failed to search registry with scope "embodiedqa" in the "vis_backend" registry tree. As a workaround, the current "vis_backend" registry in "mmengine" is used to build instance. This may cause unexpected failure when running the built modules. Please check whether "embodiedqa" is a correct scope, or whether the registry is initialized.

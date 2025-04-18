@@ -1,0 +1,5 @@
+*__pycache__*
+*.pth
+*.egg-info/
+pytorch3d/
+data/
