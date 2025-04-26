@@ -31,7 +31,7 @@ class VisionFusion(nn.Module):
         )
 
         # norm
-        self.ln_fused = nn.LayerNorm(lidar_channels + camera_channels)
+        self.ln_fused = nn.LayerNorm(lidar_channels + camera_channels) # normalises across feature dimension independently
         self.bn_camera = nn.BatchNorm1d(camera_channels)
     def _init_weights(self):
         """Initialize the weights of the fusion blocks."""
@@ -50,12 +50,15 @@ class VisionFusion(nn.Module):
         
         B, N, _ = lidar_features.shape
         
+        # camera feature:  already represent a weighted aggregation of multiple views
+        # Ensuring they're properly normalized before combining with the point features helps maintain the integrity of 
+        # both information sources (points and camera features) during the fusion process
         camera_features = self.bn_camera(camera_features.transpose(1, 2)).transpose(1, 2)
-        
+        # cat along the channel dim
         fused_features = torch.cat([lidar_features, camera_features], dim=-1)
         
         
-        # # 应用逐点通道注意力
+        # # channel-wise attention, allows the model to emphasize import features ans suppress less relevant ones
         channel_attn = self.channel_attention(fused_features)
         fused_features = fused_features * channel_attn
         fused_features = self.ln_fused(fused_features)

@@ -44,12 +44,17 @@ def hash_coords(coords, grid_min, grid_max):
     return coords_shifted[:, 0] * grid_size[1] * grid_size[2] + coords_shifted[:, 1] * grid_size[2] + coords_shifted[:, 2]
 
 def get_visible_valid_points(points_depth, views_points, voxel_size, proj_mat, insensitivity=1.0):
-    if views_points.shape[-1]==6:
+    if views_points.shape[-1]==6: # exclude RGB
         views_points = views_points[:,:,:3]
     views_points = views_points.to(points_depth.device)
+    # project 3d points of camera view to image
     proj_pts = batch_points_cam2img(views_points, proj_mat, with_depth=True)
+    # extract depth
     views_depths = proj_pts[..., 2] #B, M
+    # find the max depth among all camera views, plus a small insensitivity margin
     max_depths = views_depths.max(1,keepdim=True)[0] + insensitivity*voxel_size #B,1
+    # create a mask that marks a 3d point as visible if it has a positive depth (i.e. in front of the camera)
+    # and its depth is less than opr equal to the max depth
     visible_valid = (0<points_depth) & (points_depth<=max_depths) #B,N
     return visible_valid
 def apply_3d_transformation(pcd: Tensor,
@@ -400,6 +405,8 @@ def batch_point_sample_in_visible(img_meta: dict,
                                     img_features_for_att: Tensor = None,
                                     att_head: int = 8) -> Tensor:
     """Batch version of point_sample.
+    Key component of Text-guided Multi-view Fusion (TGMF) module.
+    It samples 2D image features at the locations where 3D points project onto the 2D images, while considering point visibility
 
     Args:
         img_meta (dict): Meta info.
@@ -430,28 +437,35 @@ def batch_point_sample_in_visible(img_meta: dict,
     """
     use_views_attention = text_global_features_for_att is not None and img_features_for_att is not None
     # apply transformation based on info in img_meta
+    # print(f'before transformation, point shape is {points.shape}') # [Np, 3] = [1024, 3]
     points = apply_3d_transformation(points,
                                      coord_type,
                                      img_meta,
                                      reverse=True)
-
+    # print(f'project matrix shape is {proj_mat.shape}') # [Mp, 4, 4] = [20, 4, 4]
     points = points.repeat(proj_mat.shape[0], 1, 1)
+    # print(f'after repeat, point shape is {points.shape}') # [Mp, Np, 3] = [20, 1024, 3]
 
     # project points to image coordinate
     if valid_flag:
+        # project points from camera to image
         proj_pts = batch_points_cam2img(points, proj_mat, with_depth=True)
-        pts_2d = proj_pts[..., :2]
-        depths = proj_pts[..., 2]
+        # print(f'proj_pts shape is {proj_pts.shape}') # [Mp, Np, 3] = [20, 1024, 3]
+        pts_2d = proj_pts[..., :2] # extract 2D coordinates
+        # print(f'pts_2d shape is {pts_2d.shape}') # [Mp, Np, 2] = [20, 1024, 2]
+        depths = proj_pts[..., 2] # extract depth
+        # print(f'depths shape is {depths.shape}') # [Mp, Np] = [20, 1024]
     else:
         pts_2d = points_cam2img(points, proj_mat)
 
     # img transformation: scale -> crop -> flip
     # the image is resized by img_scale_factor
-    img_coors = pts_2d[..., 0:2] * img_scale_factor  # BxNx2
+    img_coors = pts_2d[..., 0:2] * img_scale_factor  # Mp x Np x 2
     img_coors -= img_crop_offset
 
     # grid sample, the valid grid range should be in [-1,1]
-    coor_x, coor_y = torch.split(img_coors, 1, dim=2)  # each is BxNx1
+    coor_x, coor_y = torch.split(img_coors, 1, dim=2)  # each is Mp x Np x 1
+    # print(f'coor_x is {coor_x}, coor_y is {coor_y}')
 
     if img_flip:
         # by default we take it as horizontal flip
@@ -463,46 +477,61 @@ def batch_point_sample_in_visible(img_meta: dict,
     norm_coor_y = coor_y / h * 2 - 1
     norm_coor_x = coor_x / w * 2 - 1
     grid = torch.cat([norm_coor_x, norm_coor_y],
-                     dim=2).unsqueeze(1)  # BxNx2 -> Bx1xNx2
+                     dim=2).unsqueeze(1)  # Mp x Np x 2 -> Mp x 1 x Np x 2
 
     # align_corner=True provides higher performance
     mode = 'bilinear' if aligned else 'nearest'
-    
+    # grid sample, sampled the appropriate features from each image for each 3d point
+    # print(f'before grid sample, img_features shape is {img_features.shape}') # [Mp, Di, H, W] = [20, 1024, 64, 64]
     point_features = F.grid_sample(
         img_features, # BxCxHxW
         grid,
         mode=mode,
         padding_mode=padding_mode,
-        align_corners=align_corners)  # BxCx1xN feats
-    point_features = point_features.squeeze(2) #BxCxN feats
+        align_corners=align_corners)  # Mp x Di x 1 x Np feats
+    point_features = point_features.squeeze(2) # Mp x Di x Np feats = [20, 1024, 1024]
+    # print(f'after grid sample, point_features shape is {point_features.shape}')
 
     if valid_flag:
         # (N, )
-        visible_valid = get_visible_valid_points(depths, views_points, voxel_size, proj_mat)#B,N
+        # create two masks: one for the points that are visible at least in front of one camera view, ( with depth > 0)
+        # and one for the points that are valid (i.e. within the image bounds)
+        visible_valid = get_visible_valid_points(depths, views_points, voxel_size, proj_mat) #B,N
         valid = (coor_x.squeeze(2) < w) & (coor_x.squeeze(2) > 0) & (
             coor_y.squeeze(2) < h) & (coor_y.squeeze(2) > 0) & (depths > 0) #B,N
-        if visualization:
+        
+        if visualization: # only execute when visualization is True
             if points.shape[1]>100:
                 for b in range(proj_mat.shape[0]):
                     filename = f'visulization_output/point_cloud_{b}.ply'
                     save_point_cloud_with_visibility((points[0]/ voxel_size).floor().int()*voxel_size,visible_valid[b], valid[b], filename,(views_points[b] / voxel_size).floor().int()*voxel_size)
                     shutil.copy(img_meta['img_path'][b], filename.replace('ply','jpg'))
                 save_point_cloud_with_visibility(points[0],visible_valid.sum(dim=0)>0, valid.sum(dim=0)>0, 'visulization_output/all.ply')
-        valid = valid&visible_valid
-        point_features = point_features*valid.float().unsqueeze(1)# BxCxN feats
-        valid_num = valid.sum(dim=0)  # N,
+        
+        valid = valid & visible_valid # B, Np
+        point_features = point_features * valid.float().unsqueeze(1)  # BxCxN feats
+        valid_num = valid.sum(dim=0)  # Np,
+        # print(f'valid_num is {valid_num}')
         
         # Text-guided Multi-view Fusion (TGMF) module
         if use_views_attention:
             d = img_features_for_att.shape[1]
+            # print(f'd is {d}') # D_fusion = 768
             # text-aware
-            views_att = (img_features_for_att*text_global_features_for_att.unsqueeze(0)).sum(dim=-1)/(d**0.5)  #B 
-            views_att = valid.float()*views_att.unsqueeze(1) #B,N
+            # working out hs = views_att
+            # print(f'img_features_for_att shape is {img_features_for_att.shape}') # [Mp, D_fusion] = [20, 768]
+            # print(f'text_global_features_for_att shape is {text_global_features_for_att.shape}') # [D_fusion] = [768]
+            # after text_global_features_for_att unsqueeze(0), the shape is [1,768] same as the framework
+            views_att = (img_features_for_att * text_global_features_for_att.unsqueeze(0)).sum(dim=-1) / (d ** 0.5)  # B 
+            # print(f'views_att shape is {views_att.shape}') # Mp
+            # to obtain h, duplicating hs across all valid back-projected points
+            views_att = valid.float() * views_att.unsqueeze(1)  # Mp,Np
             views_att[~valid] = -1e4
-            views_att = F.softmax(views_att,dim=0).unsqueeze(1) #B,1,N
-            point_features = point_features*views_att#B,C,N
+            views_att = F.softmax(views_att, dim=0).unsqueeze(1)  # Mp,1,Np
+            point_features = point_features * views_att  # Mp,Di,Np
+            # print(f'after TGMF, point_features shape is {point_features.shape}') # [Mp, Di, Np] = [20, 1024, 1024]
 
-        valid_features = point_features.sum(dim=0).t()  # NxC
+        valid_features = point_features.sum(dim=0).t()  # Np,Di
         valid_each = valid
         valid = valid_num > 0
         if len(valid) != len(valid_features):
