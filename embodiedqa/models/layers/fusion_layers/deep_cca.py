@@ -219,3 +219,26 @@ class DeepCCATGMF(nn.Module):
         
         # Return view weights
         return F.softmax(similarity, dim=0)  # [Mp, Np]
+    
+def deep_cca_loss(view_features, text_features, view_network, text_network):
+    """
+    Compute the Deep-CCA loss between view features and text features.
+    """
+    # Transform features
+    view_proj = view_network(view_features)  # [B, M, output_dim]
+    text_proj = text_network(text_features)  # [B, output_dim]
+    
+    # Center the data
+    view_proj = view_proj - view_proj.mean(dim=0, keepdim=True)
+    text_proj = text_proj - text_proj.mean(dim=0, keepdim=True)
+    
+    # Compute covariance matrices
+    view_cov = (view_proj.transpose(-2, -1) @ view_proj) / (view_proj.shape[0] - 1)
+    text_cov = (text_proj.transpose(-2, -1) @ text_proj) / (text_proj.shape[0] - 1)
+    cross_cov = (view_proj.transpose(-2, -1) @ text_proj) / (view_proj.shape[0] - 1)
+    
+    # Compute correlation
+    corr = torch.trace(cross_cov @ cross_cov.transpose(-2, -1))
+    
+    # Negative correlation as loss
+    return -corr
