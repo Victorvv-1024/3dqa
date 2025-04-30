@@ -12,7 +12,7 @@ from mmengine.model import BaseModel,BaseModule
 from mmengine.structures import InstanceData
 from mmcv.ops import furthest_point_sample,gather_points
 from embodiedqa.models.layers.fusion_layers.point_fusion import (
-    batch_point_sample, point_sample, batch_point_sample_in_visible)
+    batch_point_sample, point_sample, batch_point_sample_in_visible, enhanced_batch_point_sample_in_visible)
 from embodiedqa.registry import MODELS
 from embodiedqa.structures.bbox_3d import get_proj_mat_by_coord_type
 from embodiedqa.utils import ConfigType, OptConfigType
@@ -75,6 +75,10 @@ class MultiViewVLMBase3DQA(BaseModel):
                  test_cfg: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
                  use_2d: bool = True,
+                 # --- New arguments for TGMF ---
+                 tgmf_mode: str = 'hybrid', # Default value if not in config
+                 tgmf_redundancy_weight: float = 0.5, # Default value
+                 tgmf_temperature: float = 1.0, # Default value
                  init_cfg: OptConfigType = None):
         super().__init__(data_preprocessor=data_preprocessor,
                          init_cfg=init_cfg)
@@ -85,36 +89,23 @@ class MultiViewVLMBase3DQA(BaseModel):
         #MCGR
         self.fusion_encoder = MODELS.build(backbone_fusion)
         
-        if self.use_2d: # whether to use 2D multi-view images
-            self.backbone = MODELS.build(backbone)
-            # This projects Z_t to G_t
-            self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
-                                                    nn.LayerNorm(self.fusion_encoder.config.hidden_size))
-            # This projects U_i to G_i
-            self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size),
-                                            nn.LayerNorm(self.fusion_encoder.config.hidden_size))
-            #ADVP
-            self.fusion_map = VisionFusion(self.backbone_lidar.fp_channels[-1][-1],self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size)
-            self.visual_feat_map = nn.Linear(self.fusion_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size)
-        else:
-            self.visual_feat_map = nn.Linear(self.backbone_lidar.fp_channels[-1][-1],self.fusion_encoder.config.hidden_size)
-        
         self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
                                            nn.LayerNorm(self.fusion_encoder.config.hidden_size)
                                            ) 
         
         self.pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
         
-        self.fusion_encoder_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
-                                                            nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
-                                                            )
+        # self.fusion_encoder_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
+        #                                                     nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
+        #                                                     )
         
-        #dense visual feature
-        self.full_visual_feat_map = deepcopy(self.visual_feat_map)
-        self.full_pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
-        self.fusion_encoder_full_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
-                                                        nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
-                                                        )
+        # #dense visual feature
+        # self.full_visual_feat_map = deepcopy(self.visual_feat_map)
+        # self.full_pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
+        # self.fusion_encoder_full_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
+        #                                                 nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
+        #                                                 )
+        
         self.text_max_length = text_max_length
         self.vision_num_queries = vision_num_queries
         if target_bbox_head is not None:
@@ -123,13 +114,54 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.target_cls_head = MODELS.build(target_cls_head)
         if situation_predict_head is not None:
             self.situation_predict_head = MODELS.build(situation_predict_head)
-        
         self.qa_head = MODELS.build(qa_head)
         
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.coord_type = coord_type
         self.voxel_size = voxel_size
+        
+        # --- New arguments for TGMF ---
+        self.tgmf_mode = tgmf_mode
+        self.tgmf_redundancy_weight = tgmf_redundancy_weight
+        self.tgmf_temperature = tgmf_temperature
+        
+        # --- New arguments for GGD ---
+        Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
+        # Define D_fus (target fusion dimension, e.g., hidden size of fusion_encoder)
+        D_fus = self.fusion_encoder.config.hidden_size
+        self.project_3d = nn.Sequential(
+            nn.Linear(Dp, D_fus),
+            nn.LayerNorm(D_fus)
+        )
+        
+        if self.use_2d: # whether to use 2D multi-view images
+            self.backbone = MODELS.build(backbone)
+            
+            Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
+            # projection for raw 2D features
+            self.project_2d_raw = nn.Sequential(
+                 nn.Linear(Di, D_fus),
+                 nn.LayerNorm(D_fus)
+            )
+            # projection for Text-Guided 2D features
+            self.project_2d_guided = nn.Sequential(
+                 nn.Linear(Di, D_fus),
+                 nn.LayerNorm(D_fus)
+            )
+            # This projects Z_t to G_t
+            self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
+                                                    nn.LayerNorm(self.fusion_encoder.config.hidden_size))
+            # This projects U_i to G_i
+            self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size),
+                                            nn.LayerNorm(self.fusion_encoder.config.hidden_size))
+            # Original ADVP -- we are conceptually replacing it
+            # self.fusion_map = VisionFusion(Dp, self.backbone.out_channels[-1], D_fus)
+            # # This visual_feat_map was likely for the *output* of fusion_map
+            # self.visual_feat_map = nn.Linear(D_fus, D_fus)
+        else:
+            self.visual_feat_map = nn.Linear(Dp, D_fus)
+        
     @property
     def with_backbone(self):
         """Whether the detector has a 2D backbone."""
@@ -218,6 +250,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         all_points_imgfeats = []
         img_feat_valid_flags = []
         points_imgfeats = []
+        raw_points_imgfeats = []
         
         # get the global token G_t from text_dict 
         text_global_token = text_dict.get('text_global_token', None) 
@@ -266,8 +299,28 @@ class MultiViewVLMBase3DQA(BaseModel):
             all_extrinsics.append(img.new_tensor(np.array(proj_mat['extrinsic']))) # n_views, 4, 4
             
             proj_mat = torch.stack(projection) # n_views, 4, 4
+
             # TGMF happens here
-            points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            # points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            #     img_meta,
+            #     img_features=img_features[-1][idx], # sample the last feature level
+            #     points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
+            #     views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
+            #     voxel_size=self.voxel_size,
+            #     proj_mat=proj_mat, # projects 3D points to 2D image plane
+            #     coord_type=self.coord_type,
+            #     img_scale_factor=img_scale_factor,
+            #     img_crop_offset=img_crop_offset,
+            #     img_flip=img_flip,
+            #     img_pad_shape=img.shape[-2:],
+            #     img_shape=img_meta['img_shape'][:2],
+            #     aligned=False,
+            #     return_valid_flag=True,
+            #     text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
+            #     img_features_for_att=img_features_for_att[idx])
+            
+            # Enhanced TGMF happens here to extract the text guided image features F_2d_text
+            points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = enhanced_batch_point_sample_in_visible(# (N, C), (N,)
                 img_meta,
                 img_features=img_features[-1][idx], # sample the last feature level
                 points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
@@ -283,27 +336,70 @@ class MultiViewVLMBase3DQA(BaseModel):
                 aligned=False,
                 return_valid_flag=True,
                 text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
-                img_features_for_att=img_features_for_att[idx])
+                img_features_for_att=img_features_for_att[idx], 
+                mode=self.tgmf_mode,
+                redundancy_weight=self.tgmf_redundancy_weight,
+                temperature=self.tgmf_temperature)
+            
+            # extract the raw visible image features
+            raw_points_imgfeat, _, _ = batch_point_sample_in_visible(# (N, C), (N,)
+                img_meta,
+                img_features=img_features[-1][idx], # sample the last feature level
+                points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
+                views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
+                voxel_size=self.voxel_size,
+                proj_mat=proj_mat, # projects 3D points to 2D image plane
+                coord_type=self.coord_type,
+                img_scale_factor=img_scale_factor,
+                img_crop_offset=img_crop_offset,
+                img_flip=img_flip,
+                img_pad_shape=img.shape[-2:],
+                img_shape=img_meta['img_shape'][:2],
+                aligned=False,
+                return_valid_flag=True,
+                text_global_features_for_att=None, # no attention mechanism for raw features
+                img_features_for_att=None, # no attention mechanism for raw features
+                )
+            
+            
             
             # print(f"points_imgfeat shape: {points_imgfeat.shape}") # [Np, Di] = [1024, 1024]
             
             points_imgfeats.append(points_imgfeat)  # all sample
+            raw_points_imgfeats.append(raw_points_imgfeat) # all sample
             img_feat_valid_flags.append(img_feat_valid_flag) # last_level
 
         points_imgfeats = torch.stack(points_imgfeats) # B, Np, D_i
-        print(f"points_imgfeats shape: {points_imgfeats.shape}") # [B, Np, Di] = [12, 1024, 1024]
+        raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, Np, D_i
+        # print(f"points_imgfeats shape: {points_imgfeats.shape}") # [B, Np, Di] = [12, 1024, 1024]
         img_feat_valid_flags = torch.stack(img_feat_valid_flags) # B, Np
         # print(f"img_feat_valid_flags shape: {img_feat_valid_flags.shape}") # [B, Np] = [12, 1024]
         all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device) # B, n_views, 4, 4
         # feat_dict['fp_features'][-1] is the last feature level of the 3D backbone [B, Dp, Np], with transpose [B, Np, Dp]
         # points_imgfeats is the sampled image features from TGMF [B, Np, Di]
-        feat_dict['fp_features'][-1] = self.fusion_map(feat_dict['fp_features'][-1].transpose(1,2),points_imgfeats).transpose(1,2) # B, C, N
-        print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
+        # feat_dict['fp_features'][-1] = self.fusion_map(feat_dict['fp_features'][-1].transpose(1,2),points_imgfeats).transpose(1,2) # B, C, N
+        # print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
+        
+        # 1. get 3d features
+        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous() # [B, Np, Dp]
+        F_3d = self.project_3d(points_feat) # [B, Np, D_fusion]
+        
+        # 2. get projected raw 2d features for distillation
+        F_2d_raw = self.project_2d_raw(raw_points_imgfeats) # [B, Np, D_fusion]
+        
+        # get the projected text guided image features
+        F_2d_text_guided = self.project_2d_guided(points_imgfeats) # [B, Np, D_fusion]
+        
+        # store the features in feat_dict for loss method and subsequent processing
+        feat_dict['F_3d'] = F_3d
+        feat_dict['F_2d_raw'] = F_2d_raw
+        feat_dict['F_2d_text_guided'] = F_2d_text_guided
+        feat_dict['P_xyz'] = feat_dict['fp_xyz'][-1] # pass coordinates of the last feature level
          
         # Stop execution after debugging
-        import sys
-        print("Stopping execution for debugging purposes")
-        sys.exit("Debug complete - terminating execution")
+        # import sys
+        # print("Stopping execution for debugging purposes")
+        # sys.exit("Debug complete - terminating execution")
         
         return feat_dict
     
