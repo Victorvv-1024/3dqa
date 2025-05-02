@@ -18,6 +18,9 @@ from embodiedqa.structures.bbox_3d import get_proj_mat_by_coord_type
 from embodiedqa.utils import ConfigType, OptConfigType
 from embodiedqa.utils.typing_config import (ForwardResults, InstanceList,
                                               OptSampleList, SampleList)
+from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints, estimate_normals, improved_vccs_superpoints
+import open3d as o3d
+import os
 from .vision_fusion import VisionFusion
 
 class PositionEmbeddingLearned(BaseModule):
@@ -215,8 +218,19 @@ class MultiViewVLMBase3DQA(BaseModel):
         # print(f"feat_dict['fp_features'] shape: {feat_dict['fp_features'][-1].shape}") 
         # In paper, the framework is Np x Dp --> likely to be feat_dict['fp_features'][-1].transpose(1,2) --> [B, Np, Dp]
         
+        if 'fp_indices' not in feat_dict or not feat_dict['fp_indices']:
+            raise ValueError("PointNet+++ backbone must return 'fp_indices' in feat_dict.")
+        
+        feat_dict['original_stack_points'] = stack_points
+        feat_dict['last_fp_indices'] = feat_dict['fp_indices'][-1] # [B, Np] = [12, 1024]
+        feat_dict['P_xyz'] = feat_dict['fp_xyz'][-1] # [B, Np, 3] = [12, 1024, 3]
+        
         if not self.use_2d:
-            # then no TGMF and ADVP
+            # Project 3D features if only using 3D
+            points_feat = feat_dict['fp_features'][-1].transpose(1, 2).contiguous() # [B, Np, Dp]
+            F_3d = self.project_3d(points_feat) # [B, Np, D_fusion]
+            feat_dict['F_3d'] = F_3d
+            # Note: F_2d_raw and F_2d_text_guided won't exist here
             return feat_dict
         
         # Multi-view 2D Images Processing
@@ -394,7 +408,29 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['F_3d'] = F_3d
         feat_dict['F_2d_raw'] = F_2d_raw
         feat_dict['F_2d_text_guided'] = F_2d_text_guided
-        feat_dict['P_xyz'] = feat_dict['fp_xyz'][-1] # pass coordinates of the last feature level
+        
+        self.debug_visualize_superpoints(feat_dict, batch_idx=0)
+        
+        # Compute superpoints on-the-fly for each batch item
+        batch_superpoints = []
+        for b in range(F_3d.shape[0]):
+            # Use point coordinates for this batch item
+            points_xyz = feat_dict['P_xyz'][b]  # Shape [N, 3]
+            
+            # Compute superpoints using MinkowskiEngine's fast voxel hash
+            superpoints = compute_superpoints_me_voxel_hash(
+                points_xyz, 
+                voxel_size=self.voxel_size * 3  # Typically use larger size for superpoints
+            )
+            
+            batch_superpoints.append(superpoints)
+        # Stack superpoints if all batch items have valid superpoints
+        if all(sp is not None for sp in batch_superpoints):
+            feat_dict['superpoints'] = torch.stack(batch_superpoints)
+        else:
+            # Handle case where superpoint computation failed for some batch items
+            feat_dict['superpoints'] = None
+            print("Warning: Superpoint computation failed for some batch items")
          
         # Stop execution after debugging
         # import sys
@@ -521,6 +557,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         Returns:
             dict: A dictionary of loss components.
         """
+        
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
 
@@ -546,6 +583,13 @@ class MultiViewVLMBase3DQA(BaseModel):
                                      ret_fusion_feat=True,
                                      batch_data_samples=batch_data_samples)
         losses.update(qa_losses)
+        
+        if feat_dict.get('superpoints') is not None:
+            ggd_loss = self.compute_ggd_loss(
+                feat_dict['F_3d'],
+                feat_dict['F_2d_raw'],
+                feat_dict['superpoints'],)
+            losses.update(ggd_loss)
         
         if self.with_target_bbox_head:
             ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
@@ -745,3 +789,225 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances_3d = data_instances_3d[i]
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
+    
+    # --- Add for geometry guided distillation ---
+    def compute_geometry_guided_distillation_loss(self, features_3d, features_2d, superpoints):
+        """
+        Compute Geometry Guided Distillation loss using on-the-fly superpoints
+        
+        Args:
+            features_3d: [B, N, C1] tensor of 3D features
+            features_2d: [B, N, C2] tensor of 2D features 
+            superpoints: [B, N] tensor of superpoint IDs for each point
+            
+        Returns:
+            dict: Loss dictionary with point-level and superpoint-level losses
+        """
+        batch_size = features_3d.shape[0]
+        losses = {}
+        
+        batch_point_loss = 0
+        batch_sp_loss = 0
+        
+        for b in range(batch_size):
+            # Point-level distillation loss (same as in OpenScene)
+            f_3d_norm = F.normalize(features_3d[b], p=2, dim=1)
+            f_2d_norm = F.normalize(features_2d[b], p=2, dim=1)
+            point_loss = 1 - F.cosine_similarity(f_3d_norm, f_2d_norm, dim=1).mean()
+            batch_point_loss += point_loss
+            
+            # Superpoint-level distillation loss
+            sp_ids = superpoints[b]
+            unique_sp_ids = torch.unique(sp_ids)
+            
+            sp_3d_features = []
+            sp_2d_features = []
+            
+            for sp_id in unique_sp_ids:
+                # Create mask for points in this superpoint
+                mask = (sp_ids == sp_id)
+                
+                # Skip superpoints with too few points (optional)
+                if mask.sum() < 5:
+                    continue
+                    
+                # Compute mean features for this superpoint
+                sp_3d = features_3d[b][mask].mean(dim=0)
+                sp_2d = features_2d[b][mask].mean(dim=0)
+                
+                sp_3d_features.append(sp_3d)
+                sp_2d_features.append(sp_2d)
+            
+            if len(sp_3d_features) > 0:
+                # Stack features
+                sp_3d_features = torch.stack(sp_3d_features)
+                sp_2d_features = torch.stack(sp_2d_features)
+                
+                # Normalize features
+                sp_3d_features = F.normalize(sp_3d_features, p=2, dim=1)
+                sp_2d_features = F.normalize(sp_2d_features, p=2, dim=1)
+                
+                # Compute superpoint-level loss
+                sp_loss = 1 - F.cosine_similarity(sp_3d_features, sp_2d_features, dim=1).mean()
+                batch_sp_loss += sp_loss
+        
+        # Average losses over batch size
+        losses['loss_point_distill'] = batch_point_loss / batch_size
+        losses['loss_superpoint_distill'] = batch_sp_loss / batch_size
+        losses['loss_ggd_total'] = losses['loss_point_distill'] + losses['loss_superpoint_distill']
+        
+        return losses
+    
+    
+    # --- For debugging purposes ---
+    # ... existing code ...
+    @torch.no_grad()
+    def debug_visualize_superpoints(self, feat_dict, batch_idx=0, output_dir="superpoint_debug"):
+        """
+        Computes and visualizes superpoints using VCCS on the ORIGINAL INPUT points.
+        """
+        print("\n==== DEBUGGING SUPERPOINT VISUALIZATION (VCCS on Original Points) ====")
+        os.makedirs(output_dir, exist_ok=True)
+        start_time = time.time()
+
+        # --- Get Original Input Data for the specified sample ---
+        # We now primarily need the original points
+        original_stack_points = feat_dict.get('original_stack_points', None) # Original input points [B, N, 6]
+
+        if original_stack_points is None:
+            print("Error: 'original_stack_points' not found in feat_dict.")
+            print("Ensure it's stored in extract_feat.")
+            return
+
+        # Select the specific sample from the batch
+        original_points_sample = original_stack_points[batch_idx].detach() # [N, 6] (assuming XYZRGB)
+        points_xyz_original = original_points_sample[:, :3].cpu() # Use CPU for potentially large data [N, 3]
+        num_original_points = points_xyz_original.shape[0]
+        dev = original_stack_points.device # Get device for potential GPU usage if needed later
+
+        print(f"Processing original point cloud with {num_original_points} points.")
+
+        # --- Get Original Colors ---
+        if original_points_sample.shape[1] >= 6: # Check if color exists
+            point_colors_original = original_points_sample[:, 3:6].float() # [N, 3]
+            # Normalize colors if they are in 0-255 range
+            if point_colors_original.max() > 1.0:
+                print("Normalizing original colors (assuming range 0-255).")
+                point_colors_original = point_colors_original / 255.0
+            point_colors_original = point_colors_original.cpu() # Move colors to CPU
+            print("Using original colors for VCCS input.")
+        else:
+            print("Warning: Original points do not have expected color channels (>=6). Using random colors for VCCS calculation.")
+            point_colors_original = torch.rand_like(points_xyz_original).cpu() # [N, 3] on CPU
+
+        # --- Estimate Normals for Original Points ---
+        # This can be slow for large point clouds!
+        print("Estimating normals for original points (this might take time)...")
+        t0 = time.time()
+        # Normal estimation often works better on CPU for stability with Open3D, but check device compatibility
+        points_normals_original = estimate_normals(points_xyz_original) # Input is CPU tensor
+        points_normals_original = points_normals_original.cpu() # Ensure normals are on CPU
+        print(f"Normals estimated. ({time.time() - t0:.2f}s)")
+
+        # --- Compute Superpoints using VCCS on Original Points ---
+        # Using CPU for VCCS computation due to potentially large N and KDTree implementation
+        # If performance is critical and GPU memory allows, parts could be moved to GPU.
+        vccs_device = torch.device('cpu')
+        print(f"Using device {vccs_device} for VCCS computation.")
+
+        vccs_voxel_size = 0.02
+        vccs_seed_spacing = 0.5 # Keep paper's params, may need tuning for specific scenes
+        vccs_search_radius = 0.5
+        vccs_k_neighbors = 27
+        vccs_weights = (0.2, 0.4, 1.0) # wc, ws, wn
+
+        print(f"Computing VCCS superpoints with: voxel_size={vccs_voxel_size}, seed_spacing={vccs_seed_spacing}, search_radius={vccs_search_radius}")
+        t0 = time.time()
+        superpoint_ids_cpu = compute_vccs_superpoints(
+            points_xyz_original.to(vccs_device),
+            point_colors_original.to(vccs_device),
+            points_normals_original.to(vccs_device),
+            voxel_size=vccs_voxel_size,
+            seed_spacing=vccs_seed_spacing,
+            search_radius=vccs_search_radius,
+            k_neighbors=vccs_k_neighbors,
+            weights=vccs_weights,
+            device=vccs_device # Pass the chosen device
+        ).cpu() # Ensure result is on CPU
+        print(f"VCCS Superpoint generation complete. ({time.time() - t0:.2f}s)")
+
+
+        # --- Analyze Superpoint Statistics (on CPU) ---
+        if superpoint_ids_cpu is not None and (superpoint_ids_cpu != -1).any():
+            valid_mask_stat = (superpoint_ids_cpu != -1)
+            unique_ids, counts = torch.unique(superpoint_ids_cpu[valid_mask_stat], return_counts=True)
+            num_superpoints = len(unique_ids)
+            total_points_in_superpoints = valid_mask_stat.sum().item()
+            print(f"Superpoint size statistics for VCCS (on original points):")
+            print(f"  Total points processed: {num_original_points}")
+            print(f"  Points assigned to superpoints: {total_points_in_superpoints}")
+            print(f"  Number of superpoints: {num_superpoints}")
+
+            if num_superpoints > 0:
+                counts_cpu = counts.cpu() # Ensure counts are on CPU for stats
+                print(f"  Min size: {counts_cpu.min().item()}")
+                print(f"  Max size: {counts_cpu.max().item()}")
+                print(f"  Mean size: {counts_cpu.float().mean().item():.2f}")
+                # Re-add median calculation safely
+                try:
+                    median_result = torch.median(counts_cpu)
+                    median_value = median_result.values
+                    print(f"  Median size: {median_value.item():.2f}")
+                except Exception as e:
+                    print(f"  Could not calculate median: {e}")
+
+
+                # --- Create Visualization (Color original points by Superpoint ID) ---
+                print("Generating visualization...")
+                color_map = torch.rand(num_superpoints, 3).cpu()
+                id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
+
+                point_colors_viz = torch.zeros_like(points_xyz_original).cpu() # [N, 3] on CPU
+
+                valid_mask_viz = (superpoint_ids_cpu != -1) # CPU
+
+                if valid_mask_viz.any():
+                    valid_sp_ids = superpoint_ids_cpu[valid_mask_viz] # CPU
+                    if id_to_map_idx:
+                        map_indices = torch.tensor([id_to_map_idx.get(sp_id.item(), -1) for sp_id in valid_sp_ids], dtype=torch.long).cpu()
+                    else:
+                        map_indices = torch.tensor([], dtype=torch.long).cpu()
+
+                    if map_indices.numel() > 0:
+                        valid_map_mask = (map_indices != -1) # CPU
+                        final_assignment_indices = torch.where(valid_mask_viz)[0][valid_map_mask]
+                        color_map_indices = map_indices[valid_map_mask]
+                        if final_assignment_indices.numel() > 0:
+                            point_colors_viz[final_assignment_indices] = color_map[color_map_indices]
+                    else:
+                        print("Warning: No valid superpoint IDs could be mapped to colors.")
+                else:
+                    print("Warning: No points assigned to valid superpoints.")
+
+                # Create Open3D point cloud using ORIGINAL points and superpoint colors
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy()) # Use original XYZ
+                pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.float().numpy()) # Use superpoint colors
+
+                # Save the point cloud
+                output_filename = os.path.join(output_dir, f"vccs_superpoints_original_batch{batch_idx}.ply")
+                o3d.io.write_point_cloud(output_filename, pcd)
+                print(f"Saved VCCS visualization (original points) to: {output_filename}")
+
+            else:
+                print("No valid superpoints found to visualize.")
+        else:
+            print("Superpoint computation failed or resulted in no assignments.")
+
+        total_debug_time = time.time() - start_time
+        print(f"==== END SUPERPOINT VISUALIZATION (Original Points) ==== ({total_debug_time:.2f}s)\n")
+        # Optional: Exit after debugging
+        import sys
+        sys.exit("Debug complete - terminating execution")
+
+# ... rest of the class ...
