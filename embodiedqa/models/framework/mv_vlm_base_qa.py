@@ -864,66 +864,62 @@ class MultiViewVLMBase3DQA(BaseModel):
     @torch.no_grad()
     def debug_visualize_superpoints(self, feat_dict, batch_idx=0, output_dir="superpoint_debug"):
         """
-        Computes and visualizes superpoints using VCCS on the ORIGINAL INPUT points.
+        Computes and visualizes superpoints using both the original and improved VCCS methods.
+        
+        Args:
+            feat_dict: Dictionary containing feature information
+            batch_idx: Index in the batch to process
+            output_dir: Directory for saving visualization outputs
         """
-        print("\n==== DEBUGGING SUPERPOINT VISUALIZATION (VCCS on Original Points) ====")
+        print("\n==== DEBUGGING SUPERPOINT VISUALIZATION ====")
         os.makedirs(output_dir, exist_ok=True)
         start_time = time.time()
 
-        # --- Get Original Input Data for the specified sample ---
-        # We now primarily need the original points
-        original_stack_points = feat_dict.get('original_stack_points', None) # Original input points [B, N, 6]
-
+        # --- Get Original Input Data ---
+        original_stack_points = feat_dict.get('original_stack_points', None)
         if original_stack_points is None:
             print("Error: 'original_stack_points' not found in feat_dict.")
-            print("Ensure it's stored in extract_feat.")
             return
 
-        # Select the specific sample from the batch
-        original_points_sample = original_stack_points[batch_idx].detach() # [N, 6] (assuming XYZRGB)
-        points_xyz_original = original_points_sample[:, :3].cpu() # Use CPU for potentially large data [N, 3]
+        # Get points for the specified batch
+        original_points_sample = original_stack_points[batch_idx].detach()
+        points_xyz_original = original_points_sample[:, :3].cpu()
         num_original_points = points_xyz_original.shape[0]
-        dev = original_stack_points.device # Get device for potential GPU usage if needed later
-
+        
         print(f"Processing original point cloud with {num_original_points} points.")
 
         # --- Get Original Colors ---
-        if original_points_sample.shape[1] >= 6: # Check if color exists
-            point_colors_original = original_points_sample[:, 3:6].float() # [N, 3]
-            # Normalize colors if they are in 0-255 range
+        if original_points_sample.shape[1] >= 6:
+            point_colors_original = original_points_sample[:, 3:6].float()
             if point_colors_original.max() > 1.0:
                 print("Normalizing original colors (assuming range 0-255).")
                 point_colors_original = point_colors_original / 255.0
-            point_colors_original = point_colors_original.cpu() # Move colors to CPU
-            print("Using original colors for VCCS input.")
+            point_colors_original = point_colors_original.cpu()
         else:
-            print("Warning: Original points do not have expected color channels (>=6). Using random colors for VCCS calculation.")
-            point_colors_original = torch.rand_like(points_xyz_original).cpu() # [N, 3] on CPU
+            print("Warning: Using random colors for VCCS calculation.")
+            point_colors_original = torch.rand_like(points_xyz_original).cpu()
 
-        # --- Estimate Normals for Original Points ---
-        # This can be slow for large point clouds!
-        print("Estimating normals for original points (this might take time)...")
+        # --- Estimate Normals ---
+        print("Estimating normals...")
         t0 = time.time()
-        # Normal estimation often works better on CPU for stability with Open3D, but check device compatibility
-        points_normals_original = estimate_normals(points_xyz_original) # Input is CPU tensor
-        points_normals_original = points_normals_original.cpu() # Ensure normals are on CPU
+        points_normals_original = estimate_normals(points_xyz_original)
         print(f"Normals estimated. ({time.time() - t0:.2f}s)")
 
-        # --- Compute Superpoints using VCCS on Original Points ---
-        # Using CPU for VCCS computation due to potentially large N and KDTree implementation
-        # If performance is critical and GPU memory allows, parts could be moved to GPU.
-        vccs_device = torch.device('cpu')
-        print(f"Using device {vccs_device} for VCCS computation.")
-
+        # --- Common VCCS Parameters ---
         vccs_voxel_size = 0.02
-        vccs_seed_spacing = 0.5 # Keep paper's params, may need tuning for specific scenes
+        vccs_seed_spacing = 0.5
         vccs_search_radius = 0.5
         vccs_k_neighbors = 27
-        vccs_weights = (0.2, 0.4, 1.0) # wc, ws, wn
-
-        print(f"Computing VCCS superpoints with: voxel_size={vccs_voxel_size}, seed_spacing={vccs_seed_spacing}, search_radius={vccs_search_radius}")
+        vccs_weights = (0.2, 0.4, 1.0)  # wc, ws, wn
+        vccs_device = torch.device('cpu')
+        
+        # --- Generate Superpoints with Original Method ---
+        print("\n=== Running Original VCCS Implementation ===")
         t0 = time.time()
-        superpoint_ids_cpu = compute_vccs_superpoints(
+        # Import the function directly from the module
+        from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints
+        
+        original_superpoint_ids = compute_vccs_superpoints(
             points_xyz_original.to(vccs_device),
             point_colors_original.to(vccs_device),
             points_normals_original.to(vccs_device),
@@ -932,81 +928,140 @@ class MultiViewVLMBase3DQA(BaseModel):
             search_radius=vccs_search_radius,
             k_neighbors=vccs_k_neighbors,
             weights=vccs_weights,
-            device=vccs_device # Pass the chosen device
-        ).cpu() # Ensure result is on CPU
-        print(f"VCCS Superpoint generation complete. ({time.time() - t0:.2f}s)")
-
-
-        # --- Analyze Superpoint Statistics (on CPU) ---
-        if superpoint_ids_cpu is not None and (superpoint_ids_cpu != -1).any():
-            valid_mask_stat = (superpoint_ids_cpu != -1)
-            unique_ids, counts = torch.unique(superpoint_ids_cpu[valid_mask_stat], return_counts=True)
+            device=vccs_device
+        ).cpu()
+        
+        print(f"Original VCCS completed in {time.time() - t0:.2f}s")
+        
+        # --- Analyze Original Superpoints ---
+        if original_superpoint_ids is not None and (original_superpoint_ids != -1).any():
+            valid_mask = (original_superpoint_ids != -1)
+            unique_ids, counts = torch.unique(original_superpoint_ids[valid_mask], return_counts=True)
             num_superpoints = len(unique_ids)
-            total_points_in_superpoints = valid_mask_stat.sum().item()
-            print(f"Superpoint size statistics for VCCS (on original points):")
-            print(f"  Total points processed: {num_original_points}")
-            print(f"  Points assigned to superpoints: {total_points_in_superpoints}")
+            total_points_assigned = valid_mask.sum().item()
+            
+            print(f"Original VCCS Statistics:")
+            print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
             print(f"  Number of superpoints: {num_superpoints}")
-
+            
             if num_superpoints > 0:
-                counts_cpu = counts.cpu() # Ensure counts are on CPU for stats
-                print(f"  Min size: {counts_cpu.min().item()}")
-                print(f"  Max size: {counts_cpu.max().item()}")
-                print(f"  Mean size: {counts_cpu.float().mean().item():.2f}")
-                # Re-add median calculation safely
-                try:
-                    median_result = torch.median(counts_cpu)
-                    median_value = median_result.values
-                    print(f"  Median size: {median_value.item():.2f}")
-                except Exception as e:
-                    print(f"  Could not calculate median: {e}")
-
-
-                # --- Create Visualization (Color original points by Superpoint ID) ---
-                print("Generating visualization...")
-                color_map = torch.rand(num_superpoints, 3).cpu()
+                print(f"  Min size: {counts.min().item()}")
+                print(f"  Max size: {counts.max().item()}")
+                print(f"  Mean size: {counts.float().mean().item():.2f}")
+                
+                # Visualize original superpoints
+                color_map = torch.rand(num_superpoints, 3)
                 id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
-
-                point_colors_viz = torch.zeros_like(points_xyz_original).cpu() # [N, 3] on CPU
-
-                valid_mask_viz = (superpoint_ids_cpu != -1) # CPU
-
-                if valid_mask_viz.any():
-                    valid_sp_ids = superpoint_ids_cpu[valid_mask_viz] # CPU
-                    if id_to_map_idx:
-                        map_indices = torch.tensor([id_to_map_idx.get(sp_id.item(), -1) for sp_id in valid_sp_ids], dtype=torch.long).cpu()
-                    else:
-                        map_indices = torch.tensor([], dtype=torch.long).cpu()
-
-                    if map_indices.numel() > 0:
-                        valid_map_mask = (map_indices != -1) # CPU
-                        final_assignment_indices = torch.where(valid_mask_viz)[0][valid_map_mask]
-                        color_map_indices = map_indices[valid_map_mask]
-                        if final_assignment_indices.numel() > 0:
-                            point_colors_viz[final_assignment_indices] = color_map[color_map_indices]
-                    else:
-                        print("Warning: No valid superpoint IDs could be mapped to colors.")
-                else:
-                    print("Warning: No points assigned to valid superpoints.")
-
-                # Create Open3D point cloud using ORIGINAL points and superpoint colors
+                
+                point_colors_viz = torch.zeros_like(points_xyz_original)
+                
+                for i in range(num_original_points):
+                    sp_id = original_superpoint_ids[i].item()
+                    if sp_id != -1:
+                        color_idx = id_to_map_idx.get(sp_id, 0)
+                        point_colors_viz[i] = color_map[color_idx]
+                
+                # Save colored point cloud
                 pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy()) # Use original XYZ
-                pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.float().numpy()) # Use superpoint colors
-
-                # Save the point cloud
-                output_filename = os.path.join(output_dir, f"vccs_superpoints_original_batch{batch_idx}.ply")
-                o3d.io.write_point_cloud(output_filename, pcd)
-                print(f"Saved VCCS visualization (original points) to: {output_filename}")
-
-            else:
-                print("No valid superpoints found to visualize.")
-        else:
-            print("Superpoint computation failed or resulted in no assignments.")
-
+                pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+                pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
+                
+                output_path = os.path.join(output_dir, f"original_vccs_batch{batch_idx}.ply")
+                o3d.io.write_point_cloud(output_path, pcd)
+                print(f"Saved visualization to: {output_path}")
+        
+        # --- Generate Superpoints with Improved Method ---
+        print("\n=== Running Improved VCCS Implementation ===")
+        t0 = time.time()
+        # Import the improved function
+        from embodiedqa.utils.superpoint_segmentation import improved_vccs_superpoints
+        
+        improved_superpoint_ids = improved_vccs_superpoints(
+            points_xyz_original.to(vccs_device),
+            point_colors_original.to(vccs_device),
+            points_normals_original.to(vccs_device),
+            voxel_size=vccs_voxel_size,
+            seed_spacing=vccs_seed_spacing,
+            search_radius=vccs_search_radius,
+            k_neighbors=vccs_k_neighbors,
+            weights=vccs_weights,
+            device=vccs_device
+        ).cpu()
+        
+        print(f"Improved VCCS completed in {time.time() - t0:.2f}s")
+        
+        # --- Analyze Improved Superpoints ---
+        if improved_superpoint_ids is not None and (improved_superpoint_ids != -1).any():
+            valid_mask = (improved_superpoint_ids != -1)
+            unique_ids, counts = torch.unique(improved_superpoint_ids[valid_mask], return_counts=True)
+            num_superpoints = len(unique_ids)
+            total_points_assigned = valid_mask.sum().item()
+            
+            print(f"Improved VCCS Statistics:")
+            print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
+            print(f"  Number of superpoints: {num_superpoints}")
+            
+            if num_superpoints > 0:
+                print(f"  Min size: {counts.min().item()}")
+                print(f"  Max size: {counts.max().item()}")
+                print(f"  Mean size: {counts.float().mean().item():.2f}")
+                
+                # Visualize improved superpoints
+                color_map = torch.rand(num_superpoints, 3)
+                id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
+                
+                point_colors_viz = torch.zeros_like(points_xyz_original)
+                
+                for i in range(num_original_points):
+                    sp_id = improved_superpoint_ids[i].item()
+                    if sp_id != -1:
+                        color_idx = id_to_map_idx.get(sp_id, 0)
+                        point_colors_viz[i] = color_map[color_idx]
+                
+                # Save colored point cloud
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+                pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
+                
+                output_path = os.path.join(output_dir, f"improved_vccs_batch{batch_idx}.ply")
+                o3d.io.write_point_cloud(output_path, pcd)
+                print(f"Saved visualization to: {output_path}")
+        
+        # --- Create Difference Visualization ---
+        if original_superpoint_ids is not None and improved_superpoint_ids is not None:
+            print("\n=== Creating Difference Visualization ===")
+            
+            # Red: Only in original, Green: Only in improved, Blue: In both
+            diff_colors = torch.zeros_like(points_xyz_original)
+            
+            original_valid = (original_superpoint_ids != -1)
+            improved_valid = (improved_superpoint_ids != -1)
+            
+            # Both assigned (blue)
+            both_mask = original_valid & improved_valid
+            diff_colors[both_mask] = torch.tensor([0.0, 0.0, 1.0])
+            
+            # Only original (red)
+            only_original = original_valid & ~improved_valid
+            diff_colors[only_original] = torch.tensor([1.0, 0.0, 0.0])
+            
+            # Only improved (green)
+            only_improved = ~original_valid & improved_valid
+            diff_colors[only_improved] = torch.tensor([0.0, 1.0, 0.0])
+            
+            # Save comparison
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+            pcd.colors = o3d.utility.Vector3dVector(diff_colors.numpy())
+            
+            output_path = os.path.join(output_dir, f"vccs_comparison_batch{batch_idx}.ply")
+            o3d.io.write_point_cloud(output_path, pcd)
+            print(f"Saved comparison visualization to: {output_path}")
+        
         total_debug_time = time.time() - start_time
-        print(f"==== END SUPERPOINT VISUALIZATION (Original Points) ==== ({total_debug_time:.2f}s)\n")
-        # Optional: Exit after debugging
+        print(f"\n==== SUPERPOINT VISUALIZATION COMPLETE ==== ({total_debug_time:.2f}s)")
+        
+        # Exit for debugging purposes
         import sys
         sys.exit("Debug complete - terminating execution")
 
