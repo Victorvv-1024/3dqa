@@ -865,6 +865,7 @@ class MultiViewVLMBase3DQA(BaseModel):
     def debug_visualize_superpoints(self, feat_dict, batch_idx=0, output_dir="superpoint_debug"):
         """
         Computes and visualizes superpoints using both the original and improved VCCS methods.
+        Also visualizes the original scene for comparison.
         
         Args:
             feat_dict: Dictionary containing feature information
@@ -874,6 +875,35 @@ class MultiViewVLMBase3DQA(BaseModel):
         print("\n==== DEBUGGING SUPERPOINT VISUALIZATION ====")
         os.makedirs(output_dir, exist_ok=True)
         start_time = time.time()
+
+        # --- Save Original RGB Images if Available ---
+        try:
+            # Try to get the original images from batch_inputs_dict
+            if hasattr(self, 'batch_inputs_dict') and 'imgs' in self.batch_inputs_dict:
+                imgs = self.batch_inputs_dict['imgs']
+                if len(imgs.shape) > 4:  # [B, M, C, H, W]
+                    # Multi-view case
+                    num_views = min(5, imgs.shape[1])  # Save up to 5 views to avoid too many files
+                    for view_idx in range(num_views):
+                        img = imgs[batch_idx, view_idx].cpu().permute(1, 2, 0).numpy()
+                        # Convert to uint8 if float
+                        if img.dtype != np.uint8:
+                            img = (img * 255).astype(np.uint8)
+                        output_img_path = os.path.join(output_dir, f"original_rgb_view{view_idx}_batch{batch_idx}.png")
+                        import cv2
+                        cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                        print(f"Saved original RGB image (view {view_idx}) to: {output_img_path}")
+                else:  # [B, C, H, W]
+                    # Single view case
+                    img = imgs[batch_idx].cpu().permute(1, 2, 0).numpy()
+                    if img.dtype != np.uint8:
+                        img = (img * 255).astype(np.uint8)
+                    output_img_path = os.path.join(output_dir, f"original_rgb_batch{batch_idx}.png")
+                    import cv2
+                    cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+                    print(f"Saved original RGB image to: {output_img_path}")
+        except Exception as e:
+            print(f"Could not save original RGB images: {e}")
 
         # --- Get Original Input Data ---
         original_stack_points = feat_dict.get('original_stack_points', None)
@@ -899,6 +929,15 @@ class MultiViewVLMBase3DQA(BaseModel):
             print("Warning: Using random colors for VCCS calculation.")
             point_colors_original = torch.rand_like(points_xyz_original).cpu()
 
+        # --- Save Original Point Cloud with RGB Colors ---
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+        pcd.colors = o3d.utility.Vector3dVector(point_colors_original.numpy())
+        
+        output_path = os.path.join(output_dir, f"original_rgb_point_cloud_batch{batch_idx}.ply")
+        o3d.io.write_point_cloud(output_path, pcd)
+        print(f"Saved original RGB point cloud to: {output_path}")
+
         # --- Estimate Normals ---
         print("Estimating normals...")
         t0 = time.time()
@@ -907,10 +946,10 @@ class MultiViewVLMBase3DQA(BaseModel):
 
         # --- Common VCCS Parameters ---
         vccs_voxel_size = 0.02
-        vccs_seed_spacing = 0.5
+        vccs_seed_spacing = 0.8 # 0.5 for original, 0.75 for improved
         vccs_search_radius = 0.5
         vccs_k_neighbors = 27
-        vccs_weights = (0.2, 0.4, 1.0)  # wc, ws, wn
+        vccs_weights = (0.2, 0.7, 1.0)  # wc, ws, wn default weights (0.2, 0.4, 1.0)
         vccs_device = torch.device('cpu')
         
         # --- Generate Superpoints with Original Method ---
@@ -925,8 +964,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             points_normals_original.to(vccs_device),
             voxel_size=vccs_voxel_size,
             seed_spacing=vccs_seed_spacing,
-            search_radius=vccs_search_radius,
-            k_neighbors=vccs_k_neighbors,
+            # search_radius=vccs_search_radius,
+            # k_neighbors=vccs_k_neighbors,
             weights=vccs_weights,
             device=vccs_device
         ).cpu()
@@ -1028,35 +1067,35 @@ class MultiViewVLMBase3DQA(BaseModel):
                 print(f"Saved visualization to: {output_path}")
         
         # --- Create Difference Visualization ---
-        if original_superpoint_ids is not None and improved_superpoint_ids is not None:
-            print("\n=== Creating Difference Visualization ===")
+        # if original_superpoint_ids is not None and improved_superpoint_ids is not None:
+        #     print("\n=== Creating Difference Visualization ===")
             
-            # Red: Only in original, Green: Only in improved, Blue: In both
-            diff_colors = torch.zeros_like(points_xyz_original)
+        #     # Red: Only in original, Green: Only in improved, Blue: In both
+        #     diff_colors = torch.zeros_like(points_xyz_original)
             
-            original_valid = (original_superpoint_ids != -1)
-            improved_valid = (improved_superpoint_ids != -1)
+        #     original_valid = (original_superpoint_ids != -1)
+        #     improved_valid = (improved_superpoint_ids != -1)
             
-            # Both assigned (blue)
-            both_mask = original_valid & improved_valid
-            diff_colors[both_mask] = torch.tensor([0.0, 0.0, 1.0])
+        #     # Both assigned (blue)
+        #     both_mask = original_valid & improved_valid
+        #     diff_colors[both_mask] = torch.tensor([0.0, 0.0, 1.0])
             
-            # Only original (red)
-            only_original = original_valid & ~improved_valid
-            diff_colors[only_original] = torch.tensor([1.0, 0.0, 0.0])
+        #     # Only original (red)
+        #     only_original = original_valid & ~improved_valid
+        #     diff_colors[only_original] = torch.tensor([1.0, 0.0, 0.0])
             
-            # Only improved (green)
-            only_improved = ~original_valid & improved_valid
-            diff_colors[only_improved] = torch.tensor([0.0, 1.0, 0.0])
+        #     # Only improved (green)
+        #     only_improved = ~original_valid & improved_valid
+        #     diff_colors[only_improved] = torch.tensor([0.0, 1.0, 0.0])
             
-            # Save comparison
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-            pcd.colors = o3d.utility.Vector3dVector(diff_colors.numpy())
+        #     # Save comparison
+        #     pcd = o3d.geometry.PointCloud()
+        #     pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+        #     pcd.colors = o3d.utility.Vector3dVector(diff_colors.numpy())
             
-            output_path = os.path.join(output_dir, f"vccs_comparison_batch{batch_idx}.ply")
-            o3d.io.write_point_cloud(output_path, pcd)
-            print(f"Saved comparison visualization to: {output_path}")
+        #     output_path = os.path.join(output_dir, f"vccs_comparison_batch{batch_idx}.ply")
+        #     o3d.io.write_point_cloud(output_path, pcd)
+        #     print(f"Saved comparison visualization to: {output_path}")
         
         total_debug_time = time.time() - start_time
         print(f"\n==== SUPERPOINT VISUALIZATION COMPLETE ==== ({total_debug_time:.2f}s)")

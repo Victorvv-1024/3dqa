@@ -50,7 +50,7 @@ def compute_vccs_superpoints(
     points_colors: torch.Tensor,   # Shape: [N, 3], assumed normalized 0-1
     points_normals: torch.Tensor,  # Shape: [N, 3], assumed unit vectors
     voxel_size: float = 0.02,     # Resolution of the fine voxel grid
-    seed_spacing: float = 0.75,    # Rseed for seeding & spatial normalization
+    seed_spacing: float = 0.5,    # Rseed for seeding & spatial normalization
     neighbor_voxel_search: bool = True, # Use voxel adjacency for neighbors
     neighbor_radius_search: float = 0.05,# Additional small radius search (set <=0 to disable)
     max_expand_dist: float = 1.0,      # Max distance D to allow adding to PQ
@@ -379,25 +379,33 @@ def improved_vccs_superpoints(
     points_colors: torch.Tensor,  # [N, 3] 
     points_normals: torch.Tensor = None,  # [N, 3]
     voxel_size: float = 0.02,
-    seed_spacing: float = 0.5,
+    seed_spacing: float = 0.75, # default 0.5
     search_radius: float = 0.5,
     k_neighbors: int = 27,
-    weights: tuple = (0.2, 0.4, 1.0),  # (wc, ws, wn)
-    device: torch.device = torch.device('cpu')
+    weights: tuple = (0.1, 0.7, 0.2),  # wc, ws, wn default (0.2, 0.4, 1.0)
+    device: torch.device = torch.device('cpu'),
+    update_repr_interval: int = 1000  # How often to update representatives
 ) -> torch.Tensor:
     """
-    Improved implementation of VCCS for creating superpoints aligned with GGSD paper.
+    Improved implementation of VCCS superpoints aligned with GGSD paper.
+    
+    This implementation includes:
+    1. Better seed selection based on voxel centers
+    2. Proper distance calculation following Equation A.1 from GGSD
+    3. Priority-based region growing with breadth-first approach
+    4. Proper handling of unassigned points using centroid-based assignment
     
     Args:
         points_xyz: Point coordinates
         points_colors: Point colors (normalized 0-1)
         points_normals: Point normals (optional, will be estimated if None)
         voxel_size: Resolution for voxel grid
-        seed_spacing: Minimum distance between seed points
+        seed_spacing: Minimum distance between seed points (Rseed in GGSD)
         search_radius: Radius for neighbor search during expansion
         k_neighbors: Maximum neighbors to consider during expansion
         weights: Tuple of (weight_color, weight_spatial, weight_normal)
         device: Computation device
+        update_repr_interval: How often to update representative points
         
     Returns:
         Tensor of shape [N] with integer IDs for each point's superpoint assignment
@@ -406,6 +414,8 @@ def improved_vccs_superpoints(
     from scipy.spatial import cKDTree
     import numpy as np
     import torch.nn.functional as F
+    
+    computation_start_time = time.time()
     
     # Move data to specified device
     points_xyz = points_xyz.to(device)
@@ -416,222 +426,280 @@ def improved_vccs_superpoints(
         points_normals = estimate_normals(points_xyz)
     points_normals = points_normals.to(device)
     
-    Np = points_xyz.shape[0]
-    superpoint_ids = torch.full((Np,), -1, dtype=torch.long, device=device)
+    # Ensure normals are normalized
+    points_normals = F.normalize(points_normals, p=2, dim=1)
     
-    # --- 1. Seed Selection via Voxel Downsampling ---
-    # As per GGSD, use voxel-based approach to select seeds
-    # We want seeds to be spaced according to seed_spacing parameter
-    voxel_seeds = torch.floor(points_xyz / seed_spacing)
-    unique_voxels, inverse_idx = torch.unique(voxel_seeds, dim=0, return_inverse=True)
+    N = points_xyz.shape[0]
+    print(f"Starting improved VCCS: N={N}, voxel_size={voxel_size}, seed_spacing={seed_spacing}")
     
-    # For each unique voxel, select one seed point (closest to voxel center)
-    num_seeds = len(unique_voxels)
-    seed_indices = []
-    
-    for v_idx in range(num_seeds):
-        # Find all points in this voxel
-        points_in_voxel = (inverse_idx == v_idx).nonzero().squeeze(-1)
+    if N == 0:
+        return torch.tensor([], dtype=torch.long)
         
-        if len(points_in_voxel) > 0:
-            # Find voxel center
-            voxel_center = (unique_voxels[v_idx] + 0.5) * seed_spacing
-            
-            # Find point closest to voxel center
-            points_pos = points_xyz[points_in_voxel]
-            distances = torch.sum((points_pos - voxel_center)**2, dim=1)
-            closest_idx = points_in_voxel[torch.argmin(distances)]
-            
-            seed_indices.append(closest_idx.item())
+    superpoint_ids = torch.full((N,), -1, dtype=torch.long, device=device)
+    current_superpoint_id = 0
     
-    # Convert to tensor
-    seed_indices = torch.tensor(seed_indices, dtype=torch.long, device=device)
+    # --- 1. Better Seed Selection Using Voxel Grid ---
+    # Use voxel grid with seed_spacing to select seeds (following GGSD)
+    xyz_min = torch.min(points_xyz, dim=0)[0]
+    points_xyz_shifted = points_xyz - xyz_min
+    seed_voxel_coords = torch.floor(points_xyz_shifted / seed_spacing).long()
+    
+    # Track processed seed voxels to avoid duplicates
+    processed_seed_voxels = set()
+    seed_indices_list = []
+    seed_voxel_coords_np = seed_voxel_coords.cpu().numpy()
+    
+    for i in range(N):
+        seed_voxel_key = tuple(seed_voxel_coords_np[i])
+        if seed_voxel_key not in processed_seed_voxels:
+            # Find center of voxel
+            voxel_center = (torch.tensor(seed_voxel_key, device=device) + 0.5) * seed_spacing + xyz_min
+            
+            # Find points in this voxel
+            voxel_mask = torch.all(seed_voxel_coords == torch.tensor(seed_voxel_key, device=device), dim=1)
+            voxel_points = torch.where(voxel_mask)[0]
+            
+            if len(voxel_points) > 0:
+                # Find point closest to voxel center
+                voxel_points_xyz = points_xyz[voxel_points]
+                dists = torch.sum((voxel_points_xyz - voxel_center)**2, dim=1)
+                closest_idx = voxel_points[torch.argmin(dists)]
+                seed_indices_list.append(closest_idx.item())
+                processed_seed_voxels.add(seed_voxel_key)
+    
+    seed_indices = torch.tensor(seed_indices_list, dtype=torch.long, device=device)
     num_seeds = len(seed_indices)
+    print(f"Selected {num_seeds} seed points using voxel grid approach")
     
     if num_seeds == 0:
         print("Warning: No seed points found. Using fallback seed selection.")
-        # Fallback to simple seed selection
-        seed_indices = torch.randperm(Np, device=device)[:min(Np//100 + 1, 100)]
+        seed_indices = torch.randperm(N, device=device)[:min(N//100 + 1, 100)]
         num_seeds = len(seed_indices)
+        print(f"Selected {num_seeds} fallback seed points")
     
-    print(f"Selected {num_seeds} seed points.")
+    if num_seeds == 0:
+        return torch.zeros((N,), dtype=torch.long)
     
     # --- 2. Build KDTree for Neighbor Search ---
     kdtree = cKDTree(points_xyz.cpu().numpy())
     
-    # --- 3. Initialize superpoints with seeds ---
-    for i, seed_idx in enumerate(seed_indices):
-        superpoint_ids[seed_idx] = i
+    # --- 3. Initialize Priority Queue and Assign Seeds ---
+    pq = []  # Global priority queue: (distance, point_idx, assigned_superpoint_id)
+    sp_id_to_seed_idx = {}  # Map superpoint ID to its seed idx
     
-    # --- 4. Priority-Based Region Growing ---
-    # Each seed initializes a superpoint
-    pqueues = [[] for _ in range(num_seeds)]
-    next_queues = [[] for _ in range(num_seeds)]
-    counter = 0  # For priority queue tiebreaking
+    # Initialize representative points
+    superpoint_repr_xyz = torch.zeros(num_seeds, 3, dtype=torch.float32, device=device)
+    superpoint_repr_color = torch.zeros(num_seeds, 3, dtype=torch.float32, device=device)
+    superpoint_repr_normal = torch.zeros(num_seeds, 3, dtype=torch.float32, device=device)
     
-    # Initialize priority queues with seed neighbors
-    wc, ws, wn = weights
-    spatial_norm_factor = 3 * (seed_spacing**2)  # As per GGSD Eq. A.1
+    # For representative updates (following the original implementation pattern)
+    superpoint_sums = torch.zeros(num_seeds, 9, dtype=torch.float64, device=device)  # x,y,z, r,g,b, nx,ny,nz
+    superpoint_counts = torch.zeros(num_seeds, dtype=torch.long, device=device)
     
-    # First expansion from seeds
-    for sp_id, seed_idx in enumerate(seed_indices):
+    # Spatial normalization factor from GGSD Equation A.1
+    spatial_norm_factor_sq = 3 * (seed_spacing**2)
+    if spatial_norm_factor_sq < 1e-9:
+        spatial_norm_factor_sq = 1.0
+    
+    # Helper function to calculate distance following GGSD Equation A.1
+    def calculate_distance(p_idx, s_idx):
+        p_xyz = points_xyz[p_idx]
+        p_color = points_colors[p_idx]
+        p_normal = points_normals[p_idx]
+        
+        r_xyz = superpoint_repr_xyz[s_idx]
+        r_color = superpoint_repr_color[s_idx]
+        r_normal = superpoint_repr_normal[s_idx]
+        
+        # Color distance
+        Dc = torch.linalg.norm(r_color - p_color)
+        
+        # Spatial distance (normalized by seed spacing)
+        Ds = torch.linalg.norm(r_xyz - p_xyz)
+        
+        # Normal distance (1 - cos similarity)
+        # Use normalized vectors for cosine similarity
+        n1 = F.normalize(r_normal, p=2, dim=0)
+        n2 = F.normalize(p_normal, p=2, dim=0)
+        cos_sim = torch.dot(n1, n2)
+        cos_sim = torch.clamp(cos_sim, -1.0, 1.0)
+        Dn = torch.sqrt(1.0 - cos_sim**2)  # Sine distance
+        
+        # Combined weighted distance (Equation A.1)
+        wc, ws, wn = weights
+        dist_sq = wc * (Dc**2) + ws * (Ds**2) / spatial_norm_factor_sq + wn * (Dn**2)
+        
+        return torch.sqrt(torch.clamp(dist_sq, min=0.0))
+    
+    # Assign seeds to superpoints and find initial neighbors
+    print("Initializing superpoints with seeds...")
+    for seed_idx_in_list, seed_idx in enumerate(seed_indices):
+        if superpoint_ids[seed_idx] != -1:
+            continue
+            
+        sp_id = current_superpoint_id
+        superpoint_ids[seed_idx] = sp_id
+        sp_id_to_seed_idx[sp_id] = seed_idx
+        current_superpoint_id += 1
+        
+        # Initialize representative with seed features
+        superpoint_repr_xyz[sp_id] = points_xyz[seed_idx]
+        superpoint_repr_color[sp_id] = points_colors[seed_idx]
+        superpoint_repr_normal[sp_id] = points_normals[seed_idx]
+        
+        # Initialize sums and counts for representative updates
+        superpoint_counts[sp_id] = 1
+        superpoint_sums[sp_id, 0:3] = points_xyz[seed_idx].double()
+        superpoint_sums[sp_id, 3:6] = points_colors[seed_idx].double()
+        superpoint_sums[sp_id, 6:9] = points_normals[seed_idx].double()
+        
         # Find neighbors of this seed
         neighbors = kdtree.query_ball_point(
-            points_xyz[seed_idx].cpu().numpy(), 
+            points_xyz[seed_idx].cpu().numpy(),
             r=search_radius
         )
         
         # Add neighbors to priority queue
-        seed_xyz = points_xyz[seed_idx]
-        seed_color = points_colors[seed_idx]
-        seed_normal = points_normals[seed_idx]
-        
         for neighbor_idx in neighbors:
-            if neighbor_idx == seed_idx.item() or superpoint_ids[neighbor_idx] != -1:
-                continue
-                
-            # Calculate distance as per GGSD Eq. A.1
-            neighbor_xyz = points_xyz[neighbor_idx]
-            neighbor_color = points_colors[neighbor_idx]
-            neighbor_normal = points_normals[neighbor_idx]
-            
-            # Color distance
-            Dc_sq = torch.sum((seed_color - neighbor_color)**2).item()
-            
-            # Spatial distance
-            Ds_sq = torch.sum((seed_xyz - neighbor_xyz)**2).item()
-            
-            # Normal distance (1 - cos similarity)
-            n1 = F.normalize(seed_normal, p=2, dim=0)
-            n2 = F.normalize(neighbor_normal, p=2, dim=0)
-            cos_sim = torch.dot(n1, n2).item()
-            cos_sim = max(-1.0, min(1.0, cos_sim))  # Clamp to avoid numerical issues
-            Dn_sq = (1 - cos_sim)**2
-            
-            # Combined distance using GGSD Eq. A.1
-            D_sq = wc*Dc_sq + ws*Ds_sq/spatial_norm_factor + wn*Dn_sq
-            D = np.sqrt(D_sq)
-            
-            counter += 1
-            heapq.heappush(pqueues[sp_id], (D, counter, neighbor_idx))
+            if neighbor_idx != seed_idx.item() and superpoint_ids[neighbor_idx] == -1:
+                dist = calculate_distance(neighbor_idx, sp_id)
+                heapq.heappush(pq, (dist.item(), neighbor_idx, sp_id))
     
-    # Breadth-first region growing with priority queues
-    iteration = 0
-    max_iterations = 1000  # Safety limit
+    # --- 4. Priority-Based Region Growing ---
+    print("Starting region growing...")
+    processed_count = current_superpoint_id
+    last_update_count = 0
+    expansion_start_time = time.time()
     
-    while iteration < max_iterations:
-        iteration += 1
-        active = False
+    while pq:
+        dist, point_idx, sp_id = heapq.heappop(pq)
         
-        # Process top item from each queue
-        for sp_id in range(num_seeds):
-            if not pqueues[sp_id]:
-                continue
-                
-            # Process all items in the current queue
-            while pqueues[sp_id]:
-                D, _, neighbor_idx = heapq.heappop(pqueues[sp_id])
-                
-                # Skip if already assigned
-                if superpoint_ids[neighbor_idx] != -1:
+        # Skip if already assigned
+        if superpoint_ids[point_idx] != -1:
+            continue
+            
+        # Assign to superpoint
+        superpoint_ids[point_idx] = sp_id
+        processed_count += 1
+        
+        # Update sums and counts for representative
+        superpoint_counts[sp_id] += 1
+        superpoint_sums[sp_id, 0:3] += points_xyz[point_idx].double()
+        superpoint_sums[sp_id, 3:6] += points_colors[point_idx].double()
+        
+        # Add normal carefully (check orientation)
+        seed_normal = superpoint_repr_normal[sp_id]
+        point_normal = points_normals[point_idx]
+        if torch.dot(seed_normal, point_normal) < 0:
+            superpoint_sums[sp_id, 6:9] += (-point_normal).double()
+        else:
+            superpoint_sums[sp_id, 6:9] += point_normal.double()
+        
+        # Periodic update of representatives
+        if update_repr_interval > 0 and (processed_count // update_repr_interval) > (last_update_count // update_repr_interval):
+            for sp_update_id in range(current_superpoint_id):
+                count = superpoint_counts[sp_update_id].item()
+                if count == 0:
                     continue
-                
-                # Assign to current superpoint
-                superpoint_ids[neighbor_idx] = sp_id
-                active = True
-                
-                # Find new neighbors
-                new_neighbors = kdtree.query_ball_point(
-                    points_xyz[neighbor_idx].cpu().numpy(), 
-                    r=search_radius
-                )
-                
-                # Limit to k_neighbors if too many
-                if k_neighbors > 0 and len(new_neighbors) > k_neighbors:
-                    # Sort by distance and keep closest k
-                    neighbor_pos = points_xyz[new_neighbors].cpu().numpy()
-                    center_pos = points_xyz[neighbor_idx].cpu().numpy()
-                    distances = np.linalg.norm(neighbor_pos - center_pos, axis=1)
-                    closest_indices = np.argsort(distances)[:k_neighbors]
-                    new_neighbors = [new_neighbors[i] for i in closest_indices]
-                
-                # Add unassigned neighbors to next queue
-                neighbor_xyz = points_xyz[neighbor_idx]
-                neighbor_color = points_colors[neighbor_idx]
-                neighbor_normal = points_normals[neighbor_idx]
-                
-                for new_idx in new_neighbors:
-                    if superpoint_ids[new_idx] != -1:
-                        continue
-                        
-                    # Calculate distance
-                    new_xyz = points_xyz[new_idx]
-                    new_color = points_colors[new_idx]
-                    new_normal = points_normals[new_idx]
                     
-                    # Calculate distance components
-                    Dc_sq = torch.sum((neighbor_color - new_color)**2).item()
-                    Ds_sq = torch.sum((neighbor_xyz - new_xyz)**2).item()
+                # Calculate average features
+                avg_xyz = (superpoint_sums[sp_update_id, 0:3] / count).float()
+                avg_color = (superpoint_sums[sp_update_id, 3:6] / count).float()
+                avg_normal = F.normalize((superpoint_sums[sp_update_id, 6:9] / count).float(), p=2, dim=0)
+                
+                # Find point in cluster closest to average
+                cluster_mask = (superpoint_ids == sp_update_id)
+                if not cluster_mask.any():
+                    continue
                     
-                    # Normal distance (1 - cos similarity)
-                    n1 = F.normalize(neighbor_normal, p=2, dim=0)
-                    n2 = F.normalize(new_normal, p=2, dim=0)
-                    cos_sim = torch.dot(n1, n2).item()
-                    cos_sim = max(-1.0, min(1.0, cos_sim))
-                    Dn_sq = (1 - cos_sim)**2
-                    
-                    # Combined distance
-                    D_sq = wc*Dc_sq + ws*Ds_sq/spatial_norm_factor + wn*Dn_sq
-                    D = np.sqrt(D_sq)
-                    
-                    counter += 1
-                    heapq.heappush(next_queues[sp_id], (D, counter, new_idx))
-            
-            # Swap queues
-            pqueues[sp_id] = next_queues[sp_id]
-            next_queues[sp_id] = []
+                cluster_indices = torch.where(cluster_mask)[0]
+                cluster_xyz = points_xyz[cluster_indices]
+                
+                dists_to_avg = torch.linalg.norm(cluster_xyz - avg_xyz, dim=1)
+                closest_in_cluster_idx = torch.argmin(dists_to_avg)
+                closest_point_idx = cluster_indices[closest_in_cluster_idx]
+                
+                # Update representative
+                superpoint_repr_xyz[sp_update_id] = points_xyz[closest_point_idx]
+                superpoint_repr_color[sp_update_id] = points_colors[closest_point_idx]
+                superpoint_repr_normal[sp_update_id] = points_normals[closest_point_idx]
+                
+            last_update_count = processed_count
         
-        # Exit if no active superpoints
-        if not active:
-            break
-    
-    print(f"Region growing completed after {iteration} iterations.")
+        # Progress update
+        if processed_count % 20000 == 0:
+            elapsed_time = time.time() - expansion_start_time
+            rate = (processed_count - current_superpoint_id) / elapsed_time if elapsed_time > 0 else 0
+            print(f"  Processed {processed_count}/{N} points... ({rate:.1f} pts/sec)")
+        
+        # Find neighbors of newly assigned point
+        neighbors = kdtree.query_ball_point(
+            points_xyz[point_idx].cpu().numpy(),
+            r=search_radius
+        )
+        
+        # Limit to k neighbors if needed
+        if k_neighbors > 0 and len(neighbors) > k_neighbors:
+            neighbor_dists = np.linalg.norm(
+                points_xyz[neighbors].cpu().numpy() - 
+                points_xyz[point_idx].cpu().numpy(),
+                axis=1
+            )
+            closest_indices = np.argsort(neighbor_dists)[:k_neighbors]
+            neighbors = [neighbors[i] for i in closest_indices]
+        
+        # Add unassigned neighbors to priority queue
+        for neighbor_idx in neighbors:
+            if superpoint_ids[neighbor_idx] == -1:
+                dist = calculate_distance(neighbor_idx, sp_id)
+                heapq.heappush(pq, (dist.item(), neighbor_idx, sp_id))
     
     # --- 5. Handle Unassigned Points ---
-    # This is an important step in GGSD to ensure all points are assigned
     unassigned_mask = (superpoint_ids == -1)
     num_unassigned = unassigned_mask.sum().item()
     
     if num_unassigned > 0:
-        print(f"Assigning {num_unassigned} unassigned points to closest superpoint centroids.")
+        print(f"Handling {num_unassigned} unassigned points...")
         
         # Compute superpoint centroids
         unique_sp_ids = torch.unique(superpoint_ids[superpoint_ids != -1])
-        centroids = []
         
-        for sp_id in unique_sp_ids:
-            sp_mask = (superpoint_ids == sp_id)
-            if sp_mask.sum() > 0:
-                # Compute centroid of this superpoint
-                centroid = points_xyz[sp_mask].mean(dim=0)
-                centroids.append((sp_id.item(), centroid))
-        
-        # Assign each unassigned point to nearest centroid
-        unassigned_indices = torch.where(unassigned_mask)[0]
-        
-        if centroids:
-            # Stack centroid positions for distance calculation
-            centroid_positions = torch.stack([centroid[1] for centroid in centroids])
-            centroid_ids = [centroid[0] for centroid in centroids]
+        if len(unique_sp_ids) > 0:
+            # Use KDTree on centroids
+            centroids = []
+            for sp_id in unique_sp_ids:
+                sp_mask = (superpoint_ids == sp_id)
+                if sp_mask.sum() > 0:
+                    centroid = points_xyz[sp_mask].mean(dim=0)
+                    centroids.append((sp_id.item(), centroid))
             
-            for idx in unassigned_indices:
-                point = points_xyz[idx]
-                distances = torch.norm(centroid_positions - point, dim=1)
-                closest_idx = torch.argmin(distances)
-                superpoint_ids[idx] = centroid_ids[closest_idx]
+            if centroids:
+                centroid_positions = torch.stack([c[1] for c in centroids]).cpu().numpy()
+                centroid_ids = [c[0] for c in centroids]
+                
+                # Build KDTree on centroids
+                centroid_kdtree = cKDTree(centroid_positions)
+                
+                # Assign each unassigned point to nearest centroid
+                unassigned_indices = torch.where(unassigned_mask)[0].cpu().numpy()
+                distances, nearest_centroid_indices = centroid_kdtree.query(
+                    points_xyz[unassigned_indices].cpu().numpy()
+                )
+                
+                # Update superpoint IDs
+                for i, idx in enumerate(unassigned_indices):
+                    centroid_idx = nearest_centroid_indices[i]
+                    superpoint_ids[idx] = centroid_ids[centroid_idx]
         else:
-            # If no centroids available, assign all unassigned to a new superpoint
-            print("Warning: No centroids available. Creating new superpoint.")
-            superpoint_ids[unassigned_mask] = num_seeds
+            # If no assigned points, assign all to a single superpoint
+            superpoint_ids[unassigned_mask] = 0
+    
+    # --- 6. Final Statistics ---
+    final_num_assigned = (superpoint_ids != -1).sum().item()
+    total_time = time.time() - computation_start_time
+    num_superpoints = len(torch.unique(superpoint_ids))
+    
+    print(f"Improved VCCS complete: {final_num_assigned}/{N} points assigned")
+    print(f"Found {num_superpoints} superpoints in {total_time:.2f}s")
     
     return superpoint_ids
