@@ -82,6 +82,8 @@ class MultiViewVLMBase3DQA(BaseModel):
                  tgmf_mode: str = 'hybrid', # Default value if not in config
                  tgmf_redundancy_weight: float = 0.5, # Default value
                  tgmf_temperature: float = 1.0, # Default value
+                 # --- New arguments for GGD ---
+                 superpoint_cfg: ConfigType = None, 
                  init_cfg: OptConfigType = None):
         super().__init__(data_preprocessor=data_preprocessor,
                          init_cfg=init_cfg)
@@ -164,6 +166,19 @@ class MultiViewVLMBase3DQA(BaseModel):
             # self.visual_feat_map = nn.Linear(D_fus, D_fus)
         else:
             self.visual_feat_map = nn.Linear(Dp, D_fus)
+            
+        # superpoint_config
+        self.superpoint_config = superpoint_cfg if superpoint_cfg is not None else {}
+        # print("----Debugging MultiViewVLMBase3DQA----")
+        # print(f"superpoint_config: {self.superpoint_config}")
+        self._vccs_on_the_fly = self.superpoint_config.get('enabled_on_the_fly', False)
+        if self._vccs_on_the_fly:
+            print("On-the-fly VCCS superpoint calculation is ENABLED for distillation.")
+        else: # Distillation is on, but on-the-fly VCCS is not
+            raise ValueError("Not Implemented yet. Please enable on-the-fly VCCS for distillation.")
+        
+        # exit(0)
+        
         
     @property
     def with_backbone(self):
@@ -241,6 +256,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_samples.metainfo for data_samples in batch_data_samples
         ]
         batch_size = img.shape[0]
+        B, Np, _ = feat_dict['P_xyz'].shape
+        current_device = feat_dict['P_xyz'].device
 
         if len(img.shape) > 4:  # (B, M, C, H, W) = [12, 20, 3, 224, 224]
             img = img.reshape([-1] + list(img.shape)[2:]).contiguous() # B*M, C, H, W = [240, 3, 224, 224]
@@ -409,33 +426,88 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['F_2d_raw'] = F_2d_raw
         feat_dict['F_2d_text_guided'] = F_2d_text_guided
         
-        self.debug_visualize_superpoints(feat_dict, batch_idx=0)
+
         
+        # self.debug_visualize_superpoints(feat_dict, batch_idx=0)
+        
+        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        # +++ MODIFIED Superpoint Calculation Block                           +++
+        # +++ Computes on ORIGINAL points, then maps to Np downsampled points +++
+        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # Compute superpoints on-the-fly for each batch item
-        batch_superpoints = []
-        for b in range(F_3d.shape[0]):
-            # Use point coordinates for this batch item
-            points_xyz = feat_dict['P_xyz'][b]  # Shape [N, 3]
+        if self._vccs_on_the_fly:
+            superpoints_params = self.superpoint_config.get('params', {})
+            # predefine weights here
+            wc = superpoints_params.get('wc', 0.2)
+            ws = superpoints_params.get('ws', 0.4)
+            wn = superpoints_params.get('wn', 1.0)
+            weights = (wc, ws, wn)
+            batch_superpoint_ids_for_Np_points = [] # Store final IDs for the Np points
             
-            # Compute superpoints using MinkowskiEngine's fast voxel hash
-            superpoints = compute_superpoints_me_voxel_hash(
-                points_xyz, 
-                voxel_size=self.voxel_size * 3  # Typically use larger size for superpoints
-            )
+            for b in range(B):
+                # --- Inputs for VCCS from ORIGINAL points ---
+                original_points_b = feat_dict['original_stack_points'][b] # [N_raw, 6] = [40000, 6]
+                P_xyz_original_b_np = original_points_b[:, :3].cpu().numpy() # [N_raw, 3]
+                
+                if P_xyz_original_b_np.shape[0] == 0:
+                    # Handle case where original cloud is empty
+                    batch_superpoint_ids_for_Np_points.append(
+                        torch.full((Np,), -1, dtype=torch.long, device=current_device) # Assign invalid ID
+                    )
+                    continue
+                
+                P_colors_original_b_np = None
+                if self.superpoint_vccs_cfg.get('use_colors', False) and original_points_b.shape[1] >= 6:
+                    P_colors_original_b = original_points_b[:, 3:6].float()
+                    if P_colors_original_b.max() > 1.0: P_colors_original_b /= 255.0
+                    P_colors_original_b_np = P_colors_original_b.cpu().numpy()
+                
+                # --- Call VCCS on ORIGINAL points ---
+                # estimate normals
+                points_normals = estimate_normals(P_xyz_original_b_np)
+                superpoint_ids_on_original_np = compute_vccs_superpoints(
+                    points_xyz=P_xyz_original_b_np,
+                    points_colors=P_colors_original_b_np,
+                    points_normals=points_normals,  # Use estimated normals
+                    voxel_size=superpoints_params.get('voxel_size', 0.02),
+                    seed_spacing=superpoints_params.get('seed_spacing', 0.5),
+                    weights=weights,
+                    neighbor_voxel_search=superpoints_params.get('neighbor_voxel_search', True),
+                    neighbor_radius_search=superpoints_params.get('neighbor_radius_search', 0.05),
+                    max_expand_dist=superpoints_params.get('max_expand_dist', 1.0),
+                )
+                
+                
+                superpoint_ids_on_original_torch = torch.from_numpy(superpoint_ids_on_original_np).long().to(current_device)
+                # --- Map Superpoint IDs to Np downsampled points ---
+                fp_indices_b = feat_dict['last_fp_indices'][b] # Indices [Np] into original N_raw points
+                # Handle potential out-of-bounds if indices somehow exceed original point count
+                fp_indices_b = torch.clamp(fp_indices_b, 0, superpoint_ids_on_original_torch.shape[0] - 1)
+                superpoints_for_Np = superpoint_ids_on_original_torch[fp_indices_b] # Shape [Np]
+                batch_superpoint_ids_for_Np_points.append(superpoints_for_Np)
             
-            batch_superpoints.append(superpoints)
-        # Stack superpoints if all batch items have valid superpoints
-        if all(sp is not None for sp in batch_superpoints):
-            feat_dict['superpoints'] = torch.stack(batch_superpoints)
+            # --- Store the mapped superpoint IDs ---
+            # Check if Np is consistent across batch
+            if all(sp.shape[0] == Np for sp in batch_superpoint_ids_for_Np_points):
+                try:
+                    feat_dict['superpoint_ids_batched'] = torch.stack(batch_superpoint_ids_for_Np_points, dim=0) # [B, Np]
+                except Exception as e: # Fallback just in case
+                    raise ValueError(f"Error stacking superpoints, storing as list: {e}")
+                    # feat_dict['superpoint_ids_batched'] = batch_superpoint_ids_for_Np_points
+            else:
+                # This case means Np varied across batch, which is unusual for standard PointNet++ FP layers
+                raise ValueError("Warning: Number of points Np varied across batch. Storing superpoint_ids as list.")
+                # feat_dict['superpoint_ids_batched'] = batch_superpoint_ids_for_Np_points
+
+        
         else:
-            # Handle case where superpoint computation failed for some batch items
-            feat_dict['superpoints'] = None
-            print("Warning: Superpoint computation failed for some batch items")
+            print("No superpoints available, using original points")
+            feat_dict['superpoint_ids_batched'] = None
          
         # Stop execution after debugging
-        # import sys
-        # print("Stopping execution for debugging purposes")
-        # sys.exit("Debug complete - terminating execution")
+        import sys
+        print("Stopping execution for debugging purposes")
+        sys.exit("Debug complete - terminating execution")
         
         return feat_dict
     
@@ -950,6 +1022,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         vccs_search_radius = 0.5
         vccs_k_neighbors = 27
         vccs_weights = (0.2, 0.7, 1.0)  # wc, ws, wn default weights (0.2, 0.4, 1.0)
+        vccs_max_expand_dist = 1.25
         vccs_device = torch.device('cpu')
         
         # --- Generate Superpoints with Original Method ---
@@ -966,6 +1039,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             seed_spacing=vccs_seed_spacing,
             # search_radius=vccs_search_radius,
             # k_neighbors=vccs_k_neighbors,
+            max_expand_dist=vccs_max_expand_dist,
             weights=vccs_weights,
             device=vccs_device
         ).cpu()
