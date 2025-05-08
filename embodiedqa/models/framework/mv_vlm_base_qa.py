@@ -83,7 +83,8 @@ class MultiViewVLMBase3DQA(BaseModel):
                  tgmf_redundancy_weight: float = 0.5, # Default value
                  tgmf_temperature: float = 1.0, # Default value
                  # --- New arguments for GGD ---
-                 superpoint_cfg: ConfigType = None, 
+                 superpoint_cfg: ConfigType = None,
+                 distillation_loss_cfg: ConfigType = None,
                  init_cfg: OptConfigType = None):
         super().__init__(data_preprocessor=data_preprocessor,
                          init_cfg=init_cfg)
@@ -176,6 +177,15 @@ class MultiViewVLMBase3DQA(BaseModel):
             print("On-the-fly VCCS superpoint calculation is ENABLED for distillation.")
         else: # Distillation is on, but on-the-fly VCCS is not
             raise ValueError("Not Implemented yet. Please enable on-the-fly VCCS for distillation.")
+        
+        # distillation_loss_cfg
+        self.use_distillation_loss = distillation_loss_cfg is not None # Check if config exists
+        if self.use_distillation_loss:
+            # Note: The 'weight' inside distillation_loss_cfg is used internally by the loss module forward pass
+            self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
+            print(f"Geometry-Guided Distillation Loss enabled with internal weight: {self.distillation_loss_calculator.loss_weight}")
+        else:
+            self.distillation_loss_calculator = None
         
         # exit(0)
         
@@ -439,7 +449,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             superpoints_params = self.superpoint_config.get('params', {})
             # predefine weights here
             wc = superpoints_params.get('wc', 0.2)
-            ws = superpoints_params.get('ws', 0.4)
+            ws = superpoints_params.get('ws', 0.7)
             wn = superpoints_params.get('wn', 1.0)
             weights = (wc, ws, wn)
             batch_superpoint_ids_for_Np_points = [] # Store final IDs for the Np points
@@ -457,7 +467,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                     continue
                 
                 P_colors_original_b_np = None
-                if self.superpoint_vccs_cfg.get('use_colors', False) and original_points_b.shape[1] >= 6:
+                if self.superpoint_config.get('use_colors', False) and original_points_b.shape[1] >= 6:
                     P_colors_original_b = original_points_b[:, 3:6].float()
                     if P_colors_original_b.max() > 1.0: P_colors_original_b /= 255.0
                     P_colors_original_b_np = P_colors_original_b.cpu().numpy()
@@ -466,9 +476,9 @@ class MultiViewVLMBase3DQA(BaseModel):
                 # estimate normals
                 points_normals = estimate_normals(P_xyz_original_b_np)
                 superpoint_ids_on_original_np = compute_vccs_superpoints(
-                    points_xyz=P_xyz_original_b_np,
-                    points_colors=P_colors_original_b_np,
-                    points_normals=points_normals,  # Use estimated normals
+                    points_xyz=torch.from_numpy(P_xyz_original_b_np).to(current_device),
+                    points_colors=torch.from_numpy(P_colors_original_b_np).to(current_device) if P_colors_original_b_np is not None else None,
+                    points_normals=torch.from_numpy(points_normals).to(current_device),  # Use estimated normals
                     voxel_size=superpoints_params.get('voxel_size', 0.02),
                     seed_spacing=superpoints_params.get('seed_spacing', 0.5),
                     weights=weights,
@@ -478,12 +488,16 @@ class MultiViewVLMBase3DQA(BaseModel):
                 )
                 
                 
-                superpoint_ids_on_original_torch = torch.from_numpy(superpoint_ids_on_original_np).long().to(current_device)
+                superpoint_ids_on_original_torch = superpoint_ids_on_original_np.long().to(current_device)
+                # print(f"superpoint_ids_on_original_torch shape: {superpoint_ids_on_original_torch.shape}") # [N_raw]
                 # --- Map Superpoint IDs to Np downsampled points ---
                 fp_indices_b = feat_dict['last_fp_indices'][b] # Indices [Np] into original N_raw points
+                # print(f"fp_indices_b shape: {fp_indices_b.shape}") # [Np]
                 # Handle potential out-of-bounds if indices somehow exceed original point count
                 fp_indices_b = torch.clamp(fp_indices_b, 0, superpoint_ids_on_original_torch.shape[0] - 1)
+                # print(f"fp_indices_b is: {fp_indices_b}") 
                 superpoints_for_Np = superpoint_ids_on_original_torch[fp_indices_b] # Shape [Np]
+                # print(f"superpoints_for_Np shape: {superpoints_for_Np.shape}") # [Np]
                 batch_superpoint_ids_for_Np_points.append(superpoints_for_Np)
             
             # --- Store the mapped superpoint IDs ---
@@ -505,9 +519,9 @@ class MultiViewVLMBase3DQA(BaseModel):
             feat_dict['superpoint_ids_batched'] = None
          
         # Stop execution after debugging
-        import sys
-        print("Stopping execution for debugging purposes")
-        sys.exit("Debug complete - terminating execution")
+        # import sys
+        # print("Stopping execution for debugging purposes")
+        # sys.exit("Debug complete - terminating execution")
         
         return feat_dict
     
@@ -636,6 +650,38 @@ class MultiViewVLMBase3DQA(BaseModel):
         points = batch_inputs_dict['points']
         batch_size = len(points)
         losses = {}
+        
+        # geometry-guided distillation loss
+        if self.use_distillation_loss and self.distillation_loss_calculator is not None:
+            F_3d_batched = feat_dict.get('F_3d') #  [B, Np, D_fus]
+            F_2d_raw_batched = feat_dict.get('F_2d_raw') #  [B, Np, D_fus]
+            assert F_3d_batched.shape == F_2d_raw_batched.shape, f"F_3d and F_2d_raw must have the same shape, but got {F_3d_batched.shape} and {F_2d_raw_batched.shape}"
+            superpoint_ids_batched = feat_dict.get('superpoint_ids_batched', None) # Expected [B, Np]
+            print(f"superpoint_ids_batched shape: {superpoint_ids_batched.shape}") # [B, Np]
+            
+            if F_3d_batched is not None and F_2d_raw_batched is not None and superpoint_ids_batched is not None:
+                B, Np, D_fus = F_3d_batched.shape
+                F_3d_flat = F_3d_batched.reshape(-1, D_fus)
+                print(f"F_3d_flat shape: {F_3d_flat.shape}") # [B*Np, D_fus]
+                F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
+                print(f"F_2d_raw_flat shape: {F_2d_raw_flat.shape}") # [B*Np, D_fus]
+                superpoint_ids_flat = superpoint_ids_batched.reshape(-1) # [B*Np]
+                print(f"superpoint_ids_flat shape: {superpoint_ids_flat.shape}")
+                
+                # Create batch_idx for scatter_mean
+                batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1) # [B*Np]
+                # Call the instantiated loss module with flattened inputs
+                loss_distill = self.distillation_loss_calculator(
+                    F3D=F_3d_flat,
+                    Fraw2D=F_2d_raw_flat,
+                    superpoint_ids=superpoint_ids_flat,
+                    batch_idx=batch_idx_flat
+                )
+                losses['loss_distill'] = loss_distill
+            else:
+                raise ValueError("Distillation loss inputs are not available.")
+            
+        exit(0)
 
         full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
         full_point_pos = feat_dict['fp_xyz'][-1]
@@ -656,12 +702,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                                      batch_data_samples=batch_data_samples)
         losses.update(qa_losses)
         
-        if feat_dict.get('superpoints') is not None:
-            ggd_loss = self.compute_ggd_loss(
-                feat_dict['F_3d'],
-                feat_dict['F_2d_raw'],
-                feat_dict['superpoints'],)
-            losses.update(ggd_loss)
+       
         
         if self.with_target_bbox_head:
             ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
@@ -861,74 +902,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances_3d = data_instances_3d[i]
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
-    
-    # --- Add for geometry guided distillation ---
-    def compute_geometry_guided_distillation_loss(self, features_3d, features_2d, superpoints):
-        """
-        Compute Geometry Guided Distillation loss using on-the-fly superpoints
-        
-        Args:
-            features_3d: [B, N, C1] tensor of 3D features
-            features_2d: [B, N, C2] tensor of 2D features 
-            superpoints: [B, N] tensor of superpoint IDs for each point
-            
-        Returns:
-            dict: Loss dictionary with point-level and superpoint-level losses
-        """
-        batch_size = features_3d.shape[0]
-        losses = {}
-        
-        batch_point_loss = 0
-        batch_sp_loss = 0
-        
-        for b in range(batch_size):
-            # Point-level distillation loss (same as in OpenScene)
-            f_3d_norm = F.normalize(features_3d[b], p=2, dim=1)
-            f_2d_norm = F.normalize(features_2d[b], p=2, dim=1)
-            point_loss = 1 - F.cosine_similarity(f_3d_norm, f_2d_norm, dim=1).mean()
-            batch_point_loss += point_loss
-            
-            # Superpoint-level distillation loss
-            sp_ids = superpoints[b]
-            unique_sp_ids = torch.unique(sp_ids)
-            
-            sp_3d_features = []
-            sp_2d_features = []
-            
-            for sp_id in unique_sp_ids:
-                # Create mask for points in this superpoint
-                mask = (sp_ids == sp_id)
-                
-                # Skip superpoints with too few points (optional)
-                if mask.sum() < 5:
-                    continue
-                    
-                # Compute mean features for this superpoint
-                sp_3d = features_3d[b][mask].mean(dim=0)
-                sp_2d = features_2d[b][mask].mean(dim=0)
-                
-                sp_3d_features.append(sp_3d)
-                sp_2d_features.append(sp_2d)
-            
-            if len(sp_3d_features) > 0:
-                # Stack features
-                sp_3d_features = torch.stack(sp_3d_features)
-                sp_2d_features = torch.stack(sp_2d_features)
-                
-                # Normalize features
-                sp_3d_features = F.normalize(sp_3d_features, p=2, dim=1)
-                sp_2d_features = F.normalize(sp_2d_features, p=2, dim=1)
-                
-                # Compute superpoint-level loss
-                sp_loss = 1 - F.cosine_similarity(sp_3d_features, sp_2d_features, dim=1).mean()
-                batch_sp_loss += sp_loss
-        
-        # Average losses over batch size
-        losses['loss_point_distill'] = batch_point_loss / batch_size
-        losses['loss_superpoint_distill'] = batch_sp_loss / batch_size
-        losses['loss_ggd_total'] = losses['loss_point_distill'] + losses['loss_superpoint_distill']
-        
-        return losses
     
     
     # --- For debugging purposes ---
@@ -1177,5 +1150,3 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Exit for debugging purposes
         import sys
         sys.exit("Debug complete - terminating execution")
-
-# ... rest of the class ...
