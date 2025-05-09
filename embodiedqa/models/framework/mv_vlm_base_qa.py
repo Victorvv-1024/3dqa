@@ -196,19 +196,19 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.create_f_distill_cfg = create_f_distill_cfg if create_f_distill_cfg is not None else {}
         self._create_f_distill_enabled = self.create_f_distill_cfg.get('enabled', False)
 
-        if self._create_f_distill_enabled and self.create_f_distill_cfg.get('use_mlp_fusion', False):
-            hidden_dim = self.create_f_distill_cfg.get('mlp_hidden_dim', self.fusion_dim)
-            self.f_distill_fusion_mlp = nn.Sequential(
-                nn.Linear(self.fusion_dim * 2, hidden_dim),
+        if self._create_f_distill_enabled:
+            # Component weights (redundancy, uniqueness_3d, uniqueness_2d, synergy)
+            self.component_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.5, 1.0]))
+            
+            # MLP for synergy estimation
+            self.synergy_mlp = nn.Sequential(
+                nn.Linear(D_fus * 2, D_fus),
+                nn.LayerNorm(D_fus),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, self.fusion_dim)
+                nn.Linear(D_fus, D_fus)
             )
-        else:
-            self.f_distill_fusion_mlp = None
         
-        # exit(0)
-        
-        
+
     @property
     def with_backbone(self):
         """Whether the detector has a 2D backbone."""
@@ -932,85 +932,57 @@ class MultiViewVLMBase3DQA(BaseModel):
         return data_samples
     
     # -- For creating the F_distill embedding --
-    def _create_distilled_features(self, 
-                                   F_3d_batched: torch.Tensor,         # [B, Np, D]
-                                   F_2d_raw_batched: torch.Tensor,   # [B, Np, D]
-                                   superpoint_ids_batched: torch.Tensor # [B, Np]
-                                   ) -> Optional[torch.Tensor]:
+    def _create_distilled_features_with_pid(self, 
+                                      F_3d_batched: torch.Tensor,
+                                      F_2d_raw_batched: torch.Tensor,
+                                      superpoint_ids_batched: torch.Tensor) -> Optional[torch.Tensor]:
         """
-        Creates distilled features (F_distill) by potentially refining F_2d_raw 
-        using superpoint means and then combining with F_3d.
-        Optimized implementation using torch_scatter.
+        Creates distilled features with explicit modeling of redundancy, uniqueness, and synergy
         """
         if not self._create_f_distill_enabled:
-            return  (F_3d_batched + F_2d_raw_batched) / 2
-
-        if F_3d_batched is None or F_2d_raw_batched is None or superpoint_ids_batched is None:
-            raise ValueError("Warning: Missing inputs for F_distill creation.")
+            return (F_3d_batched + F_2d_raw_batched) / 2
 
         B, Np, D_fus = F_3d_batched.shape
         device = F_3d_batched.device
-
-        if Np == 0: # Handle case with no points
-            print("Warning: No points in batch, returning zero tensor.")
-            return torch.zeros_like(F_3d_batched)
-
-        # --- Step 1: Refine F_2d_raw using superpoints (optional) ---
-        F_2d_refined = F_2d_raw_batched # Start with original if refinement disabled
-        if self.create_f_distill_cfg.get('refine_2d_enabled', True) and scatter_mean is not None:
-            
-            # Flatten inputs
-            F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
-            superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
-            batch_idx_flat = torch.arange(B, device=device).unsqueeze(1).expand(-1, Np).reshape(-1)
-
-            # Create mask for valid superpoints
-            valid_sp_mask = superpoint_ids_flat >= 0
-            if not valid_sp_mask.any():
-                print("Warning: No valid superpoints found for F_2d refinement.")
-                # Keep F_2d_refined as F_2d_raw_batched
-            else:
-                F_2d_raw_valid = F_2d_raw_flat[valid_sp_mask]
-                sp_ids_valid = superpoint_ids_flat[valid_sp_mask].long()
-                batch_idx_valid = batch_idx_flat[valid_sp_mask].long()
-
-                # Create globally unique superpoint IDs
-                num_batch_items = B
-                max_sp_id_val = -1
-                for b_id in range(num_batch_items):
-                    item_mask = (batch_idx_valid == b_id)
-                    if item_mask.any():
-                        max_sp_id_val = max(max_sp_id_val, sp_ids_valid[item_mask].max().item())
-                
-                offset_multiplier = max_sp_id_val + 1 
-                global_sp_ids = sp_ids_valid + batch_idx_valid * offset_multiplier
-
-                # Calculate mean 2D feature per superpoint
-                sp_mean_2d_flat = scatter_mean(F_2d_raw_valid, global_sp_ids, dim=0) # [Num_Global_SPs, D]
-
-                # Gather the means back to the valid points
-                sp_mean_2d_gathered = sp_mean_2d_flat[global_sp_ids] # [N_valid, D]
-
-                # Perform the blend for valid points
-                refine_alpha = self.create_f_distill_cfg.get('refine_2d_alpha', 0.7)
-                refine_beta = 1.0 - refine_alpha
-                F_2d_refined_valid = refine_alpha * F_2d_raw_valid + refine_beta * sp_mean_2d_gathered
-
-                # Create the full refined tensor [B*Np, D]
-                F_2d_refined_flat = F_2d_raw_flat.clone() # Start with original
-                F_2d_refined_flat[valid_sp_mask] = F_2d_refined_valid # Update valid points
-
-                # Reshape back to [B, Np, D]
-                F_2d_refined = F_2d_refined_flat.reshape(B, Np, D_fus)
-
-        # --- Step 2: Combine F_3d and F_2d_refined ---
-        if self.f_distill_fusion_mlp is not None: # Use MLP if configured
-            F_cat = torch.cat([F_3d_batched, F_2d_refined], dim=-1)
-            F_distill = self.f_distill_fusion_mlp(F_cat)
-        else: # Use weighted average
-            final_beta = self.create_f_distill_cfg.get('final_beta', 0.7)
-            F_distill = final_beta * F_3d_batched + (1.0 - final_beta) * F_2d_refined
-
+        
+        # --- Step 1: Refine F_2d_raw using superpoints (same as original) ---
+        F_2d_refined = self._refine_2d_features(F_2d_raw_batched, superpoint_ids_batched)
+        
+        # --- Step 2: Compute redundancy, uniqueness, and synergy terms ---
+        
+        # 2.1 Compute similarity for redundancy estimation
+        F_3d_norm = F.normalize(F_3d_batched, p=2, dim=2)
+        F_2d_norm = F.normalize(F_2d_refined, p=2, dim=2)
+        similarity = torch.sum(F_3d_norm * F_2d_norm, dim=2, keepdim=True)  # [B, Np, 1]
+        
+        # 2.2 Estimate redundancy component using similarity-weighted average
+        redundancy_weight = torch.sigmoid(similarity)  # [B, Np, 1]
+        F_redundant = redundancy_weight * F_3d_batched + (1 - redundancy_weight) * F_2d_refined
+        
+        # 2.3 Estimate uniqueness components
+        F_unique_3d = F_3d_batched - F_redundant  # Unique to point cloud
+        F_unique_2d = F_2d_refined - F_redundant  # Unique to multi-view
+        
+        # 2.4 Estimate synergy component using cross-interaction
+        F_cross = torch.cat([F_3d_batched, F_2d_refined], dim=2)
+        F_synergy = self.synergy_mlp(F_cross) - F_redundant - F_unique_3d - F_unique_2d
+        
+        # --- Step 3: Combine components with learnable or configurable weights ---
+        w_red = self.component_weights[0]
+        w_u3d = self.component_weights[1]
+        w_u2d = self.component_weights[2]
+        w_syn = self.component_weights[3]
+        
+        # Normalize weights to sum to 1
+        weights_sum = w_red + w_u3d + w_u2d + w_syn
+        w_red, w_u3d, w_u2d, w_syn = w_red/weights_sum, w_u3d/weights_sum, w_u2d/weights_sum, w_syn/weights_sum
+        
+        # Weighted combination of components
+        F_distill = (w_red * F_redundant + 
+                    w_u3d * F_unique_3d + 
+                    w_u2d * F_unique_2d + 
+                    w_syn * F_synergy)
+        
         return F_distill
     
     # --- For debugging purposes ---
