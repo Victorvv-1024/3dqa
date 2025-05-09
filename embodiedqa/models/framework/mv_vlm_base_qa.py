@@ -454,7 +454,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['F_3d'] = F_3d
         feat_dict['F_2d_raw'] = F_2d_raw
         feat_dict['F_2d_text_guided'] = F_2d_text_guided
-        
 
         
         # self.debug_visualize_superpoints(feat_dict, batch_idx=0)
@@ -536,6 +535,16 @@ class MultiViewVLMBase3DQA(BaseModel):
         else:
             print("No superpoints available, using original points")
             feat_dict['superpoint_ids_batched'] = None
+            
+        # --- creating the F_distill ---
+        # Retrieve necessary inputs
+        F_3d_b = feat_dict.get('F_3d')
+        F_2d_raw_b = feat_dict.get('F_2d_raw')
+        sp_ids_b = feat_dict.get('superpoints', feat_dict.get('superpoint_ids_batched'))
+        # --- Call the new method to create F_distill ---
+        F_distill = self._create_distilled_features(F_3d_b, F_2d_raw_b, sp_ids_b)
+        if F_distill is not None:
+            feat_dict['F_distill'] = F_distill # Store the result [B, Np, D_fus]
          
         # Stop execution after debugging
         # import sys
