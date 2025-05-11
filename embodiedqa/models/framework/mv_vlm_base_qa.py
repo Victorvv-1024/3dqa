@@ -362,7 +362,7 @@ class MultiViewVLMBase3DQA(BaseModel):
 
             # TGMF happens here
             # we get Z_TV in our framework
-            points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            raw_points_imgfeats, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(
                 img_meta,
                 img_features=img_features[-1][idx], # sample the last feature level
                 points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
@@ -379,51 +379,6 @@ class MultiViewVLMBase3DQA(BaseModel):
                 return_valid_flag=True,
                 text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
                 img_features_for_att=img_features_for_att[idx])
-            
-            # Enhanced TGMF happens here to extract the text guided image features F_2d_text
-            # points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = enhanced_batch_point_sample_in_visible(# (N, C), (N,)
-                # img_meta,
-                # img_features=img_features[-1][idx], # sample the last feature level
-                # points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
-                # views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
-                # voxel_size=self.voxel_size,
-                # proj_mat=proj_mat, # projects 3D points to 2D image plane
-                # coord_type=self.coord_type,
-                # img_scale_factor=img_scale_factor,
-                # img_crop_offset=img_crop_offset,
-                # img_flip=img_flip,
-                # img_pad_shape=img.shape[-2:],
-                # img_shape=img_meta['img_shape'][:2],
-                # aligned=False,
-                # return_valid_flag=True,
-                # text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
-                # img_features_for_att=img_features_for_att[idx], 
-                # mode=self.tgmf_mode,
-                # redundancy_weight=self.tgmf_redundancy_weight,
-                # temperature=self.tgmf_temperature)
-            
-            # extract the raw visible image features
-            raw_points_imgfeat, _, _ = batch_point_sample_in_visible(# (N, C), (N,)
-                img_meta,
-                img_features=img_features[-1][idx], # sample the last feature level
-                points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
-                views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
-                voxel_size=self.voxel_size,
-                proj_mat=proj_mat, # projects 3D points to 2D image plane
-                coord_type=self.coord_type,
-                img_scale_factor=img_scale_factor,
-                img_crop_offset=img_crop_offset,
-                img_flip=img_flip,
-                img_pad_shape=img.shape[-2:],
-                img_shape=img_meta['img_shape'][:2],
-                aligned=False,
-                return_valid_flag=True,
-                text_global_features_for_att=None, # no attention mechanism for raw features
-                img_features_for_att=None, # no attention mechanism for raw features
-                )
-            
-            
-            
             # print(f"points_imgfeat shape: {points_imgfeat.shape}") # [Np, Di] = [1024, 1024]
             
             points_imgfeats.append(points_imgfeat)  # all sample

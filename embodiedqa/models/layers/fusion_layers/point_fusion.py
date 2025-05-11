@@ -512,6 +512,7 @@ def batch_point_sample_in_visible(img_meta: dict,
         point_features = point_features * valid.float().unsqueeze(1)  # BxCxN feats
         valid_num = valid.sum(dim=0)  # Np,
         # print(f'valid_num is {valid_num}')
+        raw_features = point_features.clone() # BxCxN feats
         
         # Text-guided Multi-view Fusion (TGMF) module
         if use_views_attention:
@@ -542,10 +543,10 @@ def batch_point_sample_in_visible(img_meta: dict,
             valid_features /= torch.clamp(valid_num[:, None], min=1)
         valid_features[~valid, :] = 0.
         if return_valid_flag:
-            return valid_features, valid, valid_each
-        return valid_features  # (N, C), (N,)
+            return raw_features, valid_features, valid, valid_each
+        return raw_features, valid_features  # (N, C), (N,)
 
-    return point_features.squeeze().sum(dim=0).t()  # (N,C)
+    return raw_features.squeeze().sum(dim=0).t(), point_features.squeeze().sum(dim=0).t()  # (N,C)
 
 def voxel_sample(voxel_features: Tensor,
                  voxel_range: List[float],
@@ -777,92 +778,85 @@ def enhanced_batch_point_sample_in_visible(
     return point_features.squeeze().sum(dim=0).t()
 
 
-def _compute_redundant_attention(img_features_for_att, text_global_features_for_att, valid, temperature=1.0):
-    """Compute attention weights that emphasize redundant information.
+def _compute_redundant_attention(
+    img_features_for_att: Tensor,   # Shape: [M, D_fusion]
+    text_global_features_for_att: Tensor,  # Shape: [D_fusion]
+    valid: Tensor,                  # Shape: [M, Np]
+    temperature: float = 1.0
+) -> Tensor:                       # Return Shape: [M, Np]
+    """Compute attention weights that emphasize redundant information (single sample)."""
     
-    Args:
-        img_features_for_att: Image features [B, M, D_fusion]
-        text_global_features_for_att: Text features [B, D_fusion]
-        valid: Validity mask [B, M, Np]
-        temperature: Controls distribution peakiness
-        
-    Returns:
-        Tensor: Attention weights [B, M, Np]
-    """
     # L2 normalize both features for cosine similarity
-    img_norm = F.normalize(img_features_for_att, p=2, dim=-1)  # [B, M, D_fusion]
-    text_norm = F.normalize(text_global_features_for_att, p=2, dim=-1)  # [B, D_fusion]
+    img_norm = F.normalize(img_features_for_att, p=2, dim=-1)  # [M, D_fusion]
+    text_norm = F.normalize(text_global_features_for_att, p=2, dim=-1)  # [D_fusion]
     
-    # Compute cosine similarity (range [-1, 1])
-    cosine_sim = torch.bmm(img_norm, text_norm.unsqueeze(-1)).squeeze(-1)  # [B, M]
+    # Compute cosine similarity using matmul for [M, D] x [D] -> [M]
+    # Equivalent to dot product for each view feature with the text feature
+    cosine_sim = torch.matmul(img_norm, text_norm)  # [M] 
     
     # Rescale to [0, 1] range for consistency
     cosine_sim = (cosine_sim + 1) / 2
     
     # Apply validity mask and temperature-scaled softmax
-    attention = cosine_sim.unsqueeze(-1) * valid.float()  # [B, M, Np]
-    attention[~valid] = -1e4
-    attention = F.softmax(attention / temperature, dim=1)  # [B, M, Np]
+    # Unsqueeze cosine_sim to align with valid mask for broadcasting
+    attention = cosine_sim.unsqueeze(-1) * valid.float()  # [M, 1] * [M, Np] -> [M, Np]
+    attention[~valid] = -1e4 # Use a large negative number for stability with softmax
+    # Apply softmax across the 'M' dimension (views) for each point Np
+    attention = F.softmax(attention / temperature, dim=0)  # Apply softmax over views (dim=0)
     
     return attention
 
 
-def _compute_synergistic_attention(img_features_for_att, text_global_features_for_att, valid, temperature=1.0):
-    """Compute attention weights that emphasize synergistic information.
-    
-    Args:
-        img_features_for_att: Image features [B, M, D_fusion]
-        text_global_features_for_att: Text features [B, D_fusion]
-        valid: Validity mask [B, M, Np]
-        temperature: Controls distribution peakiness
-        
-    Returns:
-        Tensor: Attention weights [B, M, Np]
-    """
-    batch_size, num_views, dim = img_features_for_att.shape
+def _compute_synergistic_attention(
+    img_features_for_att: Tensor,   # Shape: [M, D_fusion]
+    text_global_features_for_att: Tensor,  # Shape: [D_fusion]
+    valid: Tensor,                  # Shape: [M, Np]
+    temperature: float = 1.0
+) -> Tensor:                       # Return Shape: [M, Np]
+    """Compute attention weights that emphasize synergistic information (single sample)."""
+    num_views, dim = img_features_for_att.shape
     
     # L2 normalize both features for consistency
-    img_norm = F.normalize(img_features_for_att, p=2, dim=-1)  # [B, M, D_fusion]
-    text_norm = F.normalize(text_global_features_for_att, p=2, dim=-1)  # [B, D_fusion]
+    img_norm = F.normalize(img_features_for_att, p=2, dim=-1)  # [M, D_fusion]
+    text_norm = F.normalize(text_global_features_for_att, p=2, dim=-1)  # [D_fusion]
     
-    # Compute projection magnitude (cosine similarity)
-    proj_magnitude = torch.bmm(
-        img_norm.view(batch_size * num_views, 1, dim),
-        text_norm.unsqueeze(1).expand(batch_size, num_views, dim).reshape(batch_size * num_views, dim, 1)
-    ).view(batch_size, num_views)  # [B, M] (range [-1, 1])
+    # Compute projection magnitude (cosine similarity) using matmul [M, D] x [D] -> [M]
+    proj_magnitude = torch.matmul(img_norm, text_norm) # [M] 
     
     # Orthogonality is higher when projection is closer to 0
     # Convert to [0, 1] range where 1 means most orthogonal
-    ortho_score = 1 - torch.abs(proj_magnitude)
+    ortho_score = 1 - torch.abs(proj_magnitude) # [M]
     
     # Apply validity mask and temperature-scaled softmax
-    attention = ortho_score.unsqueeze(-1) * valid.float()  # [B, M, Np]
-    attention[~valid] = -1e4
-    attention = F.softmax(attention / temperature, dim=1)  # [B, M, Np]
+    # Unsqueeze ortho_score to align with valid mask for broadcasting
+    attention = ortho_score.unsqueeze(-1) * valid.float()  # [M, 1] * [M, Np] -> [M, Np]
+    attention[~valid] = -1e4 # Use a large negative number
+    # Apply softmax across the 'M' dimension (views) for each point Np
+    attention = F.softmax(attention / temperature, dim=0)  # Apply softmax over views (dim=0)
     
     return attention
 
 
-def _combine_attention_distributions(redundant_att, synergistic_att, redundancy_weight, temperature=1.0):
-    """Combine redundant and synergistic attention distributions.
+def _combine_attention_distributions(
+    redundant_att: Tensor,    # Shape: [M, Np]
+    synergistic_att: Tensor,  # Shape: [M, Np]
+    redundancy_weight: float, 
+    temperature: float = 1.0
+) -> Tensor:                 # Return Shape: [M, Np]
+    """Combine redundant and synergistic attention distributions (single sample)."""
+    # Ensure inputs are probabilities (though softmax output already is)
+    redundant_att = torch.clamp(redundant_att, min=1e-10)
+    synergistic_att = torch.clamp(synergistic_att, min=1e-10)
     
-    Args:
-        redundant_att: Redundant attention weights [B, M, Np]
-        synergistic_att: Synergistic attention weights [B, M, Np]
-        redundancy_weight: Balance between redundant and synergistic (0-1)
-        temperature: Controls distribution peakiness
-        
-    Returns:
-        Tensor: Combined attention weights [B, M, Np]
-    """
-    # Convert to logits by applying inverse softmax
-    redundant_logits = torch.log(redundant_att + 1e-10) * temperature
-    synergistic_logits = torch.log(synergistic_att + 1e-10) * temperature
+    # Convert to logits by applying inverse softmax (log and scale by temp)
+    # Note: Softmax was applied over dim=0 (views)
+    redundant_logits = torch.log(redundant_att) * temperature
+    synergistic_logits = torch.log(synergistic_att) * temperature
     
     # Weighted combination of logits
     combined_logits = redundancy_weight * redundant_logits + (1 - redundancy_weight) * synergistic_logits
     
-    # Apply softmax to get final attention
-    combined_att = F.softmax(combined_logits / temperature, dim=1)
+    # Apply softmax again over the same dimension (dim=0)
+    combined_att = F.softmax(combined_logits / temperature, dim=0)
     
     return combined_att
