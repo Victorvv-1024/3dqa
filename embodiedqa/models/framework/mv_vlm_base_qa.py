@@ -501,7 +501,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             text_mask=text_dict['text_token_mask']
         )
 
-        
+        feat_dict['Z_PT'] = Z_PT # [B, Np, D_fusion]
         
         return feat_dict
     
