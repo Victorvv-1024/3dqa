@@ -27,6 +27,7 @@ from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints, e
 import open3d as o3d
 import os
 from .vision_fusion import VisionFusion
+from .point_view_fusion import PointViewFusion
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -83,10 +84,6 @@ class MultiViewVLMBase3DQA(BaseModel):
                  test_cfg: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
                  use_2d: bool = True,
-                 # --- New arguments for TGMF ---
-                 tgmf_mode: str = 'hybrid', # Default value if not in config
-                 tgmf_redundancy_weight: float = 0.5, # Default value
-                 tgmf_temperature: float = 1.0, # Default value
                  # --- New arguments for GGD ---
                  superpoint_cfg: ConfigType = None,
                  distillation_loss_cfg: ConfigType = None,
@@ -133,10 +130,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.coord_type = coord_type
         self.voxel_size = voxel_size
         
-        # --- New arguments for TGMF ---
-        self.tgmf_mode = tgmf_mode
-        self.tgmf_redundancy_weight = tgmf_redundancy_weight
-        self.tgmf_temperature = tgmf_temperature
+        # --- New arguments for Point-View fusion ---
+        self.point_view_fusion = PointViewFusion(
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Output dim of 3D backbone
+            view_dim=self.backbone.out_channels[-1],            # Output dim of 2D backbone
+            fusion_dim=self.fusion_encoder.config.hidden_size   # Common fusion dimension
+        )
         
         # --- New arguments for GGD ---
         Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
@@ -361,26 +360,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             proj_mat = torch.stack(projection) # n_views, 4, 4
 
             # TGMF happens here
-            # points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
-            #     img_meta,
-            #     img_features=img_features[-1][idx], # sample the last feature level
-            #     points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
-            #     views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
-            #     voxel_size=self.voxel_size,
-            #     proj_mat=proj_mat, # projects 3D points to 2D image plane
-            #     coord_type=self.coord_type,
-            #     img_scale_factor=img_scale_factor,
-            #     img_crop_offset=img_crop_offset,
-            #     img_flip=img_flip,
-            #     img_pad_shape=img.shape[-2:],
-            #     img_shape=img_meta['img_shape'][:2],
-            #     aligned=False,
-            #     return_valid_flag=True,
-            #     text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
-            #     img_features_for_att=img_features_for_att[idx])
-            
-            # Enhanced TGMF happens here to extract the text guided image features F_2d_text
-            points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = enhanced_batch_point_sample_in_visible(# (N, C), (N,)
+            # we get Z_TV in our framework
+            points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
                 img_meta,
                 img_features=img_features[-1][idx], # sample the last feature level
                 points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
@@ -396,10 +377,29 @@ class MultiViewVLMBase3DQA(BaseModel):
                 aligned=False,
                 return_valid_flag=True,
                 text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
-                img_features_for_att=img_features_for_att[idx], 
-                mode=self.tgmf_mode,
-                redundancy_weight=self.tgmf_redundancy_weight,
-                temperature=self.tgmf_temperature)
+                img_features_for_att=img_features_for_att[idx])
+            
+            # Enhanced TGMF happens here to extract the text guided image features F_2d_text
+            # points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = enhanced_batch_point_sample_in_visible(# (N, C), (N,)
+                # img_meta,
+                # img_features=img_features[-1][idx], # sample the last feature level
+                # points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
+                # views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
+                # voxel_size=self.voxel_size,
+                # proj_mat=proj_mat, # projects 3D points to 2D image plane
+                # coord_type=self.coord_type,
+                # img_scale_factor=img_scale_factor,
+                # img_crop_offset=img_crop_offset,
+                # img_flip=img_flip,
+                # img_pad_shape=img.shape[-2:],
+                # img_shape=img_meta['img_shape'][:2],
+                # aligned=False,
+                # return_valid_flag=True,
+                # text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
+                # img_features_for_att=img_features_for_att[idx], 
+                # mode=self.tgmf_mode,
+                # redundancy_weight=self.tgmf_redundancy_weight,
+                # temperature=self.tgmf_temperature)
             
             # extract the raw visible image features
             raw_points_imgfeat, _, _ = batch_point_sample_in_visible(# (N, C), (N,)
@@ -453,13 +453,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         # store the features in feat_dict for loss method and subsequent processing
         feat_dict['F_3d'] = F_3d
         feat_dict['F_2d_raw'] = F_2d_raw
-        feat_dict['F_2d_text_guided'] = F_2d_text_guided
+        feat_dict['Z_TV'] = F_2d_text_guided
 
-        
-        # self.debug_visualize_superpoints(feat_dict, batch_idx=0)
-        
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # +++ MODIFIED Superpoint Calculation Block                           +++
+        # +++ Superpoint Calculation Block                           +++
         # +++ Computes on ORIGINAL points, then maps to Np downsampled points +++
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # Compute superpoints on-the-fly for each batch item
@@ -536,20 +533,15 @@ class MultiViewVLMBase3DQA(BaseModel):
             print("No superpoints available, using original points")
             feat_dict['superpoint_ids_batched'] = None
             
-        # --- creating the F_distill ---
-        # Retrieve necessary inputs
-        F_3d_b = feat_dict.get('F_3d')
-        F_2d_raw_b = feat_dict.get('F_2d_raw')
-        sp_ids_b = feat_dict.get('superpoints', feat_dict.get('superpoint_ids_batched'))
-        # --- Call the new method to create F_distill ---
-        F_distill = self._create_distilled_features(F_3d_b, F_2d_raw_b, sp_ids_b)
-        if F_distill is not None:
-            feat_dict['F_distill'] = F_distill # Store the result [B, Np, D_fus]
-         
-        # Stop execution after debugging
-        # import sys
-        # print("Stopping execution for debugging purposes")
-        # sys.exit("Debug complete - terminating execution")
+        # --- creating the Z_PV ---
+        Z_PV = self.point_view_fusion(
+            F_3d, 
+            F_2d_raw, 
+            superpoint_ids=feat_dict.get('superpoint_ids_batched'),
+            valid_mask=img_feat_valid_flags
+        )
+        feat_dict['Z_PV'] = Z_PV # [B, Np, D_fusion]
+        
         
         return feat_dict
     
@@ -930,60 +922,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances_3d = data_instances_3d[i]
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
-    
-    # -- For creating the F_distill embedding --
-    def _create_distilled_features_with_pid(self, 
-                                      F_3d_batched: torch.Tensor,
-                                      F_2d_raw_batched: torch.Tensor,
-                                      superpoint_ids_batched: torch.Tensor) -> Optional[torch.Tensor]:
-        """
-        Creates distilled features with explicit modeling of redundancy, uniqueness, and synergy
-        """
-        if not self._create_f_distill_enabled:
-            return (F_3d_batched + F_2d_raw_batched) / 2
-
-        B, Np, D_fus = F_3d_batched.shape
-        device = F_3d_batched.device
-        
-        # --- Step 1: Refine F_2d_raw using superpoints (same as original) ---
-        F_2d_refined = self._refine_2d_features(F_2d_raw_batched, superpoint_ids_batched)
-        
-        # --- Step 2: Compute redundancy, uniqueness, and synergy terms ---
-        
-        # 2.1 Compute similarity for redundancy estimation
-        F_3d_norm = F.normalize(F_3d_batched, p=2, dim=2)
-        F_2d_norm = F.normalize(F_2d_refined, p=2, dim=2)
-        similarity = torch.sum(F_3d_norm * F_2d_norm, dim=2, keepdim=True)  # [B, Np, 1]
-        
-        # 2.2 Estimate redundancy component using similarity-weighted average
-        redundancy_weight = torch.sigmoid(similarity)  # [B, Np, 1]
-        F_redundant = redundancy_weight * F_3d_batched + (1 - redundancy_weight) * F_2d_refined
-        
-        # 2.3 Estimate uniqueness components
-        F_unique_3d = F_3d_batched - F_redundant  # Unique to point cloud
-        F_unique_2d = F_2d_refined - F_redundant  # Unique to multi-view
-        
-        # 2.4 Estimate synergy component using cross-interaction
-        F_cross = torch.cat([F_3d_batched, F_2d_refined], dim=2)
-        F_synergy = self.synergy_mlp(F_cross) - F_redundant - F_unique_3d - F_unique_2d
-        
-        # --- Step 3: Combine components with learnable or configurable weights ---
-        w_red = self.component_weights[0]
-        w_u3d = self.component_weights[1]
-        w_u2d = self.component_weights[2]
-        w_syn = self.component_weights[3]
-        
-        # Normalize weights to sum to 1
-        weights_sum = w_red + w_u3d + w_u2d + w_syn
-        w_red, w_u3d, w_u2d, w_syn = w_red/weights_sum, w_u3d/weights_sum, w_u2d/weights_sum, w_syn/weights_sum
-        
-        # Weighted combination of components
-        F_distill = (w_red * F_redundant + 
-                    w_u3d * F_unique_3d + 
-                    w_u2d * F_unique_2d + 
-                    w_syn * F_synergy)
-        
-        return F_distill
     
     # --- For debugging purposes ---
     # ... existing code ...
