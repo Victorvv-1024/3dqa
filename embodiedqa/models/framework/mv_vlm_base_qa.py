@@ -29,6 +29,7 @@ import os
 from .vision_fusion import VisionFusion
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
+from .tri_modal_fusion import TrimodalFusion
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -143,6 +144,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             text_dim=self.text_encoder.config.hidden_size,      # Text feature dim
             view_dim=self.fusion_encoder.config.hidden_size,    # View feature dim
             fusion_dim=self.fusion_encoder.config.hidden_size   # Output dim
+        )
+        
+        # --- New arguments for Tri-modal fusion ---
+        self.trimodal_fusion = TrimodalFusion(
+            fusion_dim=self.fusion_encoder.config.hidden_size
         )
         
         # --- New arguments for GGD ---
@@ -502,6 +508,15 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
 
         feat_dict['Z_PT'] = Z_PT # [B, Np, D_fusion]
+        
+        Z_TPV, fusion_weights = self.trimodal_fusion(
+            feat_dict['Z_TV'],
+            feat_dict['Z_PV'],
+            feat_dict['Z_PT']
+        )
+        
+        feat_dict['Z_TPV'] = Z_TPV
+        feat_dict['fusion_weights'] = fusion_weights
         
         return feat_dict
     
