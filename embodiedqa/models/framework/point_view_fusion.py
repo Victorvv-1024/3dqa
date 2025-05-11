@@ -64,7 +64,7 @@ class PointViewFusion(nn.Module):
             nn.LayerNorm(fusion_dim)
         )
         
-    def forward(self, point_features, view_features, superpoint_ids=None, valid_mask=None):
+    def forward(self, point_features, view_features, superpoint_ids=None):
         """
         Forward pass of the Point-View Fusion module.
         
@@ -84,10 +84,6 @@ class PointViewFusion(nn.Module):
         point_proj = self.point_proj(point_features)  # [B, Np, hidden_dim]
         view_proj = self.view_proj(view_features)  # [B, Np, hidden_dim]
         
-        # Apply visibility mask if provided
-        if valid_mask is not None:
-            visibility_weights = valid_mask.float().unsqueeze(-1)  # [B, Np, 1]
-            view_proj = view_proj * visibility_weights
         
         # Compute attention weights using point features to guide view feature selection
         concat_features = torch.cat([point_proj, view_proj], dim=-1)  # [B, Np, hidden_dim*2]

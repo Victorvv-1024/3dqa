@@ -154,6 +154,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.project_2d_raw = nn.Sequential(
                  nn.Linear(Di, D_fus),
                  nn.LayerNorm(D_fus)
+                 
             )
             # projection for Text-Guided 2D features
             self.project_2d_guided = nn.Sequential(
@@ -448,12 +449,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         F_2d_raw = self.project_2d_raw(raw_points_imgfeats) # [B, Np, D_fusion]
         
         # get the projected text guided image features
-        F_2d_text_guided = self.project_2d_guided(points_imgfeats) # [B, Np, D_fusion]
+        Z_TV = self.project_2d_guided(points_imgfeats) # [B, Np, D_fusion]
         
         # store the features in feat_dict for loss method and subsequent processing
-        feat_dict['F_3d'] = F_3d
-        feat_dict['F_2d_raw'] = F_2d_raw
-        feat_dict['Z_TV'] = F_2d_text_guided
+        # feat_dict['F_3d'] = F_3d # [B, Np, D_fusion]
+        # feat_dict['F_2d_raw'] = F_2d_raw # [B, Np, D_fusion]
+        feat_dict['Z_TV'] = Z_TV # [B, Np, D_fusion]
 
         # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
         # +++ Superpoint Calculation Block                           +++
@@ -530,7 +531,7 @@ class MultiViewVLMBase3DQA(BaseModel):
 
         
         else:
-            print("No superpoints available, using original points")
+            raise ValueError("No superpoints available, HAVEN'T been implemented yet.")
             feat_dict['superpoint_ids_batched'] = None
             
         # --- creating the Z_PV ---
@@ -538,7 +539,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             F_3d, 
             F_2d_raw, 
             superpoint_ids=feat_dict.get('superpoint_ids_batched'),
-            valid_mask=img_feat_valid_flags
         )
         feat_dict['Z_PV'] = Z_PV # [B, Np, D_fusion]
         
