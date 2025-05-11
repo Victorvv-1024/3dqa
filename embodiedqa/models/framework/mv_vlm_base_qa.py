@@ -28,6 +28,7 @@ import open3d as o3d
 import os
 from .vision_fusion import VisionFusion
 from .point_view_fusion import PointViewFusion
+from .point_text_fusion import PointTextFusion
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -87,7 +88,6 @@ class MultiViewVLMBase3DQA(BaseModel):
                  # --- New arguments for GGD ---
                  superpoint_cfg: ConfigType = None,
                  distillation_loss_cfg: ConfigType = None,
-                 create_f_distill_cfg: ConfigType = None,
                  init_cfg: OptConfigType = None):
         super().__init__(data_preprocessor=data_preprocessor,
                          init_cfg=init_cfg)
@@ -135,6 +135,14 @@ class MultiViewVLMBase3DQA(BaseModel):
             point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Output dim of 3D backbone
             view_dim=self.backbone.out_channels[-1],            # Output dim of 2D backbone
             fusion_dim=self.fusion_encoder.config.hidden_size   # Common fusion dimension
+        )
+        
+        # --- New arguments for Point-Text fusion ---
+        self.point_text_fusion = PointTextFusion(
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim
+            text_dim=self.text_encoder.config.hidden_size,      # Text feature dim
+            view_dim=self.fusion_encoder.config.hidden_size,    # View feature dim
+            fusion_dim=self.fusion_encoder.config.hidden_size   # Output dim
         )
         
         # --- New arguments for GGD ---
@@ -193,20 +201,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         else:
             self.distillation_loss_calculator = None
             
-        self.create_f_distill_cfg = create_f_distill_cfg if create_f_distill_cfg is not None else {}
-        self._create_f_distill_enabled = self.create_f_distill_cfg.get('enabled', False)
-
-        if self._create_f_distill_enabled:
-            # Component weights (redundancy, uniqueness_3d, uniqueness_2d, synergy)
-            self.component_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.5, 1.0]))
-            
-            # MLP for synergy estimation
-            self.synergy_mlp = nn.Sequential(
-                nn.Linear(D_fus * 2, D_fus),
-                nn.LayerNorm(D_fus),
-                nn.ReLU(),
-                nn.Linear(D_fus, D_fus)
-            )
         
 
     @property
@@ -496,6 +490,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             superpoint_ids=feat_dict.get('superpoint_ids_batched'),
         )
         feat_dict['Z_PV'] = Z_PV # [B, Np, D_fusion]
+        
+        # create the Z_PT
+        Z_PT = self.point_text_fusion(
+            F_3d,
+            text_dict['text_feats'],
+            Z_PV,
+            Z_TV,
+            superpoint_ids=feat_dict.get('superpoint_ids_batched'),
+            text_mask=text_dict['text_token_mask']
+        )
+
         
         
         return feat_dict
