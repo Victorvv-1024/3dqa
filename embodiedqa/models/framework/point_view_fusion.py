@@ -66,96 +66,94 @@ class PointViewFusion(nn.Module):
         
     def forward(self, point_features, view_features, superpoint_ids=None):
         """
-        Forward pass of the Point-View Fusion module.
+        Forward pass with geometry-guided attention for optimal point-view fusion.
         
         Args:
             point_features: Point cloud features [B, Np, D_point]
-            view_features: View features [B, Np, D_view]
+            view_features: View features [B, M, Np, D_view]
             superpoint_ids: Superpoint IDs [B, Np]
-            valid_mask: Visibility mask [B, Np]
-            
-        Returns:
-            Z_PV: Point-guided view features [B, Np, D_fusion]
         """
-        B, Np, _ = point_features.shape
-        device = point_features.device
+        B, M, Np, D_view = view_features.shape
         
         # Project features to common dimension
         point_proj = self.point_proj(point_features)  # [B, Np, hidden_dim]
-        view_proj = self.view_proj(view_features)  # [B, Np, hidden_dim]
         
+        # Process each view separately
+        view_attentions = []
+        for m in range(M):
+            # Get features for this view
+            view_m = view_features[:, m, :, :]  # [B, Np, D_view]
+            view_m_proj = self.view_proj(view_m)  # [B, Np, hidden_dim]
+            
+            # Compute attention weights using point features to guide view feature selection
+            concat_features = torch.cat([point_proj, view_m_proj], dim=-1)  # [B, Np, hidden_dim*2]
+            attention_weights = self.point_view_attention(concat_features)  # [B, Np, 1]
+            view_attentions.append(attention_weights)
         
-        # Compute attention weights using point features to guide view feature selection
-        concat_features = torch.cat([point_proj, view_proj], dim=-1)  # [B, Np, hidden_dim*2]
-        attention_weights = self.point_view_attention(concat_features)  # [B, Np, 1]
+        # Stack attention weights for all views
+        all_attentions = torch.stack(view_attentions, dim=1)  # [B, M, Np, 1]
         
         # Apply geometric constraint using superpoints if provided
         if superpoint_ids is not None:
-            refined_attention = self._apply_geometric_constraint(
-                attention_weights, superpoint_ids, point_proj, view_proj
+            refined_attentions = self._apply_geometric_constraint(
+                all_attentions, superpoint_ids, point_proj
             )
         else:
-            refined_attention = attention_weights
-            
-        # Apply attention to view features
-        attended_view = view_proj * refined_attention  # [B, Np, hidden_dim]
+            refined_attentions = all_attentions
         
-        # Combine attended view features with point features
-        combined = torch.cat([point_proj, attended_view], dim=-1)  # [B, Np, hidden_dim*2]
+        # Normalize attention weights across views
+        normalized_attentions = F.softmax(refined_attentions, dim=1)  # [B, M, Np, 1]
+        
+        # Weighted combination of view features
+        weighted_views = torch.zeros(B, Np, D_view, device=view_features.device)
+        for m in range(M):
+            weighted_views += normalized_attentions[:, m, :, :] * view_features[:, m, :, :]
+        
+        # Project weighted view features
+        weighted_views_proj = self.view_proj(weighted_views)  # [B, Np, hidden_dim]
+        
+        # Combine point and weighted view features
+        combined = torch.cat([point_proj, weighted_views_proj], dim=-1)  # [B, Np, hidden_dim*2]
         Z_PV = self.fusion_layer(combined)  # [B, Np, fusion_dim]
         
         return Z_PV
-    
-    def _apply_geometric_constraint(self, attention_weights, superpoint_ids, point_proj, view_proj):
+
+    def _apply_geometric_constraint(self, attention_weights, superpoint_ids, point_features):
         """
         Apply geometric constraint by enforcing consistency within superpoints.
         
         Args:
-            attention_weights: Initial attention weights [B, Np, 1]
+            attention_weights: Attention weights for views [B, M, Np, 1]
             superpoint_ids: Superpoint IDs [B, Np]
-            point_proj: Projected point features [B, Np, hidden_dim]
-            view_proj: Projected view features [B, Np, hidden_dim]
-            
-        Returns:
-            Geometrically refined attention weights [B, Np, 1]
+            point_features: Point features [B, Np, D]
         """
-        B, Np, _ = attention_weights.shape
-        device = attention_weights.device
+        B, M, Np, _ = attention_weights.shape
         refined_attention = attention_weights.clone()
         
-        # Process each batch separately
+        # Process each batch
         for b in range(B):
             sp_ids = superpoint_ids[b]  # [Np]
-            attn = attention_weights[b]  # [Np, 1]
             
-            # Get unique superpoint IDs (ignore -1 which means no superpoint)
+            # Get unique superpoint IDs
             unique_ids = torch.unique(sp_ids)
-            unique_ids = unique_ids[unique_ids >= 0]
+            unique_ids = unique_ids[unique_ids >= 0]  # Exclude invalid IDs
             
             # For each superpoint
             for sp_id in unique_ids:
                 # Find points belonging to this superpoint
                 mask = (sp_ids == sp_id)
                 if mask.sum() > 0:
-                    # Get features for points in this superpoint
-                    sp_point_features = point_proj[b, mask]  # [Ns, hidden_dim]
-                    sp_view_features = view_proj[b, mask]  # [Ns, hidden_dim]
-                    
-                    # Calculate mean attention within superpoint
-                    mean_attn = attn[mask].mean()
-                    
-                    # Compute geometric refinement
-                    concat_sp_features = torch.cat([sp_point_features, sp_view_features], dim=-1)  # [Ns, hidden_dim*2]
-                    geometric_features = self.geometric_refinement(concat_sp_features)  # [Ns, hidden_dim]
-                    
-                    # Compute similarity to mean feature
-                    mean_feature = geometric_features.mean(dim=0, keepdim=True)  # [1, hidden_dim]
-                    similarity = F.cosine_similarity(geometric_features, mean_feature, dim=-1).unsqueeze(-1)  # [Ns, 1]
-                    
-                    # Apply similarity-weighted averaging
-                    sp_refined_attn = mean_attn + 0.2 * (attn[mask] - mean_attn) * similarity
-                    
-                    # Update refined attention
-                    refined_attention[b, mask] = sp_refined_attn
+                    # Calculate mean attention within superpoint for each view
+                    for m in range(M):
+                        view_attn = attention_weights[b, m, :, :]  # [Np, 1]
+                        mean_attn = view_attn[mask].mean()
+                        
+                        # Compute features similarity within superpoint to determine confidence
+                        sp_features = point_features[b, mask]  # [Ns, D]
+                        mean_feature = sp_features.mean(dim=0, keepdim=True)  # [1, D]
+                        similarity = F.cosine_similarity(sp_features, mean_feature, dim=1).unsqueeze(-1)  # [Ns, 1]
+                        
+                        # Apply similarity-weighted averaging
+                        refined_attention[b, m, mask, :] = mean_attn + (view_attn[mask] - mean_attn) * similarity
         
         return refined_attention
