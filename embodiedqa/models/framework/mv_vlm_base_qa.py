@@ -30,6 +30,7 @@ from .vision_fusion import VisionFusion
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .tri_modal_fusion import TrimodalFusion
+from .pid import PIDDecomposition
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -131,26 +132,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.coord_type = coord_type
         self.voxel_size = voxel_size
         
-        # --- New arguments for Point-View fusion ---
-        self.point_view_fusion = PointViewFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Output dim of 3D backbone
-            view_dim=self.backbone.out_channels[-1],            # Output dim of 2D backbone
-            fusion_dim=self.fusion_encoder.config.hidden_size   # Common fusion dimension
-        )
-        
-        # --- New arguments for Point-Text fusion ---
-        self.point_text_fusion = PointTextFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim
-            text_dim=self.text_encoder.config.hidden_size,      # Text feature dim
-            view_dim=self.fusion_encoder.config.hidden_size,    # View feature dim
-            fusion_dim=self.fusion_encoder.config.hidden_size   # Output dim
-        )
-        
-        # --- New arguments for Tri-modal fusion ---
-        self.trimodal_fusion = TrimodalFusion(
-            fusion_dim=self.fusion_encoder.config.hidden_size
-        )
-        
         # --- New arguments for GGD ---
         Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
         # Define D_fus (target fusion dimension, e.g., hidden size of fusion_encoder)
@@ -182,9 +163,9 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size),
                                             nn.LayerNorm(self.fusion_encoder.config.hidden_size))
             # Original ADVP -- we are conceptually replacing it
-            # self.fusion_map = VisionFusion(Dp, self.backbone.out_channels[-1], D_fus)
+            self.fusion_map = VisionFusion(Dp, self.backbone.out_channels[-1], D_fus)
             # # This visual_feat_map was likely for the *output* of fusion_map
-            # self.visual_feat_map = nn.Linear(D_fus, D_fus)
+            self.visual_feat_map = nn.Linear(D_fus, D_fus)
         else:
             self.visual_feat_map = nn.Linear(Dp, D_fus)
             
@@ -206,6 +187,32 @@ class MultiViewVLMBase3DQA(BaseModel):
             print(f"Geometry-Guided Distillation Loss enabled with internal weight: {self.distillation_loss_calculator.loss_weight}")
         else:
             self.distillation_loss_calculator = None
+            
+        # pid decomposition module
+        self.pid_decomposition = PIDDecomposition(
+            fusion_dim=self.fusion_encoder.config.hidden_size,
+            bottleneck_ratio=2  # Adjust as needed for your feature dimensions
+        )
+        
+        # --- New arguments for Point-View fusion ---
+        self.point_view_fusion = PointViewFusion(
+            point_dim=D_fus,  # Output dim of 3D backbone
+            view_dim=D_fus,            # Output dim of 2D backbone
+            fusion_dim=D_fus   # Common fusion dimension
+        )
+        
+        # --- New arguments for Point-Text fusion ---
+        self.point_text_fusion = PointTextFusion(
+            point_dim=D_fus,  # 3D feature dim
+            text_dim=D_fus,      # Text feature dim
+            view_dim=D_fus,    # View feature dim
+            fusion_dim=D_fus   # Output dim
+        )
+        
+        # --- New arguments for Tri-modal fusion ---
+        self.trimodal_fusion = TrimodalFusion(
+            fusion_dim=D_fus
+        )
             
         
 
@@ -362,7 +369,7 @@ class MultiViewVLMBase3DQA(BaseModel):
 
             # TGMF happens here
             # we get Z_TV in our framework
-            raw_points_imgfeats, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(
+            raw_points_imgfeat, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(
                 img_meta,
                 img_features=img_features[-1][idx], # sample the last feature level
                 points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
@@ -490,6 +497,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             feat_dict['superpoint_ids_batched'] = None
             
         # --- creating the Z_PV ---
+        print(f"F_3d shape: {F_3d.shape}") # [B, Np, D_fusion]
+        print(f"F_2d_raw shape: {F_2d_raw.shape}") # [B, Np, D_fusion]
         Z_PV = self.point_view_fusion(
             F_3d, 
             F_2d_raw, 
@@ -517,6 +526,16 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         feat_dict['Z_TPV'] = Z_TPV
         feat_dict['fusion_weights'] = fusion_weights
+        
+        pid_output = self.pid_decomposition(
+            Z_TPV, 
+            feat_dict['Z_TV'],
+            feat_dict['Z_PV'],
+            feat_dict['Z_PT']
+        )
+        
+        feat_dict['pid_components'] = pid_output['components']
+        feat_dict['pid_weights'] = pid_output['weights']
         
         return feat_dict
     
@@ -641,7 +660,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-
+        
+        print(f"feat_dict keys: {feat_dict.keys()}")
+        exit(0)
+        
+        
         points = batch_inputs_dict['points']
         batch_size = len(points)
         losses = {}
