@@ -66,15 +66,30 @@ def compute_vccs_superpoints(
     N = points_xyz.shape[0]
     print(f"Starting VCCS: N={N}, voxel_size={voxel_size}, seed_spacing={seed_spacing}, "
           f"neighbor_voxel={neighbor_voxel_search}, neighbor_radius={neighbor_radius_search:.3f}, "
-          f"max_expand_dist={max_expand_dist:.3f}, update_interval={update_repr_interval}")
+          f"max_expand_dist={max_expand_dist:.3f}, update_interval={update_repr_interval}, "
+          f"weight={weights}")
     computation_start_time = time.time()
 
     if N == 0: return torch.tensor([], dtype=torch.long)
 
     # --- Ensure data is on the target device ---
-    points_xyz = points_xyz.to(device).float() # Ensure float
-    points_colors = points_colors.to(device).float()
-    points_normals = F.normalize(points_normals.to(device).float(), p=2, dim=1) # Ensure normalized float
+    if not isinstance(points_xyz, torch.Tensor):
+        points_xyz = torch.from_numpy(points_xyz)
+    points_xyz = points_xyz.to(device).float()
+
+    if points_colors is not None:
+        if not isinstance(points_colors, torch.Tensor):
+            points_colors = torch.from_numpy(points_colors)
+        points_colors = points_colors.to(device).float()
+    else:
+        # If no colors provided, use zeros. Assumes color dimension is 3.
+        # print("Warning: points_colors is None in compute_vccs_superpoints. Using dummy zeros.")
+        points_colors = torch.zeros((points_xyz.shape[0], 3), dtype=torch.float32, device=device)
+
+    if not isinstance(points_normals, torch.Tensor):
+        points_normals = torch.from_numpy(points_normals)
+    # Ensure normals are on the correct device and float type before normalization
+    points_normals = F.normalize(points_normals.to(device).float(), p=2, dim=1)
     wc, ws, wn = weights
 
     superpoint_ids = torch.full((N,), -1, dtype=torch.long, device=device)

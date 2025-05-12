@@ -211,7 +211,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # --- New arguments for Tri-modal fusion ---
         self.trimodal_fusion = TrimodalFusion(
-            fusion_dim=D_fus
+            fusion_dim=D_fus,
+            bottleneck_ratio=1,  # Adjust as needed for your feature dimensions
         )
             
         
@@ -414,14 +415,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         Z_TV = self.project_2d_guided(points_imgfeats) # [B, Np, D_fusion]
         
         # store the features in feat_dict for loss method and subsequent processing
-        # feat_dict['F_3d'] = F_3d # [B, Np, D_fusion]
-        # feat_dict['F_2d_raw'] = F_2d_raw # [B, Np, D_fusion]
+        feat_dict['F_3d'] = F_3d # [B, Np, D_fusion]
+        feat_dict['F_2d_raw'] = F_2d_raw # [B, Np, D_fusion]
         feat_dict['Z_TV'] = Z_TV # [B, Np, D_fusion]
 
-        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-        # +++ Superpoint Calculation Block                           +++
-        # +++ Computes on ORIGINAL points, then maps to Np downsampled points +++
-        # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        # +++Superpoint Calculation Block+++
+        # +++Computes on ORIGINAL points, then maps to Np downsampled points+++
         # Compute superpoints on-the-fly for each batch item
         if self._vccs_on_the_fly:
             superpoints_params = self.superpoint_config.get('params', {})
@@ -497,8 +496,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             feat_dict['superpoint_ids_batched'] = None
             
         # --- creating the Z_PV ---
-        print(f"F_3d shape: {F_3d.shape}") # [B, Np, D_fusion]
-        print(f"F_2d_raw shape: {F_2d_raw.shape}") # [B, Np, D_fusion]
         Z_PV = self.point_view_fusion(
             F_3d, 
             F_2d_raw, 
@@ -660,11 +657,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-        
-        print(f"feat_dict keys: {feat_dict.keys()}")
-        exit(0)
-        
-        
+            
         points = batch_inputs_dict['points']
         batch_size = len(points)
         losses = {}
@@ -672,10 +665,18 @@ class MultiViewVLMBase3DQA(BaseModel):
         # geometry-guided distillation loss
         if self.use_distillation_loss and self.distillation_loss_calculator is not None:
             F_3d_batched = feat_dict.get('F_3d') #  [B, Np, D_fus]
-            F_2d_raw_batched = feat_dict.get('F_2d_raw') #  [B, Np, D_fus]
+            F_2d_raw_batched = feat_dict.get('F_2d_raw')  # [B, M, Np, D_fus]
+            # Handle multi-view features by averaging across views
+            if len(F_2d_raw_batched.shape) == 4:
+                # Extract dimensions
+                B, M, Np, D_fus = F_2d_raw_batched.shape
+                
+                # Since invisible points have already been zeroed out in batch_point_sample_in_visible,
+                # simple averaging effectively gives us a weighted average over only visible views
+                F_2d_raw_batched = F_2d_raw_batched.mean(dim=1)  # [B, Np, D_fus]
+                
             assert F_3d_batched.shape == F_2d_raw_batched.shape, f"F_3d and F_2d_raw must have the same shape, but got {F_3d_batched.shape} and {F_2d_raw_batched.shape}"
             superpoint_ids_batched = feat_dict.get('superpoint_ids_batched', None) # Expected [B, Np]
-            print(f"superpoint_ids_batched shape: {superpoint_ids_batched.shape}") # [B, Np]
             
             if F_3d_batched is not None and F_2d_raw_batched is not None and superpoint_ids_batched is not None:
                 B, Np, D_fus = F_3d_batched.shape
@@ -700,7 +701,8 @@ class MultiViewVLMBase3DQA(BaseModel):
                 raise ValueError("Distillation loss inputs are not available.")
             
         exit(0)
-
+        # TODO: We need to think about how to use the features we created from PID decomposition
+        
         full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
         full_point_pos = feat_dict['fp_xyz'][-1]
         point_mask = None #B,proposal_num
