@@ -112,7 +112,7 @@ def compute_vccs_superpoints(
         adj_offsets = torch.tensor([
             (dx, dy, dz) for dx in [-1, 0, 1] for dy in [-1, 0, 1] for dz in [-1, 0, 1] if not (dx == 0 and dy == 0 and dz == 0)
         ], dtype=torch.long, device='cpu')
-        print(f"Built fine voxel grid ({len(voxel_map)} voxels).")
+        # print(f"Built fine voxel grid ({len(voxel_map)} voxels).")
         if not voxel_map: neighbor_voxel_search = False
 
 
@@ -131,7 +131,7 @@ def compute_vccs_superpoints(
             processed_seed_voxels.add(seed_voxel_key)
     seed_indices = torch.tensor(seed_indices_list, dtype=torch.long, device=device)
     num_seeds = len(seed_indices)
-    print(f"Selected {num_seeds} seed points.")
+    # print(f"Selected {num_seeds} seed points.")
     if num_seeds == 0: return torch.zeros((N,), dtype=torch.long)
 
 
@@ -154,7 +154,7 @@ def compute_vccs_superpoints(
     superpoint_repr_color = torch.zeros(num_seeds, 3, dtype=torch.float32, device=device)
     superpoint_repr_normal = torch.zeros(num_seeds, 3, dtype=torch.float32, device=device)
 
-    print("Initializing priority queue...")
+    # print("Initializing priority queue...")
     init_pq_start_time = time.time()
     pq_init_start = time.time() # Define pq_init_start here
 
@@ -361,7 +361,7 @@ def compute_vccs_superpoints(
     unassigned_mask = (superpoint_ids == -1)
     num_unassigned = unassigned_mask.sum().item()
     if num_unassigned > 0:
-        print(f"Handling {num_unassigned} unassigned points...")
+        # print(f"Handling {num_unassigned} unassigned points...")
         assign_start_time = time.time()
         unassigned_indices = torch.where(unassigned_mask)[0]
 
@@ -378,7 +378,7 @@ def compute_vccs_superpoints(
                 nearest_original_seed_indices = assigned_seed_indices[nearest_seed_indices_in_subset]
                 nearest_superpoint_ids = superpoint_ids[nearest_original_seed_indices]
                 superpoint_ids[unassigned_indices] = nearest_superpoint_ids
-                print(f"Assigned remaining points to nearest seed. ({time.time() - assign_start_time:.2f}s)")
+                # print(f"Assigned remaining points to nearest seed. ({time.time() - assign_start_time:.2f}s)")
             # ... (error handling if no seeds) ...
         # ... (error handling if no superpoints) ...
         

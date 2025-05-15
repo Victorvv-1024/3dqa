@@ -215,7 +215,7 @@ test_pipeline = [
 
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
-    batch_size=1, # 12
+    batch_size=4, # 12
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,

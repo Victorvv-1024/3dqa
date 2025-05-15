@@ -2,175 +2,129 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class PIDFusionEncoder(nn.Module):
-    """Maps PID components to visual and text features with cross-modal interaction."""
-    
-    def __init__(self, fusion_dim, hidden_dim=None, num_heads=4, num_layers=3):
+    def __init__(self, fusion_dim, hidden_dim=None, num_heads=8, num_layers=3):
         super().__init__()
-        if hidden_dim is None:
-            hidden_dim = fusion_dim
-            
-        # Visual component processors
-        self.visual_component_processors = nn.ModuleDict({
-            'unique_point': nn.Linear(fusion_dim, hidden_dim),
-            'unique_view': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_point_view': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_text_point': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_text_view': nn.Linear(fusion_dim, hidden_dim),
-            'redundancy': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_triple': nn.Linear(fusion_dim, hidden_dim)
-        })
+        self.fusion_dim = fusion_dim
+        self.hidden_dim = hidden_dim if hidden_dim is not None else fusion_dim
         
-        # Text component processors
-        self.text_component_processors = nn.ModuleDict({
-            'unique_text': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_text_point': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_text_view': nn.Linear(fusion_dim, hidden_dim),
-            'redundancy': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_triple': nn.Linear(fusion_dim, hidden_dim)
-        })
+        # CRITICAL FIX: Ensure internal dimensions match input dimensions
+        self.need_projection = self.fusion_dim != self.hidden_dim
+        if self.need_projection:
+            self.component_projection = nn.Linear(self.fusion_dim, self.hidden_dim)
+            # CRITICAL FIX: We need an output projection to go back to fusion_dim
+            self.output_projection = nn.Linear(self.hidden_dim, self.fusion_dim)
         
-        # Question-dependent weight prediction
-        self.visual_weight_predictor = nn.Sequential(
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 7),
-            nn.Softmax(dim=-1)
+        # Create transformer encoder for cross-modal interaction
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.hidden_dim,  # Use hidden_dim internally
+            nhead=num_heads,
+            dim_feedforward=self.hidden_dim * 4,
+            batch_first=True,
         )
-        
-        # Text weight predictor
-        self.text_weight_predictor = nn.Sequential(
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 5),
-            nn.Softmax(dim=-1)
-        )
-        
-        # NEW: Cross-modal interaction module (lightweight transformer)
         self.cross_modal_interaction = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=hidden_dim,
+            encoder_layer=encoder_layer,
+            num_layers=num_layers,
+        )
+        
+        # Text interaction transformer (if needed)
+        if True:  # Modify condition as needed
+            text_encoder_layer = nn.TransformerEncoderLayer(
+                d_model=self.fusion_dim,
                 nhead=num_heads,
-                dim_feedforward=hidden_dim * 2,
+                dim_feedforward=self.fusion_dim * 4,
                 batch_first=True,
-                norm_first=True
-            ),
-            num_layers=num_layers  # Number of transformer layers
+            )
+            self.text_interaction = nn.TransformerEncoder(
+                encoder_layer=text_encoder_layer,
+                num_layers=max(1, num_layers // 2),
+            )
+        
+        # CRITICAL FIX: Visual projection now takes fusion_dim as input
+        # Because we're projecting back to fusion_dim before this step
+        self.visual_projection = nn.Sequential(
+            nn.Linear(self.fusion_dim, self.fusion_dim),
+            nn.LayerNorm(self.fusion_dim),
         )
         
-        # Final projections
-        self.visual_proj = nn.Sequential(
-            nn.Linear(hidden_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
+        # Pooler for global feature
+        self.pooler = nn.Sequential(
+            nn.Linear(self.fusion_dim * 2, self.fusion_dim),
+            nn.LayerNorm(self.fusion_dim),
+            nn.ReLU(),
         )
-        
-        self.text_proj = nn.Sequential(
-            nn.Linear(hidden_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
-        
-    def forward(self, pid_components, text_global):
-        """
-        Maps PID components to visual and text features with cross-modal interaction.
-        
-        Args:
-            pid_components: Dictionary of PID components
-            text_global: Global text representation [B, D]
-            
-        Returns:
-            dict: Contains 'visual_feats' and 'lang_feats' matching MCGR output
-        """
+    
+    def forward(self, pid_components, text_global, text_feats=None, text_mask=None):
+        # Get batch size and device
         batch_size = text_global.shape[0]
+        device = text_global.device
         
-        # Process visual components
-        visual_inputs = {
-            name: self.visual_component_processors[name](pid_components[name])
-            for name in ['unique_point', 'unique_view', 'synergy_point_view', 
-                        'synergy_text_point', 'synergy_text_view',  # Added these
-                        'redundancy', 'synergy_triple']
-        }
+        # Extract and stack PID components
+        component_list = []
+        component_names = ['redundancy', 'unique_text', 'unique_point', 'unique_view',
+                         'synergy_text_point', 'synergy_text_view', 'synergy_point_view', 'synergy_triple']
         
-        # Process text components
-        text_inputs = {
-            name: self.text_component_processors[name](pid_components[name])
-            for name in ['unique_text', 'synergy_text_point', 'synergy_text_view', 
-                         'redundancy', 'synergy_triple']
-        }
+        for name in component_names:
+            if name in pid_components:
+                component_list.append(pid_components[name])
         
-        # Predict component weights based on question
-        visual_weights = self.visual_weight_predictor(text_global)  # [B, 7]
-        text_weights = self.text_weight_predictor(text_global)      # [B, 5]
+        if not component_list:
+            raise ValueError("No valid PID components found in input dictionary")
         
-        # Create weighted combinations (initial features)
-        visual_features_init = torch.zeros(
-            batch_size, 
-            max(comp.shape[1] for comp in visual_inputs.values()),
-            next(iter(visual_inputs.values())).shape[2], 
-            device=text_global.device
-        )
+        # Stack components along sequence dimension
+        stacked_components = torch.cat(component_list, dim=1)  # [B, Np*num_components, D]
+        seq_len = stacked_components.shape[1]
         
-        text_features_init = torch.zeros(
-            batch_size,
-            max(comp.shape[1] for comp in text_inputs.values()),
-            next(iter(text_inputs.values())).shape[2],
-            device=text_global.device
-        )
+        # Debug prints
+        print(f"stacked_components shape: {stacked_components.shape}")
+        if self.need_projection:
+            print(f"Projecting from {self.fusion_dim} to {self.hidden_dim}")
         
-        # Apply weights to each component and sum (same as before)
-        for i, (name, comp) in enumerate(visual_inputs.items()):
-            weight = visual_weights[:, i].view(batch_size, 1, 1)
-            if comp.shape[1] < visual_features_init.shape[1]:
-                # Pad if necessary
-                padding = visual_features_init.shape[1] - comp.shape[1]
-                comp = F.pad(comp, (0, 0, 0, padding))
-            visual_features_init += comp * weight
-            
-        for i, (name, comp) in enumerate(text_inputs.items()):
-            weight = text_weights[:, i].view(batch_size, 1, 1)
-            if comp.shape[1] < text_features_init.shape[1]:
-                # Pad if necessary
-                padding = text_features_init.shape[1] - comp.shape[1]
-                comp = F.pad(comp, (0, 0, 0, padding))
-            text_features_init += comp * weight
+        # Create component mask
+        component_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
         
-        # NEW: Cross-modal interaction
-        vis_len = visual_features_init.shape[1]
-        combined_features = torch.cat([visual_features_init, text_features_init], dim=1)
+        # Project if needed
+        if self.need_projection:
+            stacked_components = self.component_projection(stacked_components)
+            print(f"After projection: {stacked_components.shape}")
         
-        # Create padding mask for variable length sequences
-        seq_lengths = torch.tensor(
-            [vis_len, text_features_init.shape[1]], 
-            device=text_global.device
-        )
-        key_padding_mask = self._create_padding_mask(seq_lengths)
-        
-        # Apply cross-modal interaction
+        # Apply transformer
         interacted_features = self.cross_modal_interaction(
-            combined_features,
-            src_key_padding_mask=key_padding_mask
+            stacked_components,
+            src_key_padding_mask=component_mask
         )
         
-        # Split back to visual and text features
-        visual_features = interacted_features[:, :vis_len, :]
-        text_features = interacted_features[:, vis_len:, :]
+        # CRITICAL FIX: Project back to original dimension
+        if self.need_projection:
+            print(f"Interacted features before back-projection: {interacted_features.shape}")
+            interacted_features = self.output_projection(interacted_features)
+            print(f"Interacted features after back-projection: {interacted_features.shape}")
+        
+        # Process text if needed
+        processed_text = None
+        if text_feats is not None and hasattr(self, 'text_interaction'):
+            # Handle text mask
+            if text_mask is None:
+                text_mask = torch.zeros((batch_size, text_feats.shape[1]), dtype=torch.bool, device=device)
+            
+            # Invert mask if needed
+            text_mask_for_transformer = ~text_mask if text_mask.dtype == torch.bool else 1.0 - text_mask
+            
+            processed_text = self.text_interaction(
+                text_feats,
+                src_key_padding_mask=text_mask_for_transformer
+            )
         
         # Final projection
-        visual_features = self.visual_proj(visual_features)
-        text_features = self.text_proj(text_features)
+        visual_feats = self.visual_projection(interacted_features)
+        
+        # Create pooled feature
+        global_visual = visual_feats.mean(dim=1)  # [B, D]
+        pooler_feat = self.pooler(torch.cat([global_visual, text_global], dim=-1))
         
         return {
-            'visual_feats': visual_features,
-            'lang_feats': text_features
+            'visual_feats': visual_feats,
+            'visual_mask': None,
+            'lang_feats': processed_text if processed_text is not None else text_feats,
+            'pooler_feat': pooler_feat
         }
-    
-    def _create_padding_mask(self, seq_lengths):
-        """Creates padding mask for transformer."""
-        max_len = seq_lengths.sum()
-        batch_size = seq_lengths.shape[0]
-        mask = torch.zeros(batch_size, max_len, dtype=torch.bool, device=seq_lengths.device)
-        
-        for i in range(batch_size):
-            mask[i, seq_lengths[i]:] = True
-            
-        return mask
