@@ -168,9 +168,8 @@ class DeepCCATGMF(nn.Module):
     """
     Deep-CCA implementation for Text-Guided Multi-view Fusion (TGMF).
     
-    This module replaces the simple dot product attention in TGMF with a more
-    sophisticated Deep-CCA approach that learns transformations to maximize
-    the correlation between view features and text features.
+    This module implements both the forward pass (computing attention weights)
+    and the backward pass (computing CCA loss) for text-guided view fusion.
     """
     def __init__(self, view_dim, text_dim, output_dim, hidden_dim=512):
         super().__init__()
@@ -190,6 +189,9 @@ class DeepCCATGMF(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
         
+        # Save the dimensions for later use
+        self.output_dim = output_dim
+        
     def forward(self, img_features_for_att, text_global_features_for_att, valid=None):
         """
         Compute attention weights for views based on Deep-CCA principles.
@@ -200,19 +202,18 @@ class DeepCCATGMF(nn.Module):
             valid: Visibility mask [Mp, Np]
             
         Returns:
-            Tensor: Processed point features [Np, Di]
+            Tensor: Attention weights [Mp, Np]
         """
-        # Transform view features
-        view_proj = self.view_network(img_features_for_att)  # [Mp, output_dim]
+        # Q(Z_t): Query transformation for text
+        text_query = self.text_network(text_global_features_for_att)  # [output_dim]
         
-        # Transform text feature
-        text_proj = self.text_network(text_global_features_for_att)  # [output_dim]
+        # K(X_i): Key transformation for views
+        view_keys = self.view_network(img_features_for_att)  # [Mp, output_dim]
         
-        # Compute similarity in the correlated space (replace dot product)
-        # This is analogous to the CCA objective but in forward computation
-        similarity = torch.matmul(view_proj, text_proj) / torch.sqrt(torch.tensor(view_proj.shape[1], dtype=torch.float32))
+        # Compute attention weights: softmax(Q·K/√d)
+        similarity = torch.matmul(text_query, view_keys.transpose(-1, -2)) / torch.sqrt(torch.tensor(self.output_dim, dtype=torch.float32))
         
-        # Compute attention weights as in original code
+        # Apply visibility mask
         if valid is not None:
             similarity = similarity.unsqueeze(1) * valid.float()  # [Mp, Np]
             similarity[~valid] = -1e4
@@ -220,25 +221,50 @@ class DeepCCATGMF(nn.Module):
         # Return view weights
         return F.softmax(similarity, dim=0)  # [Mp, Np]
     
-def deep_cca_loss(view_features, text_features, view_network, text_network):
-    """
-    Compute the Deep-CCA loss between view features and text features.
-    """
-    # Transform features
-    view_proj = view_network(view_features)  # [B, M, output_dim]
-    text_proj = text_network(text_features)  # [B, output_dim]
-    
-    # Center the data
-    view_proj = view_proj - view_proj.mean(dim=0, keepdim=True)
-    text_proj = text_proj - text_proj.mean(dim=0, keepdim=True)
-    
-    # Compute covariance matrices
-    view_cov = (view_proj.transpose(-2, -1) @ view_proj) / (view_proj.shape[0] - 1)
-    text_cov = (text_proj.transpose(-2, -1) @ text_proj) / (text_proj.shape[0] - 1)
-    cross_cov = (view_proj.transpose(-2, -1) @ text_proj) / (view_proj.shape[0] - 1)
-    
-    # Compute correlation
-    corr = torch.trace(cross_cov @ cross_cov.transpose(-2, -1))
-    
-    # Negative correlation as loss
-    return -corr
+    def compute_loss(self, view_features, text_features):
+        """
+        Compute CCA loss for training the projections.
+        
+        This maximizes correlation between f₁(X₁)⊙α(Z_t) and f₂(X₂).
+        
+        Args:
+            view_features: View features [B, M, D]
+            text_features: Text features [B, D]
+            
+        Returns:
+            CCA loss (to be minimized)
+        """
+        # Transform features
+        view_proj = self.view_network(view_features)  # [B, M, output_dim]
+        text_proj = self.text_network(text_features)  # [B, output_dim]
+        
+        # Center the data
+        view_proj = view_proj - view_proj.mean(dim=0, keepdim=True)
+        text_proj = text_proj - text_proj.mean(dim=0, keepdim=True)
+        
+        # Compute covariance matrices
+        batch_size = view_proj.shape[0]
+        view_cov = (view_proj.transpose(-2, -1) @ view_proj) / (batch_size - 1)
+        text_cov = (text_proj.transpose(-2, -1) @ text_proj) / (batch_size - 1)
+        cross_cov = (view_proj.transpose(-2, -1) @ text_proj) / (batch_size - 1)
+        
+        # Compute regularized inverses of covariance matrices
+        eps = 1e-5  # Regularization to prevent numerical issues
+        view_cov_reg = view_cov + eps * torch.eye(view_cov.shape[-1], device=view_cov.device)
+        text_cov_reg = text_cov + eps * torch.eye(text_cov.shape[-1], device=text_cov.device)
+        
+        try:
+            view_cov_inv_sqrt = torch.linalg.inv(torch.linalg.cholesky(view_cov_reg))
+            text_cov_inv_sqrt = torch.linalg.inv(torch.linalg.cholesky(text_cov_reg))
+            
+            # Compute T_α
+            T_alpha = view_cov_inv_sqrt @ cross_cov @ text_cov_inv_sqrt
+            
+            # Compute tr(T⊤_α T_α) - equivalent to sum of squared canonical correlations
+            cca_loss = -torch.trace(T_alpha @ T_alpha.transpose(-2, -1))
+        except:
+            # Fallback if Cholesky decomposition fails
+            print("Warning: Cholesky decomposition failed, using trace of cross-covariance instead")
+            cca_loss = -torch.trace(cross_cov @ cross_cov.transpose(-2, -1))
+        
+        return cca_loss

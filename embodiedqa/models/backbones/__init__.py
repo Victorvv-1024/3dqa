@@ -7,8 +7,9 @@ from .hf_segformer import SegFormerModelWrapper
 from .hf_text_model import TextModelWrapper
 from .pointnet2_sa_ssg import PointNet2SASSG
 from .resnet import ResNet
+from .mink_resnet import MinkResNet
 __all__ = ['CLIPTextModelWrapper','CLIPVisionModelWrapper','ViTModelWrapper',
            'TextModelWrapper','BlipVisionModelWrapper','BlipTextModelWrapper','PointNet2SASSG',
            'FlavaVisionModelWrapper','FlavaTextModelWrapper','FlavaMultimodalModelWrapper','ResNet','SegFormerModelWrapper',
-           'SwinModelWrapper'
+           'SwinModelWrapper', 'MinkResNet'
            ]
