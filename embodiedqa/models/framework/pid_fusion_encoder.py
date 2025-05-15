@@ -6,23 +6,23 @@ import torch.nn.functional as F
 class PIDFusionEncoder(nn.Module):
     """Maps PID components to visual and text features with cross-modal interaction."""
     
-    def __init__(self, fusion_dim, hidden_dim=None, num_heads=4):
+    def __init__(self, fusion_dim, hidden_dim=None, num_heads=4, num_layers=3):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = fusion_dim
             
-        # Visual component processors (CORRECTED)
+        # Visual component processors
         self.visual_component_processors = nn.ModuleDict({
             'unique_point': nn.Linear(fusion_dim, hidden_dim),
             'unique_view': nn.Linear(fusion_dim, hidden_dim),
             'synergy_point_view': nn.Linear(fusion_dim, hidden_dim),
-            'synergy_text_point': nn.Linear(fusion_dim, hidden_dim),  # Added
-            'synergy_text_view': nn.Linear(fusion_dim, hidden_dim),   # Added
+            'synergy_text_point': nn.Linear(fusion_dim, hidden_dim),
+            'synergy_text_view': nn.Linear(fusion_dim, hidden_dim),
             'redundancy': nn.Linear(fusion_dim, hidden_dim),
             'synergy_triple': nn.Linear(fusion_dim, hidden_dim)
         })
         
-        # Text component processors (same as before)
+        # Text component processors
         self.text_component_processors = nn.ModuleDict({
             'unique_text': nn.Linear(fusion_dim, hidden_dim),
             'synergy_text_point': nn.Linear(fusion_dim, hidden_dim),
@@ -31,15 +31,15 @@ class PIDFusionEncoder(nn.Module):
             'synergy_triple': nn.Linear(fusion_dim, hidden_dim)
         })
         
-        # Question-dependent weight prediction (CORRECTED)
+        # Question-dependent weight prediction
         self.visual_weight_predictor = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 7),  # Changed from 5 to 7
+            nn.Linear(hidden_dim, 7),
             nn.Softmax(dim=-1)
         )
         
-        # Text weight predictor remains the same
+        # Text weight predictor
         self.text_weight_predictor = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.ReLU(),
@@ -56,7 +56,7 @@ class PIDFusionEncoder(nn.Module):
                 batch_first=True,
                 norm_first=True
             ),
-            num_layers=1  # Just one layer for efficiency
+            num_layers=num_layers  # Number of transformer layers
         )
         
         # Final projections
@@ -87,7 +87,8 @@ class PIDFusionEncoder(nn.Module):
         visual_inputs = {
             name: self.visual_component_processors[name](pid_components[name])
             for name in ['unique_point', 'unique_view', 'synergy_point_view', 
-                         'redundancy', 'synergy_triple']
+                        'synergy_text_point', 'synergy_text_view',  # Added these
+                        'redundancy', 'synergy_triple']
         }
         
         # Process text components
@@ -98,7 +99,7 @@ class PIDFusionEncoder(nn.Module):
         }
         
         # Predict component weights based on question
-        visual_weights = self.visual_weight_predictor(text_global)  # [B, 5]
+        visual_weights = self.visual_weight_predictor(text_global)  # [B, 7]
         text_weights = self.text_weight_predictor(text_global)      # [B, 5]
         
         # Create weighted combinations (initial features)

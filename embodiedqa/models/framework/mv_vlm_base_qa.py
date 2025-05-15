@@ -31,6 +31,7 @@ from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .tri_modal_fusion import TrimodalFusion
 from .pid import PIDDecomposition
+from .pid_fusion_encoder import PIDFusionEncoder
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -214,6 +215,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_dim=D_fus,
             bottleneck_ratio=1,  # Adjust as needed for your feature dimensions
         )
+        
+        # --- New arguments for PID fusion encoder ---
+        self.pid_fusion_encoder = PIDFusionEncoder(
+            fusion_dim=D_fus,
+            hidden_dim=D_fus // 2,
+            num_heads=8,
+            num_layers=3,
+        )
+        self.use_pid_fusion_encoder = True if self.pid_fusion_encoder else False
+        
+        
             
         
 
@@ -700,29 +712,34 @@ class MultiViewVLMBase3DQA(BaseModel):
             else:
                 raise ValueError("Distillation loss inputs are not available.")
             
-        exit(0)
-        # TODO: We need to think about how to use the features we created from PID decomposition
+        """Original MCGR"""
+        # full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
+        # full_point_pos = feat_dict['fp_xyz'][-1]
+        # point_mask = None #B,proposal_num
+
+        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+        # point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
+        # point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
+
+        # head_inputs_dict = self.forward_transformer(point_feats=point_feats,
+        #                                             point_pos=point_pos,
+        #                                             point_mask=point_mask,
+        #                                             text_dict=text_dict,
+        #                                             full_point_feats=full_point_feats,
+        #                                             full_point_pos=full_point_pos)
         
-        full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
-        full_point_pos = feat_dict['fp_xyz'][-1]
-        point_mask = None #B,proposal_num
-
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
-        point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
-
-        head_inputs_dict = self.forward_transformer(point_feats=point_feats,
-                                                    point_pos=point_pos,
-                                                    point_mask=point_mask,
-                                                    text_dict=text_dict,
-                                                    full_point_feats=full_point_feats,
-                                                    full_point_pos=full_point_pos)
+        # TODO: We need to think about how to use the features we created from PID decomposition
+        head_inputs_dict = self._forward_pid_fusion(feat_dict, text_dict)
+        # Add masks from original inputs
+        # point_mask = None #B,proposal_num
+        # head_inputs_dict['language_mask'] = text_dict['text_token_mask']
+        
+        
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                      ret_fusion_feat=True,
                                      batch_data_samples=batch_data_samples)
         losses.update(qa_losses)
         
-       
         
         if self.with_target_bbox_head:
             ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
@@ -923,6 +940,27 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
     
+    def _forward_pid_fusion(self, feat_dict, text_dict):
+        """
+        Process PID components through PIDFusionEncoder.
+        
+        Args:
+            feat_dict (dict): Dictionary containing PID components
+            text_dict (dict): Dictionary containing text features
+            
+        Returns:
+            dict: Dictionary containing 'visual_feats' and 'lang_feats'
+        """
+        pid_components = feat_dict['pid_components']
+        text_global = text_dict['text_global_token']
+        
+        # Forward through PIDFusionEncoder
+        fusion_output = self.pid_fusion_encoder(
+            pid_components=pid_components,
+            text_global=text_global
+        )
+        
+        return fusion_output
     # --- For debugging purposes ---
     # ... existing code ...
     @torch.no_grad()
