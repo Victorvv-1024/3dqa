@@ -6,5 +6,5 @@ __all__ = [
            'CrossModalityEncoder',
            'PointFPModule', 'build_sa_module',
            'aligned_3d_nms','box3d_multiclass_nms',
-           'VoteModule',
+           'VoteModule'
            ]
