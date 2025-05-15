@@ -33,16 +33,19 @@ model = dict(
     #                 used_hidden_layers=[12],
     #                 frozen=True,
     #                 ),
+    # 2D multi-view backbone
     backbone = dict(type='SwinModelWrapper', 
                     name='microsoft/swin-base-patch4-window7-224-in22k',
                     out_channels=[1024],
                     add_map=True,
                     frozen=True,
                     ),
+    # text backbone
     backbone_text = dict(type='TextModelWrapper', 
                          name='sentence-transformers/all-mpnet-base-v2', 
                          frozen=False,
                          ),
+    text_max_length=512,
     # backbone_text = dict(type='TextModelWrapper', 
     #                      name='facebook/bart-base', 
     #                      frozen=False),
@@ -52,6 +55,7 @@ model = dict(
                            num_attention_heads=12,
                            num_hidden_layers = 4,
                            ),
+    # point cloud backbone
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -69,7 +73,7 @@ model = dict(
                         normalize_xyz=True),
                     frozen = False,
                     ),
-    text_max_length=512,
+    
     target_bbox_head=dict(type='RefLocHead',
                         bbox_coder=dict(
                             type='PartialBinBasedBBoxCoder',
@@ -115,6 +119,47 @@ model = dict(
                    hidden_channels = 768,
                    dropout=0.3,
                    ),
+    
+    # ---- Enhanced TGMF parameters ----
+    # tgmf_mode = 'hybrid',
+    # tgmf_redundancy_weight = 0.5,
+    # tgmf_temperature = 1.0,
+    # ---- End of Enhanced TGMF parameters ----
+    
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    # +++ VCCS Configuration for On-the-fly Superpoint Calculation +++
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    superpoint_cfg=dict(
+        enabled_on_the_fly=True, # whether to use on-the-fly superpoint calculation
+        use_colors=True, # whether to use color information
+        params=dict(
+            voxel_size=0.02,
+            seed_spacing=0.5, # default, we used 0.8 before
+            neighbor_voxel_search=True,
+            neighbor_radius_search=0.05,
+            max_expand_dist=1.0,
+            wc=0.2, # weight of color information
+            ws=0.4, # weight of spatial information (we used 0.7 before)
+            wn=1.0, # weight of normal information
+        )),
+    distillation_loss_cfg = dict(
+        type='GeometryGuidedDistillationLoss',
+        loss_weight=1.0, # overall weight of this loss component
+        lambda_p=1.0, # weight for the point-wise loss component
+        lambda_sp=1.0, # weight for the superpoint-wise loss component
+        loss_type='cosine', # type of similarity/distance metric ('cosine' or 'mse')
+        reduction='mean', # method to reduce the loss ('mean', 'sum', 'none')
+        debug=True, # if True, prints intermediate loss values
+    ),
+    # create_f_distill_cfg = dict(
+    #     enabled=True, # whether to use F_distill
+    #     refine_2d_enabled=True, # whether to use 2D refinement
+    #     refine_2d_alpha=0.5, # weight for original F_2d_raw in refinement
+    #     final_beta=0.5,  # weight for F_3d in the final combination
+    #     use_mlp_for_fusion=False, # whether to use MLP for fusion
+    #     mlp_hidden_dim=None, # hidden dimension for MLP
+    # ),
+    
     # model training and testing settings
     train_cfg=dict(
         pos_distance_thr=0.3, neg_distance_thr=0.6, sample_mode='seed'),
@@ -170,7 +215,7 @@ test_pipeline = [
 
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
-    batch_size=12,
+    batch_size=1, # 12
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
