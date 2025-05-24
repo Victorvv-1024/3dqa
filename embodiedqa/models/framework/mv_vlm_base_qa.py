@@ -28,10 +28,12 @@ import open3d as o3d
 import os
 from .vision_fusion import VisionFusion
 from .point_view_fusion import PointViewFusion
-from .point_text_fusion import PointTextFusion
+from .point_text_fusion import PointTextFusion, DirectPointTextFusion
 from .tri_modal_fusion import TrimodalFusion
 from .pid import PIDDecomposition
 from .pid_fusion_encoder import PIDFusionEncoder
+from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
+
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -203,12 +205,19 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # --- New arguments for Point-Text fusion ---
-        self.point_text_fusion = PointTextFusion(
+        # self.point_text_fusion = PointTextFusion(
+        #     point_dim=D_fus,  # 3D feature dim
+        #     text_dim=D_fus,      # Text feature dim
+        #     view_dim=D_fus,    # View feature dim
+        #     fusion_dim=D_fus   # Output dim
+        # )
+        # to use Direct Fusion
+        self.point_text_fusion = DirectPointTextFusion(
             point_dim=D_fus,  # 3D feature dim
             text_dim=D_fus,      # Text feature dim
-            view_dim=D_fus,    # View feature dim
             fusion_dim=D_fus   # Output dim
         )
+        
         
         # --- New arguments for Tri-modal fusion ---
         self.trimodal_fusion = TrimodalFusion(
@@ -225,7 +234,62 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         self.use_pid_fusion_encoder = True if self.pid_fusion_encoder else False
         
-        
+        # --- New arguments for uncertainty weighting ---
+        # Initialize uncertainty weighting for multi-task learning
+        if train_cfg is not None and train_cfg.get('use_uncertainty_weighting', True):
+            print("Initializing uncertainty weighting for multi-task learning...")
+            
+            # Define task configurations
+            uncertainty_task_configs = []
+            
+            # Always include QA classification task
+            uncertainty_task_configs.append({
+                'name': 'qa_cls_loss',
+                'type': 'classification'
+            })
+            
+            # Add target bbox head (3D localization - regression task)  
+            if target_bbox_head is not None:
+                uncertainty_task_configs.append({
+                    'name': 'ref_loc_loss',
+                    'type': 'regression'
+                })
+            
+            # Add target classification head
+            if target_cls_head is not None:
+                uncertainty_task_configs.append({
+                    'name': 'ref_cls_loss', 
+                    'type': 'classification'
+                })
+            
+            # Add situation prediction head if present
+            if situation_predict_head is not None:
+                uncertainty_task_configs.append({
+                    'name': 'situation_predict_loss',
+                    'type': 'classification'
+                })
+            
+            # Add distillation loss if enabled
+            if self.use_distillation_loss:
+                uncertainty_task_configs.append({
+                    'name': 'loss_distill',
+                    'type': 'regression'
+                })
+            
+            # Initialize the uncertainty weighting layer
+            self.uncertainty_weighting = UncertaintyWeightingLayer(
+                task_configs=uncertainty_task_configs,
+                init_log_var_range=(-1.0, 1.0),  # Initial log variance range
+                min_log_var=-10.0,               # For numerical stability
+                max_log_var=10.0                 # Prevent infinite weights
+            )
+            
+            print(f"Uncertainty weighting initialized with {len(uncertainty_task_configs)} tasks")
+            for config in uncertainty_task_configs:
+                print(f"  - {config['name']}: {config['type']}")
+        else:
+            self.uncertainty_weighting = None
+            print("Uncertainty weighting disabled")
             
         
 
@@ -666,7 +730,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         Returns:
             dict: A dictionary of loss components.
         """
-        
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
             
@@ -693,11 +756,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             if F_3d_batched is not None and F_2d_raw_batched is not None and superpoint_ids_batched is not None:
                 B, Np, D_fus = F_3d_batched.shape
                 F_3d_flat = F_3d_batched.reshape(-1, D_fus)
-                print(f"F_3d_flat shape: {F_3d_flat.shape}") # [B*Np, D_fus]
+                # print(f"F_3d_flat shape: {F_3d_flat.shape}") # [B*Np, D_fus]
                 F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
-                print(f"F_2d_raw_flat shape: {F_2d_raw_flat.shape}") # [B*Np, D_fus]
+                # print(f"F_2d_raw_flat shape: {F_2d_raw_flat.shape}") # [B*Np, D_fus]
                 superpoint_ids_flat = superpoint_ids_batched.reshape(-1) # [B*Np]
-                print(f"superpoint_ids_flat shape: {superpoint_ids_flat.shape}")
+                # print(f"superpoint_ids_flat shape: {superpoint_ids_flat.shape}")
                 
                 # Create batch_idx for scatter_mean
                 batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1) # [B*Np]
@@ -729,7 +792,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         #                                             full_point_pos=full_point_pos)
         
         # TODO: We need to think about how to use the features we created from PID decomposition
-        head_inputs_dict = self._forward_pid_fusion(feat_dict, text_dict)
+        # head_inputs_dict = self._forward_pid_fusion(feat_dict, text_dict)
         # Add masks from original inputs
         # point_mask = None #B,proposal_num
         # head_inputs_dict['language_mask'] = text_dict['text_token_mask']
@@ -800,6 +863,19 @@ class MultiViewVLMBase3DQA(BaseModel):
         if self.with_situation_predict_head:
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
             losses.update(situation_predict_loss)  
+            
+        if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
+            print("Applying uncertainty weighting to losses...")
+            losses = self.uncertainty_weighting(losses)
+            
+            # Log current task weights and uncertainties for monitoring
+            if self.training:  # Only log during training to avoid clutter
+                current_weights = self.uncertainty_weighting.get_task_weights()
+                current_uncertainties = self.uncertainty_weighting.get_uncertainties()
+                
+                print("Current task weights:", current_weights)
+                print("Current uncertainties:", current_uncertainties)
+
             
         losses = self.loss_collect(losses)
         return losses

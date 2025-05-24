@@ -4,7 +4,9 @@ from .reduce_loss import weighted_loss
 from .rotated_iou_loss import RotatedIoU3DLoss
 from .axis_aligned_iou_loss import AxisAlignedIoULoss
 from .geometry_guided_distillation import GeometryGuidedDistillationLoss
+from .uncertainty_weighting import UncertaintyWeightingLayer
 __all__ = [
     'RotatedIoU3DLoss','AxisAlignedIoULoss','weighted_loss', 'BBoxCDLoss', 'bbox_to_corners',
     'BBox3DL1Cost', 'IoU3DCost', 'BinaryFocalLossCost',
-    'ChamferDistance','chamfer_distance', 'GeometryGuidedDistillationLoss']
+    'ChamferDistance','chamfer_distance', 'GeometryGuidedDistillationLoss',
+    'UncertaintyWeightingLayer']
