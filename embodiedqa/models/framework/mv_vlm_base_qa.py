@@ -388,8 +388,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         else: # (B, C, H, W) No Multi-view
             img_features_dict = self.backbone(img) # directly pass through the 2D Swin backbone 
             img_features, img_global_features = img_features_dict['layer_outputs'], img_features_dict['pooler_output']
-            print(f"img_features shape: {img_features.shape}") # [B, Di, H, W]
-            print(f"img_global_features shape: {img_global_features.shape}") # [B, Di]
+
+        feat_dict['superpoint_ids_batched'] = self._extract_precomputed_superpoints(
+            batch_data_samples, B, Np, current_device
+        )
             
         all_points_imgfeats = []
         img_feat_valid_flags = []
@@ -580,11 +582,18 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['Z_PV'] = Z_PV # [B, Np, D_fusion]
         
         # create the Z_PT
+        # Z_PT = self.point_text_fusion(
+        #     F_3d,
+        #     text_dict['text_feats'],
+        #     Z_PV,
+        #     Z_TV,
+        #     superpoint_ids=feat_dict.get('superpoint_ids_batched'),
+        #     text_mask=text_dict['text_token_mask']
+        # )
+        # -- Direct Z_PT Fusion --  
         Z_PT = self.point_text_fusion(
-            F_3d,
-            text_dict['text_feats'],
-            Z_PV,
-            Z_TV,
+            F_3d,  # point_features
+            text_dict['text_feats'],  # text_features
             superpoint_ids=feat_dict.get('superpoint_ids_batched'),
             text_mask=text_dict['text_token_mask']
         )
@@ -1396,3 +1405,112 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Exit for debugging purposes
         import sys
         sys.exit("Debug complete - terminating execution")
+        
+    def _extract_precomputed_superpoints(
+        self, 
+        batch_data_samples: SampleList, 
+        batch_size: int, 
+        num_points: int, 
+        device: torch.device
+    ) -> torch.Tensor:
+        """
+        Extract and process pre-computed superpoints from batch data samples.
+        
+        Args:
+            batch_data_samples: List of data samples containing pre-computed superpoints
+            batch_size: Number of samples in the batch
+            num_points: Number of downsampled points (Np)
+            device: Target device for tensors
+            
+        Returns:
+            Tensor of shape [B, Np] containing superpoint IDs for downsampled points
+        """
+        batch_superpoint_ids = []
+        
+        for b in range(batch_size):
+            data_sample = batch_data_samples[b]
+            
+            # Get pre-computed superpoints from dataset
+            if (hasattr(data_sample, 'precomputed_superpoint_ids') and 
+                data_sample.precomputed_superpoint_ids is not None):
+                
+                # These are superpoint IDs for the original point cloud [N_original]
+                original_superpoint_ids = torch.from_numpy(
+                    data_sample.precomputed_superpoint_ids
+                ).long().to(device)
+                
+                # Map to downsampled points using FP indices
+                fp_indices_b = self.feat_dict['last_fp_indices'][b]  # [Np] indices into original
+                fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoint_ids.shape[0] - 1)
+                
+                # Get superpoint IDs for downsampled points
+                superpoint_ids_for_np = original_superpoint_ids[fp_indices_b]  # [Np]
+                
+            else:
+                # Fallback: assign all points to a single superpoint or invalid
+                print(f"Warning: No pre-computed superpoints found for sample {b}, using fallback")
+                superpoint_ids_for_np = torch.full(
+                    (num_points,), -1, dtype=torch.long, device=device
+                )
+            
+            batch_superpoint_ids.append(superpoint_ids_for_np)
+        
+        # Stack into batch tensor
+        try:
+            superpoint_ids_batched = torch.stack(batch_superpoint_ids, dim=0)  # [B, Np]
+            print(f"Successfully extracted pre-computed superpoints: {superpoint_ids_batched.shape}")
+            return superpoint_ids_batched
+        except Exception as e:
+            print(f"Error stacking pre-computed superpoints: {e}")
+            # Return tensor of invalid IDs as fallback
+            return torch.full(
+                (batch_size, num_points), -1, dtype=torch.long, device=device
+            )
+
+    def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
+        """
+        Validate and provide statistics about the loaded pre-computed superpoints.
+        
+        Args:
+            superpoint_ids_batched: Tensor of shape [B, Np] with superpoint IDs
+            
+        Returns:
+            Dictionary with validation statistics
+        """
+        B, Np = superpoint_ids_batched.shape
+        stats = {}
+        
+        for b in range(B):
+            sp_ids = superpoint_ids_batched[b]
+            valid_mask = sp_ids >= 0
+            
+            if valid_mask.sum() > 0:
+                unique_ids = torch.unique(sp_ids[valid_mask])
+                stats[f'batch_{b}'] = {
+                    'valid_points': valid_mask.sum().item(),
+                    'total_points': Np,
+                    'num_superpoints': len(unique_ids),
+                    'coverage': valid_mask.sum().item() / Np
+                }
+            else:
+                stats[f'batch_{b}'] = {
+                    'valid_points': 0,
+                    'total_points': Np,
+                    'num_superpoints': 0,
+                    'coverage': 0.0
+                }
+        
+        # Overall statistics
+        total_valid = sum(stats[f'batch_{b}']['valid_points'] for b in range(B))
+        total_points = B * Np
+        overall_coverage = total_valid / total_points if total_points > 0 else 0.0
+        
+        stats['overall'] = {
+            'total_valid_points': total_valid,
+            'total_points': total_points,
+            'overall_coverage': overall_coverage,
+            'batch_size': B,
+            'points_per_sample': Np
+        }
+        
+        return stats

@@ -82,8 +82,14 @@ class UncertaintyWeightingLayer(nn.Module):
             - Individual weighted losses for each task
             - Task weights and uncertainties for monitoring
         """
+        if not losses_dict:
+            return losses_dict
+            
+        # Get device from first loss tensor
         device = next(iter(losses_dict.values())).device
-        total_weighted_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+        
+        # Initialize total_weighted_loss as None to handle first addition properly
+        total_weighted_loss = None
         
         result_dict = {}
         task_weights = {}
@@ -93,7 +99,12 @@ class UncertaintyWeightingLayer(nn.Module):
             if task_name not in self.task_name_to_idx:
                 # Task not in our weighting scheme, add it unweighted
                 result_dict[task_name] = loss_value
-                total_weighted_loss += loss_value
+                
+                # Handle first addition or accumulate
+                if total_weighted_loss is None:
+                    total_weighted_loss = loss_value.clone()
+                else:
+                    total_weighted_loss = total_weighted_loss + loss_value
                 continue
             
             # Get task configuration
@@ -105,6 +116,10 @@ class UncertaintyWeightingLayer(nn.Module):
             
             # Convert to variance: σ² = exp(log_var)
             variance = torch.exp(log_var)
+            
+            # Ensure loss_value is a tensor and get its shape for consistency
+            if not isinstance(loss_value, torch.Tensor):
+                loss_value = torch.tensor(loss_value, device=device, dtype=torch.float32)
             
             # Apply uncertainty weighting based on task type
             if task_type == 'regression':
@@ -127,17 +142,25 @@ class UncertaintyWeightingLayer(nn.Module):
             result_dict[task_name] = loss_value  # Keep original for monitoring
             uncertainties[task_name] = variance.item()
             
-            total_weighted_loss += weighted_loss
+            # Handle first addition or accumulate with proper shape handling
+            if total_weighted_loss is None:
+                total_weighted_loss = weighted_loss.clone()
+            else:
+                total_weighted_loss = total_weighted_loss + weighted_loss
+        
+        # Ensure total_weighted_loss is properly initialized
+        if total_weighted_loss is None:
+            total_weighted_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
         
         # Add summary information
         result_dict['total_weighted_loss'] = total_weighted_loss
         
         # Add monitoring information (these won't contribute to gradients)
         for task_name, weight in task_weights.items():
-            result_dict[f"weight_{task_name}"] = torch.tensor(weight, device=device)
+            result_dict[f"weight_{task_name}"] = torch.tensor(weight, device=device, dtype=torch.float32)
         
         for task_name, uncertainty in uncertainties.items():
-            result_dict[f"uncertainty_{task_name}"] = torch.tensor(uncertainty, device=device)
+            result_dict[f"uncertainty_{task_name}"] = torch.tensor(uncertainty, device=device, dtype=torch.float32)
         
         return result_dict
     
