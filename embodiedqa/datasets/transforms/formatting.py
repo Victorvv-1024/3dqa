@@ -27,6 +27,9 @@ def to_tensor(
     Returns:
         torch.Tensor: the converted data.
     """
+    # ADD THIS CHECK AT THE BEGINNING:
+    # if data is None:
+    #     return None
 
     if isinstance(data, torch.Tensor):
         return data
@@ -62,6 +65,8 @@ class Pack3DDetInputs(BaseTransform):
         'gt_seg_map', 'pts_instance_mask', 'pts_semantic_mask',
         'gt_semantic_seg'
     ]
+    
+    SUPERPOINT_KEYS = ['superpoint_3d']
 
     def __init__(
         self,
@@ -271,6 +276,11 @@ class Pack3DDetInputs(BaseTransform):
                     else:
                         data_sample.gt_occupancy_masks = to_tensor(
                             results['gt_occupancy_masks'])
+                # ADD THIS ELIF CONDITION HERE:
+                elif key in self.SUPERPOINT_KEYS:
+                    if results[key] is not None:
+                        if key == 'superpoint_3d':
+                            data_sample.superpoint_3d = to_tensor(results[key])
                 else:
                     raise NotImplementedError(f'Please modified '
                                               f'`Pack3DDetInputs` '

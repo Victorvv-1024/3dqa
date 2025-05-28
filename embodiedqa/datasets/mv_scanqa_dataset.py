@@ -259,16 +259,25 @@ class MultiViewScanQADataset(BaseDataset):
         if not self.use_precomputed_superpoints:
             return None
         
-        cache_file = osp.join(self.superpoint_cache_dir, f"{scene_id}_superpoints.npy")
+        # Clean scene_id: remove 'scannet/' prefix if present
+        clean_scene_id = scene_id.replace('scannet/', '') if scene_id.startswith('scannet/') else scene_id
+        
+        cache_file = osp.join(self.superpoint_cache_dir, f"{clean_scene_id}_superpoints.npy")
+        
+        print(f"[DEBUG] Looking for superpoints: original_scene_id='{scene_id}', clean_scene_id='{clean_scene_id}'")
+        print(f"[DEBUG] Cache file path: {cache_file}")
+        print(f"[DEBUG] File exists: {osp.exists(cache_file)}")
         
         if osp.exists(cache_file):
             try:
                 superpoint_ids = np.load(cache_file)
+                print(f"[DEBUG] Successfully loaded superpoints for {clean_scene_id}: shape {superpoint_ids.shape}")
                 return superpoint_ids
             except Exception as e:
-                print(f"Warning: Failed to load superpoints for {scene_id}: {e}")
+                print(f"Warning: Failed to load superpoints for {clean_scene_id}: {e}")
                 return None
         else:
+            print(f"[DEBUG] Superpoint file not found for {clean_scene_id}: {cache_file}")
             return None
 
     def apply_augmentation_to_superpoints(self, 
@@ -709,41 +718,62 @@ class MultiViewScanQADataset(BaseDataset):
         # Get the original data sample
         data_sample = super().__getitem__(idx)
         
-        # Lazy load superpoints only when this sample is accessed
+        print(f"[DEBUG] __getitem__ called for idx={idx}")
+        print(f"[DEBUG] data_sample keys: {list(data_sample.keys()) if isinstance(data_sample, dict) else 'Not a dict'}")
+        
+        # FIXED: Handle packed data structure
         if (self.use_precomputed_superpoints and 
-            hasattr(data_sample, 'precomputed_superpoint_scene_id')):
+            isinstance(data_sample, dict) and 
+            'data_samples' in data_sample):
             
-            scene_id = data_sample.precomputed_superpoint_scene_id
+            # The actual data is in the 'data_samples' key
+            actual_data_sample = data_sample['data_samples']
             
-            # Load superpoints on-demand (only for this specific sample)
-            superpoint_ids = self.load_precomputed_superpoints(scene_id)
-            if superpoint_ids is not None:
-                data_sample.precomputed_superpoint_ids = superpoint_ids
+            print(f"[DEBUG] actual_data_sample type: {type(actual_data_sample)}")
+            print(f"[DEBUG] actual_data_sample attributes: {dir(actual_data_sample) if hasattr(actual_data_sample, '__dict__') else 'No attributes'}")
             
-                # Check if the data has been augmented during pipeline processing
-                transformation_info = getattr(data_sample, 'transformation_info', {})
+            # Check if actual_data_sample has precomputed_superpoint_scene_id
+            has_scene_id = False
+            scene_id = None
+            
+            if hasattr(actual_data_sample, 'precomputed_superpoint_scene_id'):
+                scene_id = actual_data_sample.precomputed_superpoint_scene_id
+                has_scene_id = True
+            elif hasattr(actual_data_sample, '__dict__') and 'precomputed_superpoint_scene_id' in actual_data_sample.__dict__:
+                scene_id = actual_data_sample.__dict__['precomputed_superpoint_scene_id']
+                has_scene_id = True
+            elif isinstance(actual_data_sample, dict) and 'precomputed_superpoint_scene_id' in actual_data_sample:
+                scene_id = actual_data_sample['precomputed_superpoint_scene_id']
+                has_scene_id = True
+            
+            print(f"[DEBUG] has_scene_id: {has_scene_id}, scene_id: {scene_id}")
+            
+            if has_scene_id and scene_id is not None:
+                print(f"[DEBUG] Loading superpoints for scene_id: '{scene_id}'")
                 
-                if transformation_info:
-                    # Apply augmentation to superpoints
-                    original_superpoints = data_sample.precomputed_superpoint_ids
+                # Load superpoints on-demand
+                superpoint_ids = self.load_precomputed_superpoints(scene_id)
+                if superpoint_ids is not None:
+                    print(f"[DEBUG] Loaded superpoints shape: {superpoint_ids.shape}")
                     
-                    # Get point information for augmentation handling
-                    if hasattr(data_sample, 'points'):
-                        points = data_sample.points
-                        original_points = getattr(data_sample, 'original_points', points)
-                        
-                        # Apply augmentation-aware superpoint mapping
-                        augmented_superpoints = self.apply_augmentation_to_superpoints(
-                            original_superpoints,
-                            original_points,
-                            points,
-                            transformation_info
-                        )
-                        
-                        data_sample.precomputed_superpoint_ids = augmented_superpoints
+                    # Store superpoints in the actual_data_sample
+                    if hasattr(actual_data_sample, '__dict__'):
+                        actual_data_sample.precomputed_superpoint_ids = superpoint_ids
+                    elif isinstance(actual_data_sample, dict):
+                        actual_data_sample['precomputed_superpoint_ids'] = superpoint_ids
+                    else:
+                        # Fallback: add as new attribute
+                        setattr(actual_data_sample, 'precomputed_superpoint_ids', superpoint_ids)
+                else:
+                    print(f"[DEBUG] Failed to load superpoints for scene_id: '{scene_id}'")
             else:
-                # If superpoints could not be loaded, set to None
-                data_sample.precomputed_superpoint_ids = None
+                print(f"[DEBUG] No scene_id found in actual_data_sample")
+        else:
+            print(f"[DEBUG] No superpoint loading needed for idx={idx}")
+            if isinstance(data_sample, dict):
+                print(f"[DEBUG] Reason: 'data_samples' in data_sample: {'data_samples' in data_sample}")
+            else:
+                print(f"[DEBUG] Reason: data_sample is not a dict")
         
         return data_sample
 

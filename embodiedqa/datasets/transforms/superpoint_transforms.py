@@ -2,11 +2,65 @@
 
 import numpy as np
 import torch
+import os
 from typing import Dict, List, Optional, Union, Any
 from mmcv.transforms import BaseTransform
 from mmengine.structures import InstanceData
 
 from embodiedqa.registry import TRANSFORMS
+
+
+def _extract_points_array(points_obj):
+    """
+    Extract numpy array from various point cloud object types.
+    
+    Args:
+        points_obj: Point cloud object (DepthPoints, numpy array, etc.)
+        
+    Returns:
+        numpy array of points
+    """
+    if hasattr(points_obj, 'tensor'):
+        # DepthPoints or similar mmcv point cloud objects
+        return points_obj.tensor.cpu().numpy()
+    elif hasattr(points_obj, 'coord'):
+        # Some point cloud objects store data in .coord
+        return points_obj.coord
+    elif hasattr(points_obj, 'numpy'):
+        # Torch tensor
+        return points_obj.cpu().numpy()
+    elif isinstance(points_obj, np.ndarray):
+        # Regular numpy array
+        return points_obj
+    else:
+        # Try to convert to numpy array
+        return np.array(points_obj)
+
+
+def _update_points_object(original_points_obj, new_points_array):
+    """
+    Update the original points object with new point data.
+    
+    Args:
+        original_points_obj: Original point cloud object
+        new_points_array: New numpy array of points
+        
+    Returns:
+        Updated points object
+    """
+    if hasattr(original_points_obj, 'tensor'):
+        # DepthPoints or similar - update the tensor
+        device = original_points_obj.tensor.device
+        dtype = original_points_obj.tensor.dtype
+        original_points_obj.tensor = torch.from_numpy(new_points_array).to(device=device, dtype=dtype)
+        return original_points_obj
+    elif hasattr(original_points_obj, 'coord'):
+        # Update coord attribute
+        original_points_obj.coord = new_points_array
+        return original_points_obj
+    else:
+        # Regular numpy array assignment
+        return new_points_array
 
 
 @TRANSFORMS.register_module()
@@ -139,6 +193,8 @@ class SuperpointAugmentation(BaseTransform):
             
             # Track transformation
             if self.track_transformations:
+                if 'transformation_info' not in results:
+                    results['transformation_info'] = {}
                 results['transformation_info']['point_sample_idx'] = sample_indices
         
         return results
@@ -182,25 +238,35 @@ class PointSampleWithSuperpoints(BaseTransform):
         Returns:
             Updated results with sampled points and consistent superpoints
         """
-        points = results['points']
+        if 'points' not in results:
+            return results
+            
+        # Extract points array safely
+        points_array = _extract_points_array(results['points'])
         
         # Perform point sampling
-        if len(points) >= self.num_points:
+        if len(points_array) >= self.num_points:
             if self.replace:
-                sample_indices = np.random.choice(len(points), self.num_points, replace=True)
+                sample_indices = np.random.choice(len(points_array), self.num_points, replace=True)
             else:
-                sample_indices = np.random.choice(len(points), self.num_points, replace=False)
+                sample_indices = np.random.choice(len(points_array), self.num_points, replace=False)
         else:
             # If we have fewer points than needed, sample with replacement
-            sample_indices = np.random.choice(len(points), self.num_points, replace=True)
+            sample_indices = np.random.choice(len(points_array), self.num_points, replace=True)
         
-        # Sample points
-        results['points'] = points[sample_indices]
+        # Sample points and update the points object
+        sampled_points = points_array[sample_indices]
+        results['points'] = _update_points_object(results['points'], sampled_points)
         
         # Update superpoints if present
         if 'superpoint_3d' in results and results['superpoint_3d'] is not None:
             original_superpoints = results['superpoint_3d']
-            results['superpoint_3d'] = original_superpoints[sample_indices]
+            
+            # Handle both tensor and numpy array superpoints
+            if isinstance(original_superpoints, torch.Tensor):
+                results['superpoint_3d'] = original_superpoints[sample_indices]
+            else:
+                results['superpoint_3d'] = original_superpoints[sample_indices]
             
             # Track transformation for potential further processing
             if 'transformation_info' not in results:
@@ -262,9 +328,14 @@ class RandomFlip3DWithSuperpoints(BaseTransform):
     def _flip_horizontal(self, results: Dict):
         """Apply horizontal flip to points."""
         if 'points' in results:
-            points = results['points'].copy()
-            points[:, 1] = -points[:, 1]  # Flip y-coordinate
-            results['points'] = points
+            # Extract points array safely
+            points_array = _extract_points_array(results['points'])
+            
+            # Apply horizontal flip (flip y-coordinate)
+            points_array[:, 1] = -points_array[:, 1]
+            
+            # Update points object
+            results['points'] = _update_points_object(results['points'], points_array)
         
         # Superpoints remain unchanged as spatial relationships are preserved
         # Just track the transformation
@@ -275,9 +346,14 @@ class RandomFlip3DWithSuperpoints(BaseTransform):
     def _flip_vertical(self, results: Dict):
         """Apply vertical flip to points."""
         if 'points' in results:
-            points = results['points'].copy()
-            points[:, 0] = -points[:, 0]  # Flip x-coordinate
-            results['points'] = points
+            # Extract points array safely
+            points_array = _extract_points_array(results['points'])
+            
+            # Apply vertical flip (flip x-coordinate)
+            points_array[:, 0] = -points_array[:, 0]
+            
+            # Update points object
+            results['points'] = _update_points_object(results['points'], points_array)
         
         # Superpoints remain unchanged as spatial relationships are preserved
         if 'transformation_info' not in results:
@@ -327,7 +403,8 @@ class GlobalRotScaleTransWithSuperpoints(BaseTransform):
         if 'points' not in results:
             return results
         
-        points = results['points'].copy()
+        # Extract points array safely
+        points_array = _extract_points_array(results['points'])
         
         # Random rotation
         if self.rot_range[0] != self.rot_range[1]:
@@ -350,15 +427,16 @@ class GlobalRotScaleTransWithSuperpoints(BaseTransform):
         
         # Apply transformations
         if noise_rotation != 0:
-            points = self._rotate_points(points, noise_rotation)
+            points_array = self._rotate_points(points_array, noise_rotation)
         
         if noise_scale != 1.0:
-            points[:, :3] *= noise_scale
+            points_array[:, :3] *= noise_scale
         
         if np.any(noise_translate != 0):
-            points[:, :3] += noise_translate
+            points_array[:, :3] += noise_translate
         
-        results['points'] = points
+        # Update points object
+        results['points'] = _update_points_object(results['points'], points_array)
         
         # Track transformations
         if 'transformation_info' not in results:
@@ -393,3 +471,38 @@ class GlobalRotScaleTransWithSuperpoints(BaseTransform):
         repr_str += f'scale_ratio_range={self.scale_ratio_range}, '
         repr_str += f'translation_std={self.translation_std})'
         return repr_str
+    
+@TRANSFORMS.register_module()
+class SuperpointLoader(BaseTransform):
+    """
+    Load pre-computed superpoints during the pipeline.
+    This should be placed BEFORE Pack3DDetInputs.
+    """
+    
+    def __init__(self, superpoint_cache_dir: str = 'data/superpoint_cache'):
+        self.superpoint_cache_dir = superpoint_cache_dir
+    
+    def transform(self, results: Dict) -> Dict:
+        """Load superpoints if scene_id is available."""
+        
+        if 'precomputed_superpoint_scene_id' in results:
+            scene_id = results['precomputed_superpoint_scene_id']
+            
+            # Clean scene_id format
+            clean_scene_id = scene_id.replace('scannet/', '') if scene_id.startswith('scannet/') else scene_id
+            
+            cache_file = os.path.join(self.superpoint_cache_dir, f"{clean_scene_id}_superpoints.npy")
+            
+            if os.path.exists(cache_file):
+                try:
+                    superpoint_ids = np.load(cache_file)
+                    results['precomputed_superpoint_ids'] = superpoint_ids
+                    print(f"[DEBUG] SuperpointLoader loaded {clean_scene_id}: shape {superpoint_ids.shape}")
+                except Exception as e:
+                    print(f"Warning: SuperpointLoader failed to load {clean_scene_id}: {e}")
+                    results['precomputed_superpoint_ids'] = None
+            else:
+                print(f"[DEBUG] SuperpointLoader: file not found for {clean_scene_id}")
+                results['precomputed_superpoint_ids'] = None
+        
+        return results

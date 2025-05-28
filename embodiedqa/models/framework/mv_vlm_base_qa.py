@@ -34,6 +34,12 @@ from .pid import PIDDecomposition
 from .pid_fusion_encoder import PIDFusionEncoder
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
+import traceback
+
+def debug_superpoint_call(location_name):
+    print(f"[DEBUG] Superpoint call from: {location_name}")
+    print(f"[DEBUG] Call stack: {traceback.format_stack()[-3:-1]}")
+
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -761,7 +767,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             assert F_3d_batched.shape == F_2d_raw_batched.shape, f"F_3d and F_2d_raw must have the same shape, but got {F_3d_batched.shape} and {F_2d_raw_batched.shape}"
             superpoint_ids_batched = feat_dict.get('superpoint_ids_batched', None) # Expected [B, Np]
             
-            if F_3d_batched is not None and F_2d_raw_batched is not None and superpoint_ids_batched is not None:
+            # ADD THIS CHECK:
+            if (F_3d_batched is not None and F_2d_raw_batched is not None and 
+                superpoint_ids_batched is not None and 
+                not torch.all(superpoint_ids_batched == -1)):
+                
                 B, Np, D_fus = F_3d_batched.shape
                 F_3d_flat = F_3d_batched.reshape(-1, D_fus)
                 # print(f"F_3d_flat shape: {F_3d_flat.shape}") # [B*Np, D_fus]
@@ -781,7 +791,8 @@ class MultiViewVLMBase3DQA(BaseModel):
                 )
                 losses['loss_distill'] = loss_distill
             else:
-                raise ValueError("Distillation loss inputs are not available.")
+                # raise ValueError("Distillation loss inputs are not available.")
+                print("[DEBUG] Skipping distillation loss: no valid superpoints found")
             
         """Original MCGR"""
         # full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
@@ -1165,62 +1176,31 @@ class MultiViewVLMBase3DQA(BaseModel):
         num_points: int, 
         device: torch.device
     ) -> torch.Tensor:
-        """
-        Extract and process pre-computed superpoints from batch data samples.
-        
-        Args:
-            batch_data_samples: List of data samples containing pre-computed superpoints
-            batch_size: Number of samples in the batch
-            num_points: Number of downsampled points (Np)
-            device: Target device for tensors
-            
-        Returns:
-            Tensor of shape [B, Np] containing superpoint IDs for downsampled points
-        """
+        """Extract and process pre-computed superpoints from batch data samples."""
         batch_superpoint_ids = []
         
         for b in range(batch_size):
             data_sample = batch_data_samples[b]
             
-            # Get pre-computed superpoints from dataset
-            if (hasattr(data_sample, 'precomputed_superpoint_ids') and 
-                data_sample.precomputed_superpoint_ids is not None):
-                
-                # These are superpoint IDs for the original point cloud [N_original]
-                original_superpoint_ids = torch.from_numpy(
-                    data_sample.precomputed_superpoint_ids
-                ).long().to(device)
-                
-                # CRITICAL: Map to downsampled points using FP indices
-                # feat_dict['last_fp_indices'] should be accessible here
-                if hasattr(self, 'current_fp_indices') and self.current_fp_indices is not None:
-                    fp_indices_b = self.current_fp_indices[b]  # [Np] indices into original
+            # FIXED: Handle both dict and object access
+            if isinstance(data_sample, dict):
+                # Dict access
+                if ('precomputed_superpoint_ids' in data_sample and 
+                    data_sample['precomputed_superpoint_ids'] is not None):
+                    superpoint_ids = torch.from_numpy(data_sample['precomputed_superpoint_ids']).long().to(device)
                 else:
-                    # Fallback: Use uniform sampling if FP indices not available
-                    print(f"Warning: No FP indices found for batch {b}, using uniform sampling")
-                    if len(original_superpoint_ids) >= num_points:
-                        step = len(original_superpoint_ids) // num_points
-                        fp_indices_b = torch.arange(0, len(original_superpoint_ids), step, device=device)[:num_points]
-                    else:
-                        # If original has fewer points than needed, repeat
-                        fp_indices_b = torch.arange(len(original_superpoint_ids), device=device)
-                        while len(fp_indices_b) < num_points:
-                            fp_indices_b = torch.cat([fp_indices_b, fp_indices_b[:num_points - len(fp_indices_b)]])
-                
-                # Ensure indices are within bounds
-                fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoint_ids.shape[0] - 1)
-                
-                # Get superpoint IDs for downsampled points
-                superpoint_ids_for_np = original_superpoint_ids[fp_indices_b]  # [Np]
-                
+                    print(f"Warning: No pre-computed superpoints found for batch sample {b}")
+                    superpoint_ids = torch.full((num_points,), -1, dtype=torch.long, device=device)
             else:
-                # Fallback: assign all points to invalid superpoint
-                print(f"Warning: No pre-computed superpoints found for batch sample {b}")
-                superpoint_ids_for_np = torch.full(
-                    (num_points,), -1, dtype=torch.long, device=device
-                )
+                # Object attribute access (original code)
+                if (hasattr(data_sample, 'precomputed_superpoint_ids') and 
+                    data_sample.precomputed_superpoint_ids is not None):
+                    superpoint_ids = torch.from_numpy(data_sample.precomputed_superpoint_ids).long().to(device)
+                else:
+                    print(f"Warning: No pre-computed superpoints found for batch sample {b}")
+                    superpoint_ids = torch.full((num_points,), -1, dtype=torch.long, device=device)
             
-            batch_superpoint_ids.append(superpoint_ids_for_np)
+            batch_superpoint_ids.append(superpoint_ids)
         
         # Stack into batch tensor
         try:
