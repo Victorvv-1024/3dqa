@@ -530,7 +530,6 @@ class MultiViewScanQADataset(BaseDataset):
                 language_info['clean_global_points_file_name'] = os.path.join(
                     self.data_root, f'scannet/scannet_data', f'{scene_id}_aligned_vert.npy')
             
-            # Add pre-computed superpoints
             if self.use_precomputed_superpoints:
                 # Store scene_id for lazy loading, don't load actual data yet
                 language_info['precomputed_superpoint_scene_id'] = scene_id
