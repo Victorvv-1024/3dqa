@@ -171,16 +171,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.visual_feat_map = nn.Linear(D_fus, D_fus)
         else:
             self.visual_feat_map = nn.Linear(Dp, D_fus)
-            
-        # superpoint_config
-        self.superpoint_config = superpoint_cfg if superpoint_cfg is not None else {}
-        # print("----Debugging MultiViewVLMBase3DQA----")
-        # print(f"superpoint_config: {self.superpoint_config}")
-        self._vccs_on_the_fly = self.superpoint_config.get('enabled_on_the_fly', False)
-        if self._vccs_on_the_fly:
-            print("On-the-fly VCCS superpoint calculation is ENABLED for distillation.")
-        else: # Distillation is on, but on-the-fly VCCS is not
-            raise ValueError("Not Implemented yet. Please enable on-the-fly VCCS for distillation.")
         
         # distillation_loss_cfg
         self.use_distillation_loss = distillation_loss_cfg is not None # Check if config exists
@@ -190,6 +180,16 @@ class MultiViewVLMBase3DQA(BaseModel):
             print(f"Geometry-Guided Distillation Loss enabled with internal weight: {self.distillation_loss_calculator.loss_weight}")
         else:
             self.distillation_loss_calculator = None
+            
+        # pre-computed superpoints
+        self.superpoint_config = superpoint_cfg if superpoint_cfg is not None else {}
+        # print("----Debugging MultiViewVLMBase3DQA----")
+        # print(f"superpoint_config: {self.superpoint_config}")
+        self._vccs_on_the_fly = self.superpoint_config.get('enabled_on_the_fly', False)
+        if not self._vccs_on_the_fly:
+            print("Using pre-computed superpoints for distillation.")
+        else:
+            print("Using on-the-fly VCCS superpoint calculation for distillation.")
             
         # pid decomposition module
         self.pid_decomposition = PIDDecomposition(
@@ -351,6 +351,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         feat_dict['original_stack_points'] = stack_points
         feat_dict['last_fp_indices'] = feat_dict['fp_indices'][-1] # [B, Np] = [12, 1024]
+        # Store FP indices for pre-computed superpoint mapping
+        self.current_fp_indices = feat_dict['last_fp_indices']
         feat_dict['P_xyz'] = feat_dict['fp_xyz'][-1] # [B, Np, 3] = [12, 1024, 3]
         
         if not self.use_2d:
@@ -501,6 +503,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # +++Computes on ORIGINAL points, then maps to Np downsampled points+++
         # Compute superpoints on-the-fly for each batch item
         if self._vccs_on_the_fly:
+            # on-the-fly computation
             superpoints_params = self.superpoint_config.get('params', {})
             # predefine weights here
             wc = superpoints_params.get('wc', 0.2)
@@ -558,21 +561,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             # --- Store the mapped superpoint IDs ---
             # Check if Np is consistent across batch
             if all(sp.shape[0] == Np for sp in batch_superpoint_ids_for_Np_points):
-                try:
-                    feat_dict['superpoint_ids_batched'] = torch.stack(batch_superpoint_ids_for_Np_points, dim=0) # [B, Np]
-                except Exception as e: # Fallback just in case
-                    raise ValueError(f"Error stacking superpoints, storing as list: {e}")
-                    # feat_dict['superpoint_ids_batched'] = batch_superpoint_ids_for_Np_points
+                feat_dict['superpoint_ids_batched'] = torch.stack(batch_superpoint_ids_for_Np_points, dim=0)
             else:
-                # This case means Np varied across batch, which is unusual for standard PointNet++ FP layers
-                raise ValueError("Warning: Number of points Np varied across batch. Storing superpoint_ids as list.")
-                # feat_dict['superpoint_ids_batched'] = batch_superpoint_ids_for_Np_points
-
-        
-        else:
-            raise ValueError("No superpoints available, HAVEN'T been implemented yet.")
-            feat_dict['superpoint_ids_batched'] = None
+                raise ValueError("Number of points Np varied across batch.")
             
+        # If not on-the-fly, use pre-computed superpoints
+        else:
+            # Use pre-computed superpoints
+            print("Loading pre-computed superpoints...")
+            feat_dict['superpoint_ids_batched'] = self._extract_precomputed_superpoints(
+                batch_data_samples, B, Np, current_device
+            )
         # --- creating the Z_PV ---
         Z_PV = self.point_view_fusion(
             F_3d, 
@@ -1158,7 +1157,137 @@ class MultiViewVLMBase3DQA(BaseModel):
             }
         
         return head_inputs_dict
+
+    def _extract_precomputed_superpoints(
+        self, 
+        batch_data_samples: SampleList, 
+        batch_size: int, 
+        num_points: int, 
+        device: torch.device
+    ) -> torch.Tensor:
+        """
+        Extract and process pre-computed superpoints from batch data samples.
         
+        Args:
+            batch_data_samples: List of data samples containing pre-computed superpoints
+            batch_size: Number of samples in the batch
+            num_points: Number of downsampled points (Np)
+            device: Target device for tensors
+            
+        Returns:
+            Tensor of shape [B, Np] containing superpoint IDs for downsampled points
+        """
+        batch_superpoint_ids = []
+        
+        for b in range(batch_size):
+            data_sample = batch_data_samples[b]
+            
+            # Get pre-computed superpoints from dataset
+            if (hasattr(data_sample, 'precomputed_superpoint_ids') and 
+                data_sample.precomputed_superpoint_ids is not None):
+                
+                # These are superpoint IDs for the original point cloud [N_original]
+                original_superpoint_ids = torch.from_numpy(
+                    data_sample.precomputed_superpoint_ids
+                ).long().to(device)
+                
+                # CRITICAL: Map to downsampled points using FP indices
+                # feat_dict['last_fp_indices'] should be accessible here
+                if hasattr(self, 'current_fp_indices') and self.current_fp_indices is not None:
+                    fp_indices_b = self.current_fp_indices[b]  # [Np] indices into original
+                else:
+                    # Fallback: Use uniform sampling if FP indices not available
+                    print(f"Warning: No FP indices found for batch {b}, using uniform sampling")
+                    if len(original_superpoint_ids) >= num_points:
+                        step = len(original_superpoint_ids) // num_points
+                        fp_indices_b = torch.arange(0, len(original_superpoint_ids), step, device=device)[:num_points]
+                    else:
+                        # If original has fewer points than needed, repeat
+                        fp_indices_b = torch.arange(len(original_superpoint_ids), device=device)
+                        while len(fp_indices_b) < num_points:
+                            fp_indices_b = torch.cat([fp_indices_b, fp_indices_b[:num_points - len(fp_indices_b)]])
+                
+                # Ensure indices are within bounds
+                fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoint_ids.shape[0] - 1)
+                
+                # Get superpoint IDs for downsampled points
+                superpoint_ids_for_np = original_superpoint_ids[fp_indices_b]  # [Np]
+                
+            else:
+                # Fallback: assign all points to invalid superpoint
+                print(f"Warning: No pre-computed superpoints found for batch sample {b}")
+                superpoint_ids_for_np = torch.full(
+                    (num_points,), -1, dtype=torch.long, device=device
+                )
+            
+            batch_superpoint_ids.append(superpoint_ids_for_np)
+        
+        # Stack into batch tensor
+        try:
+            superpoint_ids_batched = torch.stack(batch_superpoint_ids, dim=0)  # [B, Np]
+            print(f"Successfully loaded pre-computed superpoints: {superpoint_ids_batched.shape}")
+            
+            # Validate superpoints
+            valid_count = (superpoint_ids_batched >= 0).sum().item()
+            total_count = superpoint_ids_batched.numel()
+            print(f"Superpoint validation: {valid_count}/{total_count} points assigned ({valid_count/total_count*100:.1f}%)")
+            
+            return superpoint_ids_batched
+        except Exception as e:
+            print(f"Error stacking pre-computed superpoints: {e}")
+            # Return tensor of invalid IDs as fallback
+            return torch.full(
+                (batch_size, num_points), -1, dtype=torch.long, device=device
+            )
+
+    def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
+        """
+        Validate and provide statistics about the loaded pre-computed superpoints.
+        
+        Args:
+            superpoint_ids_batched: Tensor of shape [B, Np] with superpoint IDs
+            
+        Returns:
+            Dictionary with validation statistics
+        """
+        B, Np = superpoint_ids_batched.shape
+        stats = {}
+        
+        for b in range(B):
+            sp_ids = superpoint_ids_batched[b]
+            valid_mask = sp_ids >= 0
+            
+            if valid_mask.sum() > 0:
+                unique_ids = torch.unique(sp_ids[valid_mask])
+                stats[f'batch_{b}'] = {
+                    'valid_points': valid_mask.sum().item(),
+                    'total_points': Np,
+                    'num_superpoints': len(unique_ids),
+                    'coverage': valid_mask.sum().item() / Np
+                }
+            else:
+                stats[f'batch_{b}'] = {
+                    'valid_points': 0,
+                    'total_points': Np,
+                    'num_superpoints': 0,
+                    'coverage': 0.0
+                }
+        
+        # Overall statistics
+        total_valid = sum(stats[f'batch_{b}']['valid_points'] for b in range(B))
+        total_points = B * Np
+        overall_coverage = total_valid / total_points if total_points > 0 else 0.0
+        
+        stats['overall'] = {
+            'total_valid_points': total_valid,
+            'total_points': total_points,
+            'overall_coverage': overall_coverage,
+            'batch_size': B,
+            'points_per_sample': Np
+        }
+        
+        return stats
+    
     # --- For debugging purposes ---
     # ... existing code ...
     @torch.no_grad()
@@ -1406,111 +1535,4 @@ class MultiViewVLMBase3DQA(BaseModel):
         import sys
         sys.exit("Debug complete - terminating execution")
         
-    def _extract_precomputed_superpoints(
-        self, 
-        batch_data_samples: SampleList, 
-        batch_size: int, 
-        num_points: int, 
-        device: torch.device
-    ) -> torch.Tensor:
-        """
-        Extract and process pre-computed superpoints from batch data samples.
-        
-        Args:
-            batch_data_samples: List of data samples containing pre-computed superpoints
-            batch_size: Number of samples in the batch
-            num_points: Number of downsampled points (Np)
-            device: Target device for tensors
-            
-        Returns:
-            Tensor of shape [B, Np] containing superpoint IDs for downsampled points
-        """
-        batch_superpoint_ids = []
-        
-        for b in range(batch_size):
-            data_sample = batch_data_samples[b]
-            
-            # Get pre-computed superpoints from dataset
-            if (hasattr(data_sample, 'precomputed_superpoint_ids') and 
-                data_sample.precomputed_superpoint_ids is not None):
-                
-                # These are superpoint IDs for the original point cloud [N_original]
-                original_superpoint_ids = torch.from_numpy(
-                    data_sample.precomputed_superpoint_ids
-                ).long().to(device)
-                
-                # Map to downsampled points using FP indices
-                fp_indices_b = self.feat_dict['last_fp_indices'][b]  # [Np] indices into original
-                fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoint_ids.shape[0] - 1)
-                
-                # Get superpoint IDs for downsampled points
-                superpoint_ids_for_np = original_superpoint_ids[fp_indices_b]  # [Np]
-                
-            else:
-                # Fallback: assign all points to a single superpoint or invalid
-                print(f"Warning: No pre-computed superpoints found for sample {b}, using fallback")
-                superpoint_ids_for_np = torch.full(
-                    (num_points,), -1, dtype=torch.long, device=device
-                )
-            
-            batch_superpoint_ids.append(superpoint_ids_for_np)
-        
-        # Stack into batch tensor
-        try:
-            superpoint_ids_batched = torch.stack(batch_superpoint_ids, dim=0)  # [B, Np]
-            print(f"Successfully extracted pre-computed superpoints: {superpoint_ids_batched.shape}")
-            return superpoint_ids_batched
-        except Exception as e:
-            print(f"Error stacking pre-computed superpoints: {e}")
-            # Return tensor of invalid IDs as fallback
-            return torch.full(
-                (batch_size, num_points), -1, dtype=torch.long, device=device
-            )
-
-    def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
-        """
-        Validate and provide statistics about the loaded pre-computed superpoints.
-        
-        Args:
-            superpoint_ids_batched: Tensor of shape [B, Np] with superpoint IDs
-            
-        Returns:
-            Dictionary with validation statistics
-        """
-        B, Np = superpoint_ids_batched.shape
-        stats = {}
-        
-        for b in range(B):
-            sp_ids = superpoint_ids_batched[b]
-            valid_mask = sp_ids >= 0
-            
-            if valid_mask.sum() > 0:
-                unique_ids = torch.unique(sp_ids[valid_mask])
-                stats[f'batch_{b}'] = {
-                    'valid_points': valid_mask.sum().item(),
-                    'total_points': Np,
-                    'num_superpoints': len(unique_ids),
-                    'coverage': valid_mask.sum().item() / Np
-                }
-            else:
-                stats[f'batch_{b}'] = {
-                    'valid_points': 0,
-                    'total_points': Np,
-                    'num_superpoints': 0,
-                    'coverage': 0.0
-                }
-        
-        # Overall statistics
-        total_valid = sum(stats[f'batch_{b}']['valid_points'] for b in range(B))
-        total_points = B * Np
-        overall_coverage = total_valid / total_points if total_points > 0 else 0.0
-        
-        stats['overall'] = {
-            'total_valid_points': total_valid,
-            'total_points': total_points,
-            'overall_coverage': overall_coverage,
-            'batch_size': B,
-            'points_per_sample': Np
-        }
-        
-        return stats
+    

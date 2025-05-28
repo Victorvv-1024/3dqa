@@ -233,91 +233,29 @@ class MultiViewScanQADataset(BaseDataset):
         """Set up pre-computed superpoints for all scenes."""
         print("Setting up pre-computed superpoints...")
         
-        # Create config-specific cache directory
-        config_hash = self._get_superpoint_config_hash()
-        self.superpoint_cache_dir = osp.join(self.superpoint_cache_dir, f"config_{config_hash}")
+        # Use the base cache directory without config-specific subdirectories
+        print(f"Using cache directory: {self.superpoint_cache_dir}")
         os.makedirs(self.superpoint_cache_dir, exist_ok=True)
         
-        # Save configuration for future reference
-        config_file = osp.join(self.superpoint_cache_dir, "config.json")
+        # Save configuration for reference (in base directory)
+        config_file = osp.join(self.superpoint_cache_dir, "dataset_superpoint_config.json")
         with open(config_file, 'w') as f:
             json.dump(self.superpoint_config, f, indent=2)
         
-        # Get all unique scene IDs from the dataset
-        unique_scenes = set()
-        for data in self.data_list:
-            scan_id = data['scan_id']
-            if scan_id.startswith('scannet/'):
-                scene_id = scan_id.replace('scannet/', '')
-                unique_scenes.add(scene_id)
+        # CRITICAL: Don't load all superpoints during initialization
+        # Just verify the cache directory exists and count available files
+        available_files = []
+        if os.path.exists(self.superpoint_cache_dir):
+            available_files = [f for f in os.listdir(self.superpoint_cache_dir) 
+                            if f.endswith('_superpoints.npy')]
         
-        print(f"Found {len(unique_scenes)} unique scenes")
+        print(f"Pre-computed superpoints cache ready: {len(available_files)} files available")
+        print("Superpoints will be loaded on-demand during training.")
         
-        # Check which scenes need superpoint computation
-        scenes_to_compute = []
-        existing_scenes = []
-        
-        for scene_id in unique_scenes:
-            cache_file = osp.join(self.superpoint_cache_dir, f"{scene_id}_superpoints.npy")
-            
-            if not osp.exists(cache_file) or self.force_recompute_superpoints:
-                # Determine point cloud file path
-                if 'test' in self.ann_file:
-                    points_file = osp.join(self.data_root, 'scannet/scannet_data', f'{scene_id}_vert.npy')
-                else:
-                    points_file = osp.join(self.data_root, 'scannet/scannet_data', f'{scene_id}_aligned_vert.npy')
-                
-                if osp.exists(points_file):
-                    scenes_to_compute.append((scene_id, points_file, self.superpoint_config, self.superpoint_cache_dir))
-                else:
-                    print(f"Warning: Point cloud file not found for scene {scene_id}: {points_file}")
-            else:
-                existing_scenes.append(scene_id)
-        
-        print(f"Pre-computed superpoints exist for {len(existing_scenes)} scenes")
-        print(f"Need to compute superpoints for {len(scenes_to_compute)} scenes")
-        
-        # Compute missing superpoints using multiprocessing
-        if scenes_to_compute:
-            print(f"Computing superpoints using {self.max_workers} workers...")
-            start_time = time.time()
-            
-            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                future_to_scene = {
-                    executor.submit(compute_superpoints_for_scene, args): args[0] 
-                    for args in scenes_to_compute
-                }
-                
-                completed = 0
-                failed = 0
-                
-                for future in as_completed(future_to_scene):
-                    scene_id, success, _, error_msg = future.result()
-                    if success:
-                        completed += 1
-                    else:
-                        failed += 1
-                        print(f"Failed to compute superpoints for {scene_id}: {error_msg}")
-                    
-                    if (completed + failed) % 10 == 0:
-                        print(f"Progress: {completed + failed}/{len(scenes_to_compute)} scenes processed")
-            
-            elapsed_time = time.time() - start_time
-            print(f"Superpoint computation completed in {elapsed_time:.2f}s")
-            print(f"Successfully computed: {completed}, Failed: {failed}")
-        
-        print("Pre-computed superpoints setup complete!")
+        # Don't pre-load anything - use lazy loading instead!
 
     def load_precomputed_superpoints(self, scene_id: str) -> Optional[np.ndarray]:
-        """
-        Load pre-computed superpoints for a scene.
-        
-        Args:
-            scene_id: Scene identifier (e.g., 'scene0000_00')
-            
-        Returns:
-            Superpoint IDs as numpy array, or None if not found
-        """
+        """Load pre-computed superpoints for a scene."""
         if not self.use_precomputed_superpoints:
             return None
         
@@ -331,7 +269,6 @@ class MultiViewScanQADataset(BaseDataset):
                 print(f"Warning: Failed to load superpoints for {scene_id}: {e}")
                 return None
         else:
-            print(f"Warning: Pre-computed superpoints not found for scene {scene_id}")
             return None
 
     def apply_augmentation_to_superpoints(self, 
@@ -595,8 +532,9 @@ class MultiViewScanQADataset(BaseDataset):
             
             # Add pre-computed superpoints
             if self.use_precomputed_superpoints:
-                superpoint_ids = self.load_precomputed_superpoints(scene_id)
-                language_info['precomputed_superpoint_ids'] = superpoint_ids
+                # Store scene_id for lazy loading, don't load actual data yet
+                language_info['precomputed_superpoint_scene_id'] = scene_id
+                language_info['precomputed_superpoint_ids'] = None  # Will be loaded on-demand
             
             ann_info = data['ann_info']
             language_anno_info = dict()
@@ -772,32 +710,41 @@ class MultiViewScanQADataset(BaseDataset):
         # Get the original data sample
         data_sample = super().__getitem__(idx)
         
-        # If using pre-computed superpoints, handle augmentation consistency
+        # Lazy load superpoints only when this sample is accessed
         if (self.use_precomputed_superpoints and 
-            hasattr(data_sample, 'precomputed_superpoint_ids') and
-            data_sample.precomputed_superpoint_ids is not None):
+            hasattr(data_sample, 'precomputed_superpoint_scene_id')):
             
-            # Check if the data has been augmented during pipeline processing
-            transformation_info = getattr(data_sample, 'transformation_info', {})
+            scene_id = data_sample.precomputed_superpoint_scene_id
             
-            if transformation_info:
-                # Apply augmentation to superpoints
-                original_superpoints = data_sample.precomputed_superpoint_ids
+            # Load superpoints on-demand (only for this specific sample)
+            superpoint_ids = self.load_precomputed_superpoints(scene_id)
+            if superpoint_ids is not None:
+                data_sample.precomputed_superpoint_ids = superpoint_ids
+            
+                # Check if the data has been augmented during pipeline processing
+                transformation_info = getattr(data_sample, 'transformation_info', {})
                 
-                # Get point information for augmentation handling
-                if hasattr(data_sample, 'points'):
-                    points = data_sample.points
-                    original_points = getattr(data_sample, 'original_points', points)
+                if transformation_info:
+                    # Apply augmentation to superpoints
+                    original_superpoints = data_sample.precomputed_superpoint_ids
                     
-                    # Apply augmentation-aware superpoint mapping
-                    augmented_superpoints = self.apply_augmentation_to_superpoints(
-                        original_superpoints,
-                        original_points,
-                        points,
-                        transformation_info
-                    )
-                    
-                    data_sample.precomputed_superpoint_ids = augmented_superpoints
+                    # Get point information for augmentation handling
+                    if hasattr(data_sample, 'points'):
+                        points = data_sample.points
+                        original_points = getattr(data_sample, 'original_points', points)
+                        
+                        # Apply augmentation-aware superpoint mapping
+                        augmented_superpoints = self.apply_augmentation_to_superpoints(
+                            original_superpoints,
+                            original_points,
+                            points,
+                            transformation_info
+                        )
+                        
+                        data_sample.precomputed_superpoint_ids = augmented_superpoints
+            else:
+                # If superpoints could not be loaded, set to None
+                data_sample.precomputed_superpoint_ids = None
         
         return data_sample
 

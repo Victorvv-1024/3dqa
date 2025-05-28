@@ -114,19 +114,19 @@ model = dict(
     # +++ MODIFIED: Superpoint Configuration for Pre-computation +++
     # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     superpoint_cfg=dict(
-        # CHANGED: Disable on-the-fly computation for production
-        enabled_on_the_fly=False,  # Set to False for optimized performance
+        # Use pre-computed superpoints for optimal performance
+        enabled_on_the_fly=False,  # CRITICAL: Set to False to use pre-computed
         use_colors=use_color,
-        # Keep the same parameters for consistency with pre-computed cache
+        # Parameters kept for reference (used during pre-computation)
         params=dict(
             voxel_size=0.02,
-            seed_spacing=0.5,  # Keep your original value
+            seed_spacing=0.5,
             neighbor_voxel_search=True,
             neighbor_radius_search=0.05,
             max_expand_dist=1.0,
-            wc=0.2,  # weight of color information
-            ws=0.4,  # weight of spatial information (keep your original)
-            wn=1.0,  # weight of normal information
+            wc=0.2,
+            ws=0.4,
+            wn=1.0,
         )),
     
     # Keep existing distillation loss configuration
@@ -238,21 +238,21 @@ train_dataloader = dict(
                               # NEW: Pre-computed superpoint configuration
                               use_precomputed_superpoints=True,
                               superpoint_config=dict(
-                                  method='original',  # Use 'original' to match your existing params
-                                  params=dict(
-                                      voxel_size=0.02,
-                                      seed_spacing=0.5,
-                                      neighbor_voxel_search=True,
-                                      neighbor_radius_search=0.05,
-                                      max_expand_dist=1.0,
-                                      wc=0.2,
-                                      ws=0.4,  # Match your model config
-                                      wn=1.0,
-                                  )
+                                method='original',  # Match the method used for pre-computation
+                                params=dict(
+                                    voxel_size=0.02,
+                                    seed_spacing=0.5,
+                                    neighbor_voxel_search=True,
+                                    neighbor_radius_search=0.05,
+                                    max_expand_dist=1.0,
+                                    wc=0.2,
+                                    ws=0.4,
+                                    wn=1.0,
+                                )
                               ),
                               superpoint_cache_dir=None,  # Will use default: data_root/superpoint_cache
                               force_recompute_superpoints=False,
-                              max_workers=8,  # Increase for faster pre-computation
+                              max_workers=8,
                               )))
 
 val_dataloader = dict(batch_size=12,
