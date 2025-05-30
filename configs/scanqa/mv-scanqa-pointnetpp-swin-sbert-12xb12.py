@@ -161,6 +161,8 @@ train_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True, with_target_objects_mask=True),
     # NEW: Load pre-computed superpoint annotations
     dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
+    # NEW: Load superpoints early in pipeline - MOVED HERE
+    dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
     dict(type='MultiViewPipeline',
          n_images=20,
          transforms=[
@@ -185,13 +187,18 @@ train_pipeline = [
     dict(type='SuperpointAugmentation', track_transformations=True),
     dict(type='Pack3DDetInputs',
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
-               'target_objects_mask', 'superpoint_3d'])  # NEW: Include superpoint_3d
+               'target_objects_mask', 'superpoint_3d', 'views_points'],  # NEW: Include superpoint_3d
+         meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
+                    'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
+                    'context', 'token', 'superpoint_scene_id', 'scene_id'])  # Add scene_id here
 ]
 
 test_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True),
     # NEW: Load pre-computed superpoint annotations  
     dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
+    # NEW: Load superpoints early in pipeline
+    dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
     dict(type='MultiViewPipeline',
          n_images=20,
          ordered=True,
@@ -208,7 +215,10 @@ test_pipeline = [
     # Note: data_preprocessor will handle point sampling for test
     dict(type='Pack3DDetInputs',
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
-               'superpoint_3d'])  # NEW: Include superpoint_3d
+               'superpoint_3d', 'views_points'],  # NEW: Include superpoint_3d
+         meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
+                    'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
+                    'context', 'token', 'superpoint_scene_id', 'scene_id'])  # Add scene_id here
 ]
 
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
