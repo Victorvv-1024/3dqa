@@ -135,7 +135,7 @@ class AggregateMultiViewPoints(BaseTransform):
     def __init__(self,
                  coord_type: str = 'DEPTH',
                  save_slices: bool = False,
-                 save_views_points: bool = False,
+                 save_views_points: bool = True, # False
                  use_clean_global_points: bool = False,
                  use_color: bool = False) -> None:
         super().__init__()

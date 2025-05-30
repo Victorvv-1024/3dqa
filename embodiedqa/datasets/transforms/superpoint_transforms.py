@@ -487,6 +487,7 @@ class SuperpointLoader(BaseTransform):
         
         if 'precomputed_superpoint_scene_id' in results:
             scene_id = results['precomputed_superpoint_scene_id']
+            print(f"[SuperpointLoader] Loading for scene: {scene_id}")
             
             # Clean scene_id format
             clean_scene_id = scene_id.replace('scannet/', '') if scene_id.startswith('scannet/') else scene_id

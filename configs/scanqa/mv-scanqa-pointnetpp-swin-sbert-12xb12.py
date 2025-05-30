@@ -159,10 +159,9 @@ data_root = 'data'
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 train_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True, with_target_objects_mask=True),
-    # NEW: Load pre-computed superpoint annotations
-    dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
-    # NEW: Load superpoints early in pipeline - MOVED HERE
+    # ADD THIS LINE:
     dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
+    dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
     dict(type='MultiViewPipeline',
          n_images=20,
          transforms=[
@@ -173,7 +172,7 @@ train_pipeline = [
              dict(type='PointSample', num_points=n_points // 10),
              dict(type='Resize', scale=(224, 224), keep_ratio=False)
          ]),
-    dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True, 
+    dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True,
          use_clean_global_points=use_clean_global_points, use_color=use_color),
     # MODIFIED: Use superpoint-aware point sampling
     dict(type='PointSampleWithSuperpoints', num_points=n_points),
@@ -195,10 +194,8 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True),
-    # NEW: Load pre-computed superpoint annotations  
-    dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
-    # NEW: Load superpoints early in pipeline
     dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
+    dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
     dict(type='MultiViewPipeline',
          n_images=20,
          ordered=True,
@@ -210,7 +207,7 @@ test_pipeline = [
              dict(type='PointSample', num_points=n_points // 10),
              dict(type='Resize', scale=(224, 224), keep_ratio=False)
          ]),
-    dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True, 
+    dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True,
          use_clean_global_points=use_clean_global_points, use_color=use_color),
     # Note: data_preprocessor will handle point sampling for test
     dict(type='Pack3DDetInputs',
