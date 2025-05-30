@@ -497,12 +497,24 @@ class SuperpointLoader(BaseTransform):
                 try:
                     superpoint_ids = np.load(cache_file)
                     results['precomputed_superpoint_ids'] = superpoint_ids
-                    print(f"[DEBUG] SuperpointLoader loaded {clean_scene_id}: shape {superpoint_ids.shape}")
+                    # IMPORTANT: Preserve the scene_id for later use in multiple places
+                    results['superpoint_scene_id'] = clean_scene_id
+                    results['scene_id'] = clean_scene_id  # Also add as generic scene_id
+                    
+                    # Add to metainfo if it exists
+                    if 'ann_info' not in results:
+                        results['ann_info'] = {}
+                    results['ann_info']['scene_id'] = clean_scene_id
+                    results['ann_info']['superpoint_scene_id'] = clean_scene_id
+                    
                 except Exception as e:
                     print(f"Warning: SuperpointLoader failed to load {clean_scene_id}: {e}")
                     results['precomputed_superpoint_ids'] = None
+                    results['superpoint_scene_id'] = None
+                    results['scene_id'] = None
             else:
-                print(f"[DEBUG] SuperpointLoader: file not found for {clean_scene_id}")
                 results['precomputed_superpoint_ids'] = None
+                results['superpoint_scene_id'] = None
+                results['scene_id'] = None
         
         return results

@@ -34,6 +34,53 @@ class Det3DDataElement(BaseDataElement):
     def pred_instances_3d(self) -> None:
         del self._pred_instances_3d
 
+    @property
+    def question(self) -> str:
+        """Access question from metainfo"""
+        if hasattr(self, 'metainfo') and self.metainfo and 'question' in self.metainfo:
+            question = self.metainfo['question']
+            return str(question) if question is not None else ''
+        return ''
+
+    @property
+    def views_points(self):
+        """Access views_points from metainfo"""
+        if hasattr(self, 'metainfo') and self.metainfo:
+            if 'views_points' in self.metainfo:
+                return self.metainfo['views_points']
+            else:
+                # Provide detailed debugging information
+                available_keys = list(self.metainfo.keys())
+                raise AttributeError(
+                    f"'views_points' not found in metainfo. "
+                    f"Available keys: {available_keys}. "
+                    f"This suggests the data loader is not properly setting views_points. "
+                    f"Check your dataset configuration and preprocessing pipeline."
+                )
+        else:
+            raise AttributeError(
+                f"No metainfo found in Det3DDataElement. "
+                f"This suggests a fundamental issue with data loading. "
+                f"The data pipeline should populate metainfo with required fields including 'views_points'."
+            )
+
+    def __getattr__(self, name):
+        """Handle dynamic attribute access for metainfo fields."""
+        # Avoid infinite recursion by checking for internal attributes first
+        if name.startswith('_') or name in ('metainfo_keys', 'metainfo_items', 'metainfo'):
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        
+        # Try to get from metainfo using direct access to avoid property recursion
+        try:
+            if hasattr(super(), 'metainfo'):
+                metainfo_dict = super().metainfo
+                if metainfo_dict and name in metainfo_dict:
+                    return metainfo_dict[name]
+        except (AttributeError, RecursionError):
+            pass
+        
+        # Fall back to normal attribute access
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 IndexType = Union[str, slice, int, list, torch.LongTensor,
                   torch.cuda.LongTensor, torch.BoolTensor,
@@ -204,7 +251,6 @@ ForwardResults = Union[Dict[str, torch.Tensor], List[Det3DDataElement],
                        Tuple[torch.Tensor], torch.Tensor]
 
 SamplingResultList = List[SamplingResult]
-
 OptSamplingResultList = Optional[SamplingResultList]
 SampleList = List[Det3DDataElement]
 OptSampleList = Optional[SampleList]

@@ -53,6 +53,7 @@ class Pack3DDetInputs(BaseTransform):
     # to be compatible with depths in bevdepth
     ANSWERS_KEYS = ['gt_answer_labels']
     SITUATION_KEYS = ['situation_label']
+    QUESTION_KEYS = ['question']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d', 'target_objects_mask'
     ]
@@ -281,6 +282,11 @@ class Pack3DDetInputs(BaseTransform):
                     if results[key] is not None:
                         if key == 'superpoint_3d':
                             data_sample.superpoint_3d = to_tensor(results[key])
+                # NEW: Handle views_points
+                elif key == 'views_points':
+                    if results[key] is not None:
+                        # data_sample.views_points = results[key]
+                        data_sample.set_field(results[key], 'views_points')
                 else:
                     raise NotImplementedError(f'Please modified '
                                               f'`Pack3DDetInputs` '

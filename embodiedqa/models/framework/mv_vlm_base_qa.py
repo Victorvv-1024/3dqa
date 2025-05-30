@@ -37,8 +37,7 @@ from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingL
 import traceback
 
 def debug_superpoint_call(location_name):
-    print(f"[DEBUG] Superpoint call from: {location_name}")
-    print(f"[DEBUG] Call stack: {traceback.format_stack()[-3:-1]}")
+    pass  # Debug function disabled for production
 
 
 class PositionEmbeddingLearned(BaseModule):
@@ -573,8 +572,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             
         # If not on-the-fly, use pre-computed superpoints
         else:
-            # Use pre-computed superpoints
-            print("Loading pre-computed superpoints...")
+            # Use pre-computed superpoints (silent loading)
             feat_dict['superpoint_ids_batched'] = self._extract_precomputed_superpoints(
                 batch_data_samples, B, Np, current_device
             )
@@ -792,7 +790,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                 losses['loss_distill'] = loss_distill
             else:
                 # raise ValueError("Distillation loss inputs are not available.")
-                print("[DEBUG] Skipping distillation loss: no valid superpoints found")
+                pass  # Skip distillation loss when no valid superpoints found
             
         """Original MCGR"""
         # full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
@@ -884,16 +882,14 @@ class MultiViewVLMBase3DQA(BaseModel):
             losses.update(situation_predict_loss)  
             
         if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
-            print("Applying uncertainty weighting to losses...")
+            # Apply uncertainty weighting to losses
             losses = self.uncertainty_weighting(losses)
             
             # Log current task weights and uncertainties for monitoring
             if self.training:  # Only log during training to avoid clutter
                 current_weights = self.uncertainty_weighting.get_task_weights()
                 current_uncertainties = self.uncertainty_weighting.get_uncertainties()
-                
-                print("Current task weights:", current_weights)
-                print("Current uncertainties:", current_uncertainties)
+                # Silent monitoring - weights and uncertainties tracked internally
 
             
         losses = self.loss_collect(losses)
@@ -1205,12 +1201,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Stack into batch tensor
         try:
             superpoint_ids_batched = torch.stack(batch_superpoint_ids, dim=0)  # [B, Np]
-            print(f"Successfully loaded pre-computed superpoints: {superpoint_ids_batched.shape}")
+            # Successfully loaded pre-computed superpoints
             
-            # Validate superpoints
+            # Validate superpoints (silent validation)
             valid_count = (superpoint_ids_batched >= 0).sum().item()
             total_count = superpoint_ids_batched.numel()
-            print(f"Superpoint validation: {valid_count}/{total_count} points assigned ({valid_count/total_count*100:.1f}%)")
             
             return superpoint_ids_batched
         except Exception as e:
@@ -1281,9 +1276,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             batch_idx: Index in the batch to process
             output_dir: Directory for saving visualization outputs
         """
-        print("\n==== DEBUGGING SUPERPOINT VISUALIZATION ====")
-        os.makedirs(output_dir, exist_ok=True)
-        start_time = time.time()
+        # Debug function - no output
+        pass  # Superpoint visualization debug function
 
         # --- Save Original RGB Images if Available ---
         try:
@@ -1508,8 +1502,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         #     o3d.io.write_point_cloud(output_path, pcd)
         #     print(f"Saved comparison visualization to: {output_path}")
         
-        total_debug_time = time.time() - start_time
-        print(f"\n==== SUPERPOINT VISUALIZATION COMPLETE ==== ({total_debug_time:.2f}s)")
+        # Debug visualization complete - no output
+        pass
         
         # Exit for debugging purposes
         import sys

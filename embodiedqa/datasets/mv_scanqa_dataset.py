@@ -63,8 +63,6 @@ def compute_superpoints_for_scene(args):
     scene_id, points_file_path, superpoint_config, cache_dir = args
     
     try:
-        print(f"Computing superpoints for scene: {scene_id}")
-        
         # Load point cloud data
         if not os.path.exists(points_file_path):
             return scene_id, False, None, f"Points file not found: {points_file_path}"
@@ -132,7 +130,6 @@ def compute_superpoints_for_scene(args):
         cache_file = os.path.join(cache_dir, f"{scene_id}_superpoints.npy")
         np.save(cache_file, superpoint_ids_np)
         
-        print(f"✓ Computed superpoints for {scene_id}: {len(np.unique(superpoint_ids_np[superpoint_ids_np >= 0]))} superpoints")
         
         return scene_id, True, superpoint_ids_np, None
         
@@ -231,10 +228,7 @@ class MultiViewScanQADataset(BaseDataset):
 
     def _setup_precomputed_superpoints(self):
         """Set up pre-computed superpoints for all scenes."""
-        print("Setting up pre-computed superpoints...")
-        
         # Use the base cache directory without config-specific subdirectories
-        print(f"Using cache directory: {self.superpoint_cache_dir}")
         os.makedirs(self.superpoint_cache_dir, exist_ok=True)
         
         # Save configuration for reference (in base directory)
@@ -249,9 +243,6 @@ class MultiViewScanQADataset(BaseDataset):
             available_files = [f for f in os.listdir(self.superpoint_cache_dir) 
                             if f.endswith('_superpoints.npy')]
         
-        print(f"Pre-computed superpoints cache ready: {len(available_files)} files available")
-        print("Superpoints will be loaded on-demand during training.")
-        
         # Don't pre-load anything - use lazy loading instead!
 
     def load_precomputed_superpoints(self, scene_id: str) -> Optional[np.ndarray]:
@@ -264,20 +255,14 @@ class MultiViewScanQADataset(BaseDataset):
         
         cache_file = osp.join(self.superpoint_cache_dir, f"{clean_scene_id}_superpoints.npy")
         
-        print(f"[DEBUG] Looking for superpoints: original_scene_id='{scene_id}', clean_scene_id='{clean_scene_id}'")
-        print(f"[DEBUG] Cache file path: {cache_file}")
-        print(f"[DEBUG] File exists: {osp.exists(cache_file)}")
-        
         if osp.exists(cache_file):
             try:
                 superpoint_ids = np.load(cache_file)
-                print(f"[DEBUG] Successfully loaded superpoints for {clean_scene_id}: shape {superpoint_ids.shape}")
                 return superpoint_ids
             except Exception as e:
                 print(f"Warning: Failed to load superpoints for {clean_scene_id}: {e}")
                 return None
         else:
-            print(f"[DEBUG] Superpoint file not found for {clean_scene_id}: {cache_file}")
             return None
 
     def apply_augmentation_to_superpoints(self, 
@@ -540,9 +525,10 @@ class MultiViewScanQADataset(BaseDataset):
                     self.data_root, f'scannet/scannet_data', f'{scene_id}_aligned_vert.npy')
             
             if self.use_precomputed_superpoints:
-                # Store scene_id for lazy loading, don't load actual data yet
+                # Store the scene_id for potential on-demand loading in the pipeline
                 language_info['precomputed_superpoint_scene_id'] = scene_id
-                language_info['precomputed_superpoint_ids'] = None  # Will be loaded on-demand
+                # Don't store the actual superpoint data here - it will be loaded by transforms
+                language_info['precomputed_superpoint_ids'] = None
             
             ann_info = data['ann_info']
             language_anno_info = dict()
@@ -789,17 +775,32 @@ class MultiViewScanQADataset(BaseDataset):
         total_superpoints = 0
         superpoint_sizes = []
         
+        # NEW CODE:
+        missing_files = []
         for data_info in self.data_list:
-            if 'precomputed_superpoint_ids' in data_info and data_info['precomputed_superpoint_ids'] is not None:
-                superpoint_ids = data_info['precomputed_superpoint_ids']
-                scene_count += 1
-                total_points += len(superpoint_ids)
+            if 'precomputed_superpoint_scene_id' in data_info:
+                scene_id = data_info['precomputed_superpoint_scene_id']
+                superpoint_ids = self.load_precomputed_superpoints(scene_id)
                 
-                valid_mask = superpoint_ids >= 0
-                if valid_mask.any():
-                    unique_ids, counts = np.unique(superpoint_ids[valid_mask], return_counts=True)
-                    total_superpoints += len(unique_ids)
-                    superpoint_sizes.extend(counts.tolist())
+                if superpoint_ids is not None:
+                    scene_count += 1
+                    total_points += len(superpoint_ids)
+                    
+                    valid_mask = superpoint_ids >= 0
+                    if valid_mask.any():
+                        unique_ids, counts = np.unique(superpoint_ids[valid_mask], return_counts=True)
+                        total_superpoints += len(unique_ids)
+                        superpoint_sizes.extend(counts.tolist())
+                else:
+                    missing_files.append(scene_id)
+
+        # ADD THIS AFTER THE STATS CALCULATION:
+        if missing_files:
+            print(f"Missing superpoint files for {len(missing_files)} scenes:")
+            for scene_id in missing_files[:5]:  # Show first 5
+                print(f"  - {scene_id}")
+            if len(missing_files) > 5:
+                print(f"  ... and {len(missing_files) - 5} more")
         
         if superpoint_sizes:
             superpoint_sizes = np.array(superpoint_sizes)
@@ -832,22 +833,33 @@ class MultiViewScanQADataset(BaseDataset):
         import random
         
         # Sample random data points
-        sample_indices = random.sample(range(len(self.data_list)), min(num_samples, len(self.data_list)))
+        valid_indices = []
+        for idx, data_info in enumerate(self.data_list):
+            if 'precomputed_superpoint_scene_id' in data_info:
+                valid_indices.append(idx)
+                
+        sample_indices = random.sample(valid_indices, min(num_samples, len(valid_indices)))
+        failed_count = 0
         
         start_time = time.time()
         loaded_count = 0
         
         for idx in sample_indices:
             data_info = self.data_list[idx]
-            if 'precomputed_superpoint_ids' in data_info and data_info['precomputed_superpoint_ids'] is not None:
-                # Simulate loading (already loaded in memory, but measure access time)
-                _ = data_info['precomputed_superpoint_ids']
+            scene_id = data_info['precomputed_superpoint_scene_id']
+            
+            superpoint_ids = self.load_precomputed_superpoints(scene_id)
+            
+            if superpoint_ids is not None:
                 loaded_count += 1
+            else:
+                failed_count += 1
         
         elapsed_time = time.time() - start_time
         avg_time_per_load = elapsed_time / loaded_count if loaded_count > 0 else 0
         
         print(f"Superpoint Loading Benchmark:")
+        print(f"  Failed to load {failed_count} samples ")
         print(f"  Samples tested: {loaded_count}/{num_samples}")
         print(f"  Total time: {elapsed_time:.4f}s")
         print(f"  Average time per superpoint load: {avg_time_per_load:.6f}s")
