@@ -281,12 +281,15 @@ class Pack3DDetInputs(BaseTransform):
                 elif key in self.SUPERPOINT_KEYS:
                     if results[key] is not None:
                         if key == 'superpoint_3d':
+                            # print(f"[Pack3DDetInputs] Setting superpoint_3d: {results[key].shape}")
                             data_sample.superpoint_3d = to_tensor(results[key])
                 # NEW: Handle views_points
                 elif key == 'views_points':
                     if results[key] is not None:
-                        # data_sample.views_points = results[key]
-                        data_sample.set_field(results[key], 'views_points')
+                        # Store in metainfo instead of as direct attribute
+                        current_metainfo = data_sample.metainfo or {}
+                        current_metainfo['views_points'] = results[key]
+                        data_sample.set_metainfo(current_metainfo)
                 else:
                     raise NotImplementedError(f'Please modified '
                                               f'`Pack3DDetInputs` '

@@ -135,7 +135,7 @@ def compute_superpoints_for_scene(args):
         
     except Exception as e:
         error_msg = f"Error computing superpoints for {scene_id}: {str(e)}"
-        print(f"✗ {error_msg}")
+        raise ValueError(f"✗ {error_msg}")
         return scene_id, False, None, error_msg
 
 
@@ -260,7 +260,7 @@ class MultiViewScanQADataset(BaseDataset):
                 superpoint_ids = np.load(cache_file)
                 return superpoint_ids
             except Exception as e:
-                print(f"Warning: Failed to load superpoints for {clean_scene_id}: {e}")
+                raise ValueError(f"Warning: Failed to load superpoints for {clean_scene_id}: {e}")
                 return None
         else:
             return None
@@ -700,66 +700,14 @@ class MultiViewScanQADataset(BaseDataset):
         return ann_info
 
     def __getitem__(self, idx):
-        """Get item with augmentation-aware superpoint handling."""
-        # Get the original data sample
+        """Get item with improved superpoint handling."""
+        # Get the original data sample through normal pipeline
         data_sample = super().__getitem__(idx)
         
-        print(f"[DEBUG] __getitem__ called for idx={idx}")
-        print(f"[DEBUG] data_sample keys: {list(data_sample.keys()) if isinstance(data_sample, dict) else 'Not a dict'}")
-        
-        # FIXED: Handle packed data structure
-        if (self.use_precomputed_superpoints and 
-            isinstance(data_sample, dict) and 
-            'data_samples' in data_sample):
-            
-            # The actual data is in the 'data_samples' key
-            actual_data_sample = data_sample['data_samples']
-            
-            print(f"[DEBUG] actual_data_sample type: {type(actual_data_sample)}")
-            print(f"[DEBUG] actual_data_sample attributes: {dir(actual_data_sample) if hasattr(actual_data_sample, '__dict__') else 'No attributes'}")
-            
-            # Check if actual_data_sample has precomputed_superpoint_scene_id
-            has_scene_id = False
-            scene_id = None
-            
-            if hasattr(actual_data_sample, 'precomputed_superpoint_scene_id'):
-                scene_id = actual_data_sample.precomputed_superpoint_scene_id
-                has_scene_id = True
-            elif hasattr(actual_data_sample, '__dict__') and 'precomputed_superpoint_scene_id' in actual_data_sample.__dict__:
-                scene_id = actual_data_sample.__dict__['precomputed_superpoint_scene_id']
-                has_scene_id = True
-            elif isinstance(actual_data_sample, dict) and 'precomputed_superpoint_scene_id' in actual_data_sample:
-                scene_id = actual_data_sample['precomputed_superpoint_scene_id']
-                has_scene_id = True
-            
-            print(f"[DEBUG] has_scene_id: {has_scene_id}, scene_id: {scene_id}")
-            
-            if has_scene_id and scene_id is not None:
-                print(f"[DEBUG] Loading superpoints for scene_id: '{scene_id}'")
-                
-                # Load superpoints on-demand
-                superpoint_ids = self.load_precomputed_superpoints(scene_id)
-                if superpoint_ids is not None:
-                    print(f"[DEBUG] Loaded superpoints shape: {superpoint_ids.shape}")
-                    
-                    # Store superpoints in the actual_data_sample
-                    if hasattr(actual_data_sample, '__dict__'):
-                        actual_data_sample.precomputed_superpoint_ids = superpoint_ids
-                    elif isinstance(actual_data_sample, dict):
-                        actual_data_sample['precomputed_superpoint_ids'] = superpoint_ids
-                    else:
-                        # Fallback: add as new attribute
-                        setattr(actual_data_sample, 'precomputed_superpoint_ids', superpoint_ids)
-                else:
-                    print(f"[DEBUG] Failed to load superpoints for scene_id: '{scene_id}'")
-            else:
-                print(f"[DEBUG] No scene_id found in actual_data_sample")
-        else:
-            print(f"[DEBUG] No superpoint loading needed for idx={idx}")
-            if isinstance(data_sample, dict):
-                print(f"[DEBUG] Reason: 'data_samples' in data_sample: {'data_samples' in data_sample}")
-            else:
-                print(f"[DEBUG] Reason: data_sample is not a dict")
+        # The superpoint loading should now be handled by:
+        # 1. SuperpointLoader transform (if included in pipeline)
+        # 2. LoadSuperpointAnnotations transform
+        # These transforms will populate the precomputed_superpoint_ids field
         
         return data_sample
 

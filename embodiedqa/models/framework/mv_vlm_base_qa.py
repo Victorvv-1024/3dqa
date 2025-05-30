@@ -182,7 +182,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         if self.use_distillation_loss:
             # Note: The 'weight' inside distillation_loss_cfg is used internally by the loss module forward pass
             self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
-            print(f"Geometry-Guided Distillation Loss enabled with internal weight: {self.distillation_loss_calculator.loss_weight}")
+            # print(f"Geometry-Guided Distillation Loss enabled with internal weight: {self.distillation_loss_calculator.loss_weight}")
         else:
             self.distillation_loss_calculator = None
             
@@ -242,7 +242,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # --- New arguments for uncertainty weighting ---
         # Initialize uncertainty weighting for multi-task learning
         if train_cfg is not None and train_cfg.get('use_uncertainty_weighting', True):
-            print("Initializing uncertainty weighting for multi-task learning...")
+            # print("Initializing uncertainty weighting for multi-task learning...")
             
             # Define task configurations
             uncertainty_task_configs = []
@@ -395,10 +395,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         else: # (B, C, H, W) No Multi-view
             img_features_dict = self.backbone(img) # directly pass through the 2D Swin backbone 
             img_features, img_global_features = img_features_dict['layer_outputs'], img_features_dict['pooler_output']
-
-        feat_dict['superpoint_ids_batched'] = self._extract_precomputed_superpoints(
-            batch_data_samples, B, Np, current_device
-        )
             
         all_points_imgfeats = []
         img_feat_valid_flags = []
@@ -576,6 +572,23 @@ class MultiViewVLMBase3DQA(BaseModel):
             feat_dict['superpoint_ids_batched'] = self._extract_precomputed_superpoints(
                 batch_data_samples, B, Np, current_device
             )
+            # Get superpoints for original points
+            # original_superpoint_ids = self._extract_precomputed_superpoints(
+            #     batch_data_samples, B, stack_points.shape[1], current_device  # Use original size
+            # )
+            # # Map superpoints to downsampled points using PointNet++ indicse
+            # if original_superpoint_ids is not None:
+            #     mapped_superpoint_ids = []
+            #     for b in range(B):
+            #         fp_indices_b = feat_dict['last_fp_indices'][b]  # [Np] indices into original points
+            #         # Map superpoints to downsampled points
+            #         superpoints_for_downsampled = original_superpoint_ids[b][fp_indices_b]
+            #         mapped_superpoint_ids.append(superpoints_for_downsampled)
+                
+            #     feat_dict['superpoint_ids_batched'] = torch.stack(mapped_superpoint_ids, dim=0)
+            # else:
+            #     feat_dict['superpoint_ids_batched'] = torch.full((B, Np), -1, dtype=torch.long, device=current_device)
+            
         # --- creating the Z_PV ---
         Z_PV = self.point_view_fusion(
             F_3d, 
@@ -1089,6 +1102,10 @@ class MultiViewVLMBase3DQA(BaseModel):
             dict: Dictionary containing fusion outputs for head inputs
         """
         pid_components = feat_dict['pid_components']
+        print("=== PID Component Debug ===")
+        for name, component in pid_components.items():
+            print(f"{name}: {component.shape}")
+        print("===========================")
         text_global = text_dict['text_global_token']  # [B, D_fusion]
         text_feats = text_dict['text_feats']  # [B, Lt, D_fusion]
         text_token_mask = text_dict['text_token_mask']  # [B, Lt]
@@ -1165,55 +1182,61 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         return head_inputs_dict
 
-    def _extract_precomputed_superpoints(
-        self, 
-        batch_data_samples: SampleList, 
-        batch_size: int, 
-        num_points: int, 
-        device: torch.device
-    ) -> torch.Tensor:
-        """Extract and process pre-computed superpoints from batch data samples."""
+    # def _extract_precomputed_superpoints(self, batch_data_samples, batch_size, num_points, device):
+    #     """Extract and process pre-computed superpoints from batch data samples."""
+    #     batch_superpoint_ids = []
+        
+    #     for b in range(batch_size):
+    #         data_sample = batch_data_samples[b]
+            
+    #         print(f"[Model] Batch {b} - Looking for superpoints...")
+    #         print(f"[Model] Available attributes: {[attr for attr in dir(data_sample) if not attr.startswith('_')]}")
+            
+    #         if hasattr(data_sample, 'precomputed_superpoint_ids') and data_sample.precomputed_superpoint_ids is not None:
+    #             print(f"[Model] ✓ Found precomputed_superpoint_ids: {data_sample.precomputed_superpoint_ids.shape}")
+    #             superpoint_ids = torch.from_numpy(data_sample.precomputed_superpoint_ids).long().to(device)
+    #         elif hasattr(data_sample, 'superpoint_3d') and data_sample.superpoint_3d is not None:
+    #             print(f"[Model] ✓ Found superpoint_3d: {data_sample.superpoint_3d.shape}")
+    #             superpoint_ids = data_sample.superpoint_3d.long().to(device)
+    #         else:
+    #             print(f"[Model] ✗ No superpoints found for batch {b}")
+    #             superpoint_ids = torch.full((num_points,), -1, dtype=torch.long, device=device)
+            
+    #         batch_superpoint_ids.append(superpoint_ids)
+        
+    #     return torch.stack(batch_superpoint_ids, dim=0)
+    def _extract_precomputed_superpoints(self, batch_data_samples, batch_size, num_points, device):
+        """Extract and map superpoints to downsampled points."""
         batch_superpoint_ids = []
         
         for b in range(batch_size):
             data_sample = batch_data_samples[b]
             
-            # FIXED: Handle both dict and object access
-            if isinstance(data_sample, dict):
-                # Dict access
-                if ('precomputed_superpoint_ids' in data_sample and 
-                    data_sample['precomputed_superpoint_ids'] is not None):
-                    superpoint_ids = torch.from_numpy(data_sample['precomputed_superpoint_ids']).long().to(device)
+            # Get original superpoints
+            if hasattr(data_sample, 'superpoint_3d') and data_sample.superpoint_3d is not None:
+                original_superpoints = data_sample.superpoint_3d.long().to(device)
+                
+                # Map to downsampled points if we have FP indices
+                if hasattr(self, 'current_fp_indices') and self.current_fp_indices is not None:
+                    fp_indices_b = self.current_fp_indices[b]  # [num_points] 
+                    # Ensure indices are within bounds
+                    fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoints.shape[0] - 1)
+                    mapped_superpoints = original_superpoints[fp_indices_b]
+                    batch_superpoint_ids.append(mapped_superpoints)
                 else:
-                    print(f"Warning: No pre-computed superpoints found for batch sample {b}")
-                    superpoint_ids = torch.full((num_points,), -1, dtype=torch.long, device=device)
+                    # Fallback: truncate or pad
+                    if original_superpoints.shape[0] >= num_points:
+                        batch_superpoint_ids.append(original_superpoints[:num_points])
+                    else:
+                        # Pad with -1
+                        padded = torch.full((num_points,), -1, dtype=torch.long, device=device)
+                        padded[:original_superpoints.shape[0]] = original_superpoints
+                        batch_superpoint_ids.append(padded)
             else:
-                # Object attribute access (original code)
-                if (hasattr(data_sample, 'precomputed_superpoint_ids') and 
-                    data_sample.precomputed_superpoint_ids is not None):
-                    superpoint_ids = torch.from_numpy(data_sample.precomputed_superpoint_ids).long().to(device)
-                else:
-                    print(f"Warning: No pre-computed superpoints found for batch sample {b}")
-                    superpoint_ids = torch.full((num_points,), -1, dtype=torch.long, device=device)
-            
-            batch_superpoint_ids.append(superpoint_ids)
+                raise ValueError(f"Warning: No superpoints found for batch {b}")
+                batch_superpoint_ids.append(torch.full((num_points,), -1, dtype=torch.long, device=device))
         
-        # Stack into batch tensor
-        try:
-            superpoint_ids_batched = torch.stack(batch_superpoint_ids, dim=0)  # [B, Np]
-            # Successfully loaded pre-computed superpoints
-            
-            # Validate superpoints (silent validation)
-            valid_count = (superpoint_ids_batched >= 0).sum().item()
-            total_count = superpoint_ids_batched.numel()
-            
-            return superpoint_ids_batched
-        except Exception as e:
-            print(f"Error stacking pre-computed superpoints: {e}")
-            # Return tensor of invalid IDs as fallback
-            return torch.full(
-                (batch_size, num_points), -1, dtype=torch.long, device=device
-            )
+        return torch.stack(batch_superpoint_ids, dim=0)
 
     def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
         """
@@ -1306,12 +1329,12 @@ class MultiViewVLMBase3DQA(BaseModel):
                     cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
                     print(f"Saved original RGB image to: {output_img_path}")
         except Exception as e:
-            print(f"Could not save original RGB images: {e}")
+            raise ValueError(f"Could not save original RGB images: {e}")
 
         # --- Get Original Input Data ---
         original_stack_points = feat_dict.get('original_stack_points', None)
         if original_stack_points is None:
-            print("Error: 'original_stack_points' not found in feat_dict.")
+            raise ValueError("Error: 'original_stack_points' not found in feat_dict.")
             return
 
         # Get points for the specified batch
@@ -1319,17 +1342,17 @@ class MultiViewVLMBase3DQA(BaseModel):
         points_xyz_original = original_points_sample[:, :3].cpu()
         num_original_points = points_xyz_original.shape[0]
         
-        print(f"Processing original point cloud with {num_original_points} points.")
+        # print(f"Processing original point cloud with {num_original_points} points.")
 
         # --- Get Original Colors ---
         if original_points_sample.shape[1] >= 6:
             point_colors_original = original_points_sample[:, 3:6].float()
             if point_colors_original.max() > 1.0:
-                print("Normalizing original colors (assuming range 0-255).")
+                # print("Normalizing original colors (assuming range 0-255).")
                 point_colors_original = point_colors_original / 255.0
             point_colors_original = point_colors_original.cpu()
         else:
-            print("Warning: Using random colors for VCCS calculation.")
+            raise ValueError("Warning: Using random colors for VCCS calculation.")
             point_colors_original = torch.rand_like(points_xyz_original).cpu()
 
         # --- Save Original Point Cloud with RGB Colors ---
@@ -1339,13 +1362,13 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         output_path = os.path.join(output_dir, f"original_rgb_point_cloud_batch{batch_idx}.ply")
         o3d.io.write_point_cloud(output_path, pcd)
-        print(f"Saved original RGB point cloud to: {output_path}")
+        # print(f"Saved original RGB point cloud to: {output_path}")
 
         # --- Estimate Normals ---
-        print("Estimating normals...")
+        # print("Estimating normals...")
         t0 = time.time()
         points_normals_original = estimate_normals(points_xyz_original)
-        print(f"Normals estimated. ({time.time() - t0:.2f}s)")
+        # print(f"Normals estimated. ({time.time() - t0:.2f}s)")
 
         # --- Common VCCS Parameters ---
         vccs_voxel_size = 0.02
@@ -1357,7 +1380,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         vccs_device = torch.device('cpu')
         
         # --- Generate Superpoints with Original Method ---
-        print("\n=== Running Original VCCS Implementation ===")
+        # print("\n=== Running Original VCCS Implementation ===")
         t0 = time.time()
         # Import the function directly from the module
         from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints
@@ -1375,7 +1398,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             device=vccs_device
         ).cpu()
         
-        print(f"Original VCCS completed in {time.time() - t0:.2f}s")
+        # print(f"Original VCCS completed in {time.time() - t0:.2f}s")
         
         # --- Analyze Original Superpoints ---
         if original_superpoint_ids is not None and (original_superpoint_ids != -1).any():
@@ -1384,14 +1407,14 @@ class MultiViewVLMBase3DQA(BaseModel):
             num_superpoints = len(unique_ids)
             total_points_assigned = valid_mask.sum().item()
             
-            print(f"Original VCCS Statistics:")
-            print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
-            print(f"  Number of superpoints: {num_superpoints}")
+            # print(f"Original VCCS Statistics:")
+            # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
+            # print(f"  Number of superpoints: {num_superpoints}")
             
             if num_superpoints > 0:
-                print(f"  Min size: {counts.min().item()}")
-                print(f"  Max size: {counts.max().item()}")
-                print(f"  Mean size: {counts.float().mean().item():.2f}")
+                # print(f"  Min size: {counts.min().item()}")
+                # print(f"  Max size: {counts.max().item()}")
+                # print(f"  Mean size: {counts.float().mean().item():.2f}")
                 
                 # Visualize original superpoints
                 color_map = torch.rand(num_superpoints, 3)
@@ -1412,10 +1435,10 @@ class MultiViewVLMBase3DQA(BaseModel):
                 
                 output_path = os.path.join(output_dir, f"original_vccs_batch{batch_idx}.ply")
                 o3d.io.write_point_cloud(output_path, pcd)
-                print(f"Saved visualization to: {output_path}")
+                # print(f"Saved visualization to: {output_path}")
         
         # --- Generate Superpoints with Improved Method ---
-        print("\n=== Running Improved VCCS Implementation ===")
+        # print("\n=== Running Improved VCCS Implementation ===")
         t0 = time.time()
         # Import the improved function
         from embodiedqa.utils.superpoint_segmentation import improved_vccs_superpoints
@@ -1432,7 +1455,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             device=vccs_device
         ).cpu()
         
-        print(f"Improved VCCS completed in {time.time() - t0:.2f}s")
+        # print(f"Improved VCCS completed in {time.time() - t0:.2f}s")
         
         # --- Analyze Improved Superpoints ---
         if improved_superpoint_ids is not None and (improved_superpoint_ids != -1).any():
@@ -1441,14 +1464,14 @@ class MultiViewVLMBase3DQA(BaseModel):
             num_superpoints = len(unique_ids)
             total_points_assigned = valid_mask.sum().item()
             
-            print(f"Improved VCCS Statistics:")
-            print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
-            print(f"  Number of superpoints: {num_superpoints}")
+            # print(f"Improved VCCS Statistics:")
+            # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
+            # print(f"  Number of superpoints: {num_superpoints}")
             
             if num_superpoints > 0:
-                print(f"  Min size: {counts.min().item()}")
-                print(f"  Max size: {counts.max().item()}")
-                print(f"  Mean size: {counts.float().mean().item():.2f}")
+                # print(f"  Min size: {counts.min().item()}")
+                # print(f"  Max size: {counts.max().item()}")
+                # print(f"  Mean size: {counts.float().mean().item():.2f}")
                 
                 # Visualize improved superpoints
                 color_map = torch.rand(num_superpoints, 3)
@@ -1469,7 +1492,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                 
                 output_path = os.path.join(output_dir, f"improved_vccs_batch{batch_idx}.ply")
                 o3d.io.write_point_cloud(output_path, pcd)
-                print(f"Saved visualization to: {output_path}")
+                # print(f"Saved visualization to: {output_path}")
         
         # --- Create Difference Visualization ---
         # if original_superpoint_ids is not None and improved_superpoint_ids is not None:

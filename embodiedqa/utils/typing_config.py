@@ -44,25 +44,26 @@ class Det3DDataElement(BaseDataElement):
 
     @property
     def views_points(self):
-        """Access views_points from metainfo"""
-        if hasattr(self, 'metainfo') and self.metainfo:
-            if 'views_points' in self.metainfo:
-                return self.metainfo['views_points']
-            else:
-                # Provide detailed debugging information
-                available_keys = list(self.metainfo.keys())
-                raise AttributeError(
-                    f"'views_points' not found in metainfo. "
-                    f"Available keys: {available_keys}. "
-                    f"This suggests the data loader is not properly setting views_points. "
-                    f"Check your dataset configuration and preprocessing pipeline."
-                )
+        """Access views_points from metainfo or direct attribute"""
+        # First try direct attribute access
+        if hasattr(self, '_views_points'):
+            return self._views_points
+        # Then try metainfo
+        elif hasattr(self, 'metainfo') and self.metainfo and 'views_points' in self.metainfo:
+            return self.metainfo['views_points']
         else:
-            raise AttributeError(
-                f"No metainfo found in Det3DDataElement. "
-                f"This suggests a fundamental issue with data loading. "
-                f"The data pipeline should populate metainfo with required fields including 'views_points'."
-            )
+            return None
+
+    @views_points.setter
+    def views_points(self, value):
+        """Set views_points as direct attribute"""
+        self.set_field(value, '_views_points')
+
+    @views_points.deleter
+    def views_points(self):
+        """Delete views_points"""
+        if hasattr(self, '_views_points'):
+            del self._views_points
 
     def __getattr__(self, name):
         """Handle dynamic attribute access for metainfo fields."""

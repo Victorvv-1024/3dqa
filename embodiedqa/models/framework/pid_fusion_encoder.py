@@ -76,18 +76,20 @@ class PIDFusionEncoder(nn.Module):
         seq_len = stacked_components.shape[1]
         
         # Debug prints
-        print(f"stacked_components shape: {stacked_components.shape}")
+        # print(f"stacked_components shape: {stacked_components.shape}")
         if self.need_projection:
-            print(f"Projecting from {self.fusion_dim} to {self.hidden_dim}")
-        
+            # print(f"Projecting from {self.fusion_dim} to {self.hidden_dim}")
+            stacked_components = self.component_projection(stacked_components)
+            # print(f"After projection: {stacked_components.shape}")
+
         # Create component mask
         component_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
         
         # Project if needed
         if self.need_projection:
             stacked_components = self.component_projection(stacked_components)
-            print(f"After projection: {stacked_components.shape}")
-        
+            # print(f"After projection: {stacked_components.shape}")
+
         # Apply transformer
         interacted_features = self.cross_modal_interaction(
             stacked_components,
@@ -96,9 +98,9 @@ class PIDFusionEncoder(nn.Module):
         
         # CRITICAL FIX: Project back to original dimension
         if self.need_projection:
-            print(f"Interacted features before back-projection: {interacted_features.shape}")
+            # print(f"Interacted features before back-projection: {interacted_features.shape}") # [B, 8192, 384]
             interacted_features = self.output_projection(interacted_features)
-            print(f"Interacted features after back-projection: {interacted_features.shape}")
+            # print(f"Interacted features after back-projection: {interacted_features.shape}") # [B, 8192, 768]
         
         # Process text if needed
         processed_text = None

@@ -487,7 +487,7 @@ class SuperpointLoader(BaseTransform):
         
         if 'precomputed_superpoint_scene_id' in results:
             scene_id = results['precomputed_superpoint_scene_id']
-            print(f"[SuperpointLoader] Loading for scene: {scene_id}")
+            # print(f"[SuperpointLoader] Loading for scene: {scene_id}")
             
             # Clean scene_id format
             clean_scene_id = scene_id.replace('scannet/', '') if scene_id.startswith('scannet/') else scene_id
@@ -498,6 +498,7 @@ class SuperpointLoader(BaseTransform):
                 try:
                     superpoint_ids = np.load(cache_file)
                     results['precomputed_superpoint_ids'] = superpoint_ids
+                    # print(f"[SuperpointLoader] ✓ Loaded {scene_id}: {superpoint_ids.shape}")
                     # IMPORTANT: Preserve the scene_id for later use in multiple places
                     results['superpoint_scene_id'] = clean_scene_id
                     results['scene_id'] = clean_scene_id  # Also add as generic scene_id
@@ -509,11 +510,12 @@ class SuperpointLoader(BaseTransform):
                     results['ann_info']['superpoint_scene_id'] = clean_scene_id
                     
                 except Exception as e:
-                    print(f"Warning: SuperpointLoader failed to load {clean_scene_id}: {e}")
+                    raise ValueError(f"Warning: SuperpointLoader failed to load {clean_scene_id}: {e}")
                     results['precomputed_superpoint_ids'] = None
                     results['superpoint_scene_id'] = None
                     results['scene_id'] = None
             else:
+                raise ValueError(f"[SuperpointLoader] ✗ File not found: {cache_file}")
                 results['precomputed_superpoint_ids'] = None
                 results['superpoint_scene_id'] = None
                 results['scene_id'] = None

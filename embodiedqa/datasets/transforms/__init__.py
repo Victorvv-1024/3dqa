@@ -9,7 +9,8 @@ from .superpoint_transforms import (
     PointSampleWithSuperpoints,
     GlobalRotScaleTransWithSuperpoints, 
     SuperpointAugmentation,
-    SuperpointLoader
+    SuperpointLoader,
+    RandomFlip3DWithSuperpoints,
 )
 
 
