@@ -194,8 +194,6 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True),
-    dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
-    dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
     dict(type='MultiViewPipeline',
          n_images=20,
          ordered=True,
@@ -262,79 +260,47 @@ train_dataloader = dict(
                               max_workers=8,
                               )))
 
-val_dataloader = dict(batch_size=12,
-                      num_workers=12,
-                      persistent_workers=True,
-                      pin_memory=True,
-                      drop_last=False,
-                      sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
-                      dataset=dict(type=dataset_type,
-                                   data_root=data_root,
-                                   ann_file='mv_scannetv2_infos_val.pkl',
-                                   qa_file='qa/ScanQA_v1.0_val.json',
-                                   metainfo=dict(classes=classes),
-                                   pipeline=test_pipeline,
-                                   anno_indices=None,
-                                   test_mode=True,
-                                   filter_empty_gt=True,
-                                   box_type_3d='Depth',
-                                   remove_dontcare=True,
-                                   # NEW: Pre-computed superpoint configuration (same as train)
-                                   use_precomputed_superpoints=True,
-                                   superpoint_config=dict(
-                                       method='original',
-                                       params=dict(
-                                           voxel_size=0.02,
-                                           seed_spacing=0.5,
-                                           neighbor_voxel_search=True,
-                                           neighbor_radius_search=0.05,
-                                           max_expand_dist=1.0,
-                                           wc=0.2,
-                                           ws=0.4,
-                                           wn=1.0,
-                                       )
-                                   ),
-                                   superpoint_cache_dir=None,
-                                   force_recompute_superpoints=False,
-                                   max_workers=8,
-                                   ))
+val_dataloader = dict(
+    batch_size=12,
+    num_workers=12,
+    persistent_workers=True,
+    pin_memory=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
+    dataset=dict(type=dataset_type,
+                 data_root=data_root,
+                 ann_file='mv_scannetv2_infos_val.pkl',
+                 qa_file='qa/ScanQA_v1.0_val.json',
+                 metainfo=dict(classes=classes),
+                 pipeline=test_pipeline,  # Uses inference pipeline (no superpoints)
+                 anno_indices=None,
+                 test_mode=True,
+                 filter_empty_gt=True,
+                 box_type_3d='Depth',
+                 remove_dontcare=True,
+                 use_precomputed_superpoints=False,
+                 ))
 
-test_dataloader = dict(batch_size=12,
-                      num_workers=12,
-                      persistent_workers=True,
-                      pin_memory=True,
-                      drop_last=False,
-                      sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
-                      dataset=dict(type=dataset_type,
-                                   data_root=data_root,
-                                   ann_file='mv_scannetv2_infos_val.pkl',
-                                   qa_file='qa/ScanQA_v1.0_test_w_obj.json',
-                                   metainfo=dict(classes=classes),
-                                   pipeline=test_pipeline,
-                                   anno_indices=None,
-                                   test_mode=True,
-                                   filter_empty_gt=False,
-                                   box_type_3d='Depth',
-                                   remove_dontcare=False,
-                                   # NEW: Pre-computed superpoint configuration (same as train)
-                                   use_precomputed_superpoints=True,
-                                   superpoint_config=dict(
-                                       method='original',
-                                       params=dict(
-                                           voxel_size=0.02,
-                                           seed_spacing=0.5,
-                                           neighbor_voxel_search=True,
-                                           neighbor_radius_search=0.05,
-                                           max_expand_dist=1.0,
-                                           wc=0.2,
-                                           ws=0.4,
-                                           wn=1.0,
-                                       )
-                                   ),
-                                   superpoint_cache_dir=None,
-                                   force_recompute_superpoints=False,
-                                   max_workers=8,
-                                   ))
+test_dataloader = dict(
+    batch_size=12,
+    num_workers=12,
+    persistent_workers=True,
+    pin_memory=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
+    dataset=dict(type=dataset_type,
+                 data_root=data_root,
+                 ann_file='mv_scannetv2_infos_val.pkl',
+                 qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+                 metainfo=dict(classes=classes),
+                 pipeline=test_pipeline,  # Uses inference pipeline (no superpoints)
+                 anno_indices=None,
+                 test_mode=True,
+                 filter_empty_gt=False,
+                 box_type_3d='Depth',
+                 remove_dontcare=False,
+                 use_precomputed_superpoints=False,
+                 ))
 
 # Keep all your existing configurations
 val_evaluator = dict(type='ScanQAMetric',)

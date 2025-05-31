@@ -64,59 +64,103 @@ class PointViewFusion(nn.Module):
             nn.LayerNorm(fusion_dim)
         )
         
+    # def forward(self, point_features, view_features, superpoint_ids=None):
+    #     """
+    #     Forward pass with geometry-guided attention for optimal point-view fusion.
+        
+    #     Args:
+    #         point_features: Point cloud features [B, Np, D_point]
+    #         view_features: View features [B, M, Np, D_view]
+    #         superpoint_ids: Superpoint IDs [B, Np]
+    #     """
+    #     B, M, Np, D_view = view_features.shape
+        
+    #     # Project features to common dimension
+    #     point_proj = self.point_proj(point_features)  # [B, Np, hidden_dim]
+        
+    #     # Process each view separately
+    #     view_attentions = []
+    #     for m in range(M):
+    #         # Get features for this view
+    #         view_m = view_features[:, m, :, :]  # [B, Np, D_view]
+    #         view_m_proj = self.view_proj(view_m)  # [B, Np, hidden_dim]
+            
+    #         # Compute attention weights using point features to guide view feature selection
+    #         concat_features = torch.cat([point_proj, view_m_proj], dim=-1)  # [B, Np, hidden_dim*2]
+    #         attention_weights = self.point_view_attention(concat_features)  # [B, Np, 1]
+    #         view_attentions.append(attention_weights)
+        
+    #     # Stack attention weights for all views
+    #     all_attentions = torch.stack(view_attentions, dim=1)  # [B, M, Np, 1]
+        
+    #     # Apply geometric constraint using superpoints if provided
+    #     if superpoint_ids is not None:
+    #         refined_attentions = self._apply_geometric_constraint(
+    #             all_attentions, superpoint_ids, point_proj
+    #         )
+    #     else:
+    #         refined_attentions = all_attentions
+        
+    #     # Normalize attention weights across views
+    #     normalized_attentions = F.softmax(refined_attentions, dim=1)  # [B, M, Np, 1]
+        
+    #     # Weighted combination of view features
+    #     weighted_views = torch.zeros(B, Np, D_view, device=view_features.device)
+    #     for m in range(M):
+    #         weighted_views += normalized_attentions[:, m, :, :] * view_features[:, m, :, :]
+        
+    #     # Project weighted view features
+    #     weighted_views_proj = self.view_proj(weighted_views)  # [B, Np, hidden_dim]
+        
+    #     # Combine point and weighted view features
+    #     combined = torch.cat([point_proj, weighted_views_proj], dim=-1)  # [B, Np, hidden_dim*2]
+    #     Z_PV = self.fusion_layer(combined)  # [B, Np, fusion_dim]
+        
+    #     return Z_PV
+    
     def forward(self, point_features, view_features, superpoint_ids=None):
         """
-        Forward pass with geometry-guided attention for optimal point-view fusion.
-        
         Args:
-            point_features: Point cloud features [B, Np, D_point]
-            view_features: View features [B, M, Np, D_view]
-            superpoint_ids: Superpoint IDs [B, Np]
+            superpoint_ids: Only provided during training, None during inference
         """
         B, M, Np, D_view = view_features.shape
         
         # Project features to common dimension
-        point_proj = self.point_proj(point_features)  # [B, Np, hidden_dim]
+        point_proj = self.point_proj(point_features)
         
         # Process each view separately
         view_attentions = []
         for m in range(M):
-            # Get features for this view
-            view_m = view_features[:, m, :, :]  # [B, Np, D_view]
-            view_m_proj = self.view_proj(view_m)  # [B, Np, hidden_dim]
-            
-            # Compute attention weights using point features to guide view feature selection
-            concat_features = torch.cat([point_proj, view_m_proj], dim=-1)  # [B, Np, hidden_dim*2]
-            attention_weights = self.point_view_attention(concat_features)  # [B, Np, 1]
+            view_m = view_features[:, m, :, :]
+            view_m_proj = self.view_proj(view_m)
+            concat_features = torch.cat([point_proj, view_m_proj], dim=-1)
+            attention_weights = self.point_view_attention(concat_features)
             view_attentions.append(attention_weights)
         
-        # Stack attention weights for all views
-        all_attentions = torch.stack(view_attentions, dim=1)  # [B, M, Np, 1]
+        all_attentions = torch.stack(view_attentions, dim=1)
         
-        # Apply geometric constraint using superpoints if provided
-        if superpoint_ids is not None:
+        # Apply geometric constraint only during training with superpoints
+        if superpoint_ids is not None and self.training:
             refined_attentions = self._apply_geometric_constraint(
                 all_attentions, superpoint_ids, point_proj
             )
         else:
+            # Inference mode: skip geometric constraints for speed
             refined_attentions = all_attentions
         
-        # Normalize attention weights across views
-        normalized_attentions = F.softmax(refined_attentions, dim=1)  # [B, M, Np, 1]
+        # Continue with standard fusion
+        normalized_attentions = F.softmax(refined_attentions, dim=1)
         
-        # Weighted combination of view features
         weighted_views = torch.zeros(B, Np, D_view, device=view_features.device)
         for m in range(M):
             weighted_views += normalized_attentions[:, m, :, :] * view_features[:, m, :, :]
         
-        # Project weighted view features
-        weighted_views_proj = self.view_proj(weighted_views)  # [B, Np, hidden_dim]
-        
-        # Combine point and weighted view features
-        combined = torch.cat([point_proj, weighted_views_proj], dim=-1)  # [B, Np, hidden_dim*2]
-        Z_PV = self.fusion_layer(combined)  # [B, Np, fusion_dim]
+        weighted_views_proj = self.view_proj(weighted_views)
+        combined = torch.cat([point_proj, weighted_views_proj], dim=-1)
+        Z_PV = self.fusion_layer(combined)
         
         return Z_PV
+
 
     def _apply_geometric_constraint(self, attention_weights, superpoint_ids, point_features):
         """

@@ -75,39 +75,24 @@ class PointTextFusion(nn.Module):
             Z_PT: Point-text interaction features [B, Np, D_fusion]
         """
         B, Np, _ = point_features.shape
-        _, Lt, _ = text_features.shape
         device = point_features.device
         
         # Project features to common dimension
-        P = self.point_proj(point_features)  # [B, Np, hidden_dim]
-        T = self.text_proj(text_features)    # [B, Lt, hidden_dim]
+        P = self.point_proj(point_features)
+        T = self.text_proj(text_features)
         
-        # 1. View-Mediated Alignment
-        view_bridge_input = torch.cat([Z_PV, Z_TV], dim=-1)  # [B, Np, D_view*2]
-        view_bridge_features = self.view_bridge(view_bridge_input)  # [B, Np, hidden_dim]
+        if superpoint_ids is None or not self.training:
+            # Inference mode: direct point-text fusion without superpoints
+            return self._direct_point_text_fusion(P, T, text_mask)
         
-        # 2. Superpoint-Semantic Alignment
-        if superpoint_ids is not None:
-            P_semantic = self._compute_superpoint_semantics(P, superpoint_ids)
-        else:
-            P_semantic = P
-            
-        # 3. Cross-Attention with Guidance
-        P_enriched = P + 0.5 * view_bridge_features + 0.5 * P_semantic
-        
-        # Create attention mask if text_mask is provided
-        attn_mask = None
-        if text_mask is not None:
-            attn_mask = ~text_mask  # Invert since attention_mask masks out tokens with True
-            
-        # Cross-attention: points attend to text
-        attn_output, _ = self.cross_attention(P_enriched, T, T, key_padding_mask=attn_mask)
-        
-        # 4. Integration
-        Z_PT_intermediate = self.integration(torch.cat([P, attn_output], dim=-1))
-        
-        # Final projection
-        Z_PT = self.output_proj(Z_PT_intermediate)
+        # Training mode: use superpoint-aware fusion
+        superpoint_features, superpoint_mappings = self._aggregate_superpoints(P, superpoint_ids)
+        enhanced_superpoint_features = self._text_superpoint_matching(
+            superpoint_features, T, text_mask, superpoint_mappings
+        )
+        Z_PT = self._distribute_to_points(
+            P, enhanced_superpoint_features, superpoint_mappings, superpoint_ids
+        )
         
         return Z_PT
     
