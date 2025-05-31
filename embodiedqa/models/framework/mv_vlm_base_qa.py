@@ -31,7 +31,7 @@ from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion, DirectPointTextFusion
 from .tri_modal_fusion import TrimodalFusion
 from .pid import PIDDecomposition
-from .pid_fusion_encoder import PIDFusionEncoder
+from .pid_fusion_encoder import PIDFusionEncoder, OptimizedPIDFusionEncoder
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
 import traceback
@@ -231,9 +231,15 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # --- New arguments for PID fusion encoder ---
-        self.pid_fusion_encoder = PIDFusionEncoder(
-            fusion_dim=D_fus,
-            hidden_dim=D_fus // 2,
+        # self.pid_fusion_encoder = PIDFusionEncoder(
+        #     fusion_dim=D_fus,
+        #     hidden_dim=D_fus,
+        #     num_heads=8,
+        #     num_layers=3,
+        # )
+        self.pid_fusion_encoder = OptimizedPIDFusionEncoder(
+            fusion_dim=D_fus,           # 768
+            architecture='hierarchical',  # Best balance of performance and efficiency
             num_heads=8,
             num_layers=3,
         )
@@ -701,41 +707,41 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         return text_dict
 
-    def forward_transformer(self,
-                            point_feats: Tensor,
-                            point_pos: Tensor,
-                            point_mask:Tensor,
-                            text_dict: Dict,
-                            full_point_feats: Tensor = None,
-                            full_point_pos: Tensor = None,
-                            full_point_mask: Tensor = None
-                            ) -> Dict:
-        #feats: mapping and add pos embedding
-        point_feats = self.visual_feat_map(point_feats)
-        point_feats += self.pos_embedding(point_pos)
-        point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
+    # def forward_transformer(self,
+    #                         point_feats: Tensor,
+    #                         point_pos: Tensor,
+    #                         point_mask:Tensor,
+    #                         text_dict: Dict,
+    #                         full_point_feats: Tensor = None,
+    #                         full_point_pos: Tensor = None,
+    #                         full_point_mask: Tensor = None
+    #                         ) -> Dict:
+    #     #feats: mapping and add pos embedding
+    #     point_feats = self.visual_feat_map(point_feats)
+    #     point_feats += self.pos_embedding(point_pos)
+    #     point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
         
-        full_point_feats = self.full_visual_feat_map(full_point_feats)
-        full_point_feats += self.full_pos_embedding(full_point_pos)
-        full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
+    #     full_point_feats = self.full_visual_feat_map(full_point_feats)
+    #     full_point_feats += self.full_pos_embedding(full_point_pos)
+    #     full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
         
-        fusion_encoder_inputs_dict = dict(
-            lang_feats = text_dict['text_feats'],
-            lang_attention_mask = text_dict['text_token_mask'],
-            visual_feats = point_feats,
-            visual_attention_mask = point_mask,
-            full_visual_feats = full_point_feats,
-            full_visual_attention_mask = full_point_mask,
-            )
-        fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
-        head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
-                                visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
-                                fusion_feat_language=fusion_output['lang_feats'], 
-                                language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
-                                fusion_feat_pooler=fusion_output.get('pooler_feat',None)
-                                )
+    #     fusion_encoder_inputs_dict = dict(
+    #         lang_feats = text_dict['text_feats'],
+    #         lang_attention_mask = text_dict['text_token_mask'],
+    #         visual_feats = point_feats,
+    #         visual_attention_mask = point_mask,
+    #         full_visual_feats = full_point_feats,
+    #         full_visual_attention_mask = full_point_mask,
+    #         )
+    #     fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
+    #     head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
+    #                             visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
+    #                             fusion_feat_language=fusion_output['lang_feats'], 
+    #                             language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
+    #                             fusion_feat_pooler=fusion_output.get('pooler_feat',None)
+    #                             )
         
-        return head_inputs_dict
+    #     return head_inputs_dict
 
     def loss(self, batch_inputs_dict: dict, batch_data_samples: SampleList,
              **kwargs) -> Union[dict, list]:        
@@ -946,30 +952,83 @@ class MultiViewVLMBase3DQA(BaseModel):
                     new_dict[key] = value
         return new_dict
     
-    def predict(self, batch_inputs_dict, batch_data_samples,**kwargs):
+    # def predict(self, batch_inputs_dict, batch_data_samples,**kwargs):
+        # text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
+        # feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
+        # full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
+        # full_point_pos = feat_dict['fp_xyz'][-1]
+        # batch_size = full_point_feats.shape[0]
+        # point_mask = None #B,proposal_num
+        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+        # point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
+        # point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
+
+        # head_inputs_dict = self.forward_transformer(point_feats=point_feats,
+        #                                             point_pos=point_pos,
+        #                                             point_mask=point_mask,
+        #                                             text_dict=text_dict,
+        #                                             full_point_feats=full_point_feats,
+        #                                             full_point_pos=full_point_pos)
+        # results_list = self.qa_head.predict(**head_inputs_dict,
+        #                              batch_data_samples=batch_data_samples)
+
+        # for data_sample, pred_scores in zip(batch_data_samples,
+        #                                           results_list):
+        #     data_sample.pred_scores = pred_scores
+        # return batch_data_samples
+        
+    def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
+        """
+        INFERENCE PATH - exactly matching the training process.
+        This mirrors the loss() method but uses predict() instead of loss().
+        """
+        
+        # Step 1: Extract text features (IDENTICAL to training)
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-        feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-        full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
-        full_point_pos = feat_dict['fp_xyz'][-1]
-        batch_size = full_point_feats.shape[0]
-        point_mask = None #B,proposal_num
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
-        point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
+        
+        # Step 2: Extract visual/3D features + PID components (IDENTICAL to training)
+        feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
+        
+        # Get batch info (IDENTICAL to training)
+        points = batch_inputs_dict['points']
+        batch_size = len(points)
+        
+        # Step 3: Process through PID fusion (IDENTICAL to training)
+        head_inputs = self._forward_pid_fusion(feat_dict, text_dict)
+        
+        # Step 4: QA Head processing (ADAPTED for inference)
+        if isinstance(head_inputs, dict) and 'qa_head' in head_inputs and 'other_heads' in head_inputs:
+            # Structured inputs case (happens when batch_size=1 and training=True during loss())
+            qa_inputs_dict = head_inputs['qa_head']
+            
+            # CRITICAL: Remove training-specific flags for inference
+            qa_inputs_dict = qa_inputs_dict.copy()  # Don't modify original
+            if 'duplicate_batch' in qa_inputs_dict:
+                del qa_inputs_dict['duplicate_batch']
+            
+            # CRITICAL: Handle duplicated batch dimensions for inference
+            # During training with batch_size=1, dimensions are duplicated to [2, ...]
+            # For inference, we need original batch size
+            for key, value in qa_inputs_dict.items():
+                if value is not None and isinstance(value, torch.Tensor):
+                    if value.shape[0] == batch_size * 2:  # Was duplicated during training setup
+                        qa_inputs_dict[key] = value[:batch_size]  # Take first half
+            
+            # Use QA inputs for prediction
+            results_list = self.qa_head.predict(**qa_inputs_dict,
+                                            batch_data_samples=batch_data_samples)
+        else:
+            # Standard case - direct inputs
+            results_list = self.qa_head.predict(**head_inputs,
+                                            batch_data_samples=batch_data_samples)
 
-        head_inputs_dict = self.forward_transformer(point_feats=point_feats,
-                                                    point_pos=point_pos,
-                                                    point_mask=point_mask,
-                                                    text_dict=text_dict,
-                                                    full_point_feats=full_point_feats,
-                                                    full_point_pos=full_point_pos)
-        results_list = self.qa_head.predict(**head_inputs_dict,
-                                     batch_data_samples=batch_data_samples)
-
-        for data_sample, pred_scores in zip(batch_data_samples,
-                                                  results_list):
+        # Step 5: Assign predictions to data samples (standard for all predict methods)
+        for data_sample, pred_scores in zip(batch_data_samples, results_list):
             data_sample.pred_scores = pred_scores
+            
         return batch_data_samples
+        
+    
     
     def forward(self,
                 inputs: Union[dict, List[dict]],
@@ -1102,10 +1161,10 @@ class MultiViewVLMBase3DQA(BaseModel):
             dict: Dictionary containing fusion outputs for head inputs
         """
         pid_components = feat_dict['pid_components']
-        print("=== PID Component Debug ===")
-        for name, component in pid_components.items():
-            print(f"{name}: {component.shape}")
-        print("===========================")
+        # print("=== PID Component Debug ===")
+        # for name, component in pid_components.items():
+        #     print(f"{name}: {component.shape}")
+        # print("===========================")
         text_global = text_dict['text_global_token']  # [B, D_fusion]
         text_feats = text_dict['text_feats']  # [B, Lt, D_fusion]
         text_token_mask = text_dict['text_token_mask']  # [B, Lt]
