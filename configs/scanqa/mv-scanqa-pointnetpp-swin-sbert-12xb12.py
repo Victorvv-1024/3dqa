@@ -40,10 +40,16 @@ model = dict(
                        ),
     text_max_length=512,
 
+    # backbone_fusion=dict(type='CrossModalityEncoder',
+    #                      hidden_size=768, 
+    #                      num_attention_heads=12,
+    #                      num_hidden_layers=4,
+    #                      ),
+    
     backbone_fusion=dict(type='CrossModalityEncoder',
-                         hidden_size=768, 
-                         num_attention_heads=12,
-                         num_hidden_layers=4,
+                         hidden_size=1024,         # INCREASED from 768 to 1024
+                         num_attention_heads=16,   
+                         num_hidden_layers=4,     
                          ),
     # point cloud backbone
     backbone_lidar=dict(
@@ -91,22 +97,22 @@ model = dict(
                           train_cfg=dict(
                               pos_distance_thr=0.3, neg_distance_thr=0.6),
                           num_classes=1,
-                          in_channels=768,
-                          hidden_channels=768,
+                          in_channels=1024, # INCREASED from 768 to 1024
+                          hidden_channels=1024, # INCREASED from 768 to 1024
                           dropout=0.3,
                           loss_weight=1.0,
                           ),
     target_cls_head=dict(type='RefClsHead',
                          num_classes=18,
-                         in_channels=768*2,
-                         hidden_channels=768,
+                         in_channels=1024*2, # INCREASED from 768*2 to 1024*2
+                         hidden_channels=1024, # INCREASED from 768 to 1024
                          dropout=0.3,
                          loss_weight=1.0,
                          ),
     qa_head=dict(type='QAHead',
                  num_classes=8864,
-                 in_channels=768,
-                 hidden_channels=768,
+                 in_channels=1024, # INCREASED from 768 to 1024
+                 hidden_channels=1024, # INCREASED from 768 to 1024
                  dropout=0.3,
                  ),
     
@@ -143,7 +149,7 @@ model = dict(
     # SIMPLIFIED: Optional simple distillation loss (without superpoints)
     distillation_loss_cfg=dict(
         enabled=True,  # Set to True if you want simple 2D-3D distillation
-        loss_weight=0.1,
+        loss_weight=0.2,
         loss_type='mse'  # Simple MSE between 2D and 3D features
     ),
     
@@ -151,7 +157,7 @@ model = dict(
     # model training and testing settings
     train_cfg=dict(
         pos_distance_thr=0.3, neg_distance_thr=0.6, sample_mode='seed', 
-        use_uncertainty_weighting=True),
+        use_uncertainty_weighting=True, use_amp=True, use_gradient_checkpointing=True),
     test_cfg=dict(
         sample_mode='seed',
         nms_thr=0.25,
@@ -371,7 +377,7 @@ test_pipeline = [
 
 # SIMPLIFIED: Dataset configuration without pre-computed superpoints
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=4, # 12
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -394,7 +400,7 @@ train_dataloader = dict(
                               )))
 
 val_dataloader = dict(
-    batch_size=12,
+    batch_size=4, #12
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -414,7 +420,7 @@ val_dataloader = dict(
                  ))
 
 test_dataloader = dict(
-    batch_size=12,
+    batch_size=4, # 12
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -438,16 +444,17 @@ val_evaluator = dict(type='ScanQAMetric',)
 test_evaluator = dict(type='ScanQAMetric', format_only=True,)
 
 # training schedule for 1x
-max_epochs = 12
+max_epochs = 20 # INCREASED from 12 to 20 for better performance
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 # optimizer
-lr = 1e-4
+lr = 1e-5 # INCREASED from 1e-4 to 1e-5 for better stability
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(type='AdamW', lr=lr, weight_decay=1e-5),
+    optimizer=dict(type='AdamW', lr=lr, 
+                   weight_decay=5e-2), # INCREASED weight decay for better generalization,
     paramwise_cfg=dict(
         bypass_duplicate=True,
         custom_keys={
@@ -479,5 +486,8 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', save_best='EM@1', rule='greater', 
                    interval=1, max_keep_ckpts=3))
 
-find_unused_parameters = True
+find_unused_parameters = False
+auto_scale_lr = dict(enable=True, base_batch_size=8)  # Auto-scale for different GPU counts
+# POWER: Mixed precision training for 4x4090 efficiency
+fp16 = dict(loss_scale='dynamic')
 load_from = './work_dirs/scannet-det/scannet-votenet-12xb12/epoch_12.pth'

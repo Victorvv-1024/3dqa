@@ -107,14 +107,30 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
         self.use_2d = use_2d
+        D_fus = 1024
         #MCGR
         self.fusion_encoder = MODELS.build(backbone_fusion)
         
-        self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
-                                           nn.LayerNorm(self.fusion_encoder.config.hidden_size)
-                                           ) 
+        # self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
+        #                                    nn.LayerNorm(self.fusion_encoder.config.hidden_size)
+        #                                    ) 
+        self.text_feat_map = nn.Sequential(
+            nn.Linear(self.text_encoder.config.hidden_size, D_fus),
+            nn.LayerNorm(D_fus),
+            nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(D_fus, D_fus),
+            nn.LayerNorm(D_fus)
+        )
         
-        self.pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
+        # self.pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
+        self.pos_embedding = nn.Sequential(
+            nn.Linear(3, D_fus // 2),
+            nn.LayerNorm(D_fus // 2),
+            nn.SiLU(),
+            nn.Linear(D_fus // 2, D_fus),
+            nn.LayerNorm(D_fus)
+        )
         
         # self.fusion_encoder_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
         #                                                     nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
@@ -145,9 +161,21 @@ class MultiViewVLMBase3DQA(BaseModel):
         # --- New arguments for GGD ---
         Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
         # Define D_fus (target fusion dimension, e.g., hidden size of fusion_encoder)
-        D_fus = self.fusion_encoder.config.hidden_size
+        # D_fus = self.fusion_encoder.config.hidden_size
+        # self.project_3d = nn.Sequential(
+        #     nn.Linear(Dp, D_fus),
+        #     nn.LayerNorm(D_fus)
+        # )
+        
         self.project_3d = nn.Sequential(
-            nn.Linear(Dp, D_fus),
+            nn.Linear(Dp, D_fus * 2),
+            nn.LayerNorm(D_fus * 2),
+            nn.SiLU(),  # Better activation than ReLU
+            nn.Dropout(0.1),
+            nn.Linear(D_fus * 2, D_fus),
+            nn.LayerNorm(D_fus),
+            nn.SiLU(),
+            nn.Linear(D_fus, D_fus),  # Extra layer for more capacity
             nn.LayerNorm(D_fus)
         )
         
@@ -157,27 +185,69 @@ class MultiViewVLMBase3DQA(BaseModel):
             Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
             # projection for raw 2D features
             self.project_2d_raw = nn.Sequential(
-                 nn.Linear(Di, D_fus),
-                 nn.LayerNorm(D_fus)
-                 
+                nn.Linear(Di, D_fus * 2),
+                nn.LayerNorm(D_fus * 2),
+                nn.SiLU(),
+                nn.Dropout(0.1),
+                nn.Linear(D_fus * 2, D_fus),
+                nn.LayerNorm(D_fus),
+                nn.SiLU(),
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus)
             )
             # projection for Text-Guided 2D features
             self.project_2d_guided = nn.Sequential(
-                 nn.Linear(Di, D_fus),
-                 nn.LayerNorm(D_fus)
+                nn.Linear(Di, D_fus * 2),
+                nn.LayerNorm(D_fus * 2),
+                nn.SiLU(),
+                nn.Dropout(0.1),
+                nn.Linear(D_fus * 2, D_fus),
+                nn.LayerNorm(D_fus),
+                nn.SiLU(),
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus)
             )
+            
             # This projects Z_t to G_t
-            self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
-                                                    nn.LayerNorm(self.fusion_encoder.config.hidden_size))
+            # self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
+            #                                         nn.LayerNorm(self.fusion_encoder.config.hidden_size))
+            self.text_global_att_proj = nn.Sequential(
+                nn.Linear(self.text_encoder.config.hidden_size, D_fus),
+                nn.LayerNorm(D_fus),
+                nn.SiLU(),
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus)
+            )
             # This projects U_i to G_i
-            self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size),
-                                            nn.LayerNorm(self.fusion_encoder.config.hidden_size))
+            # self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size),
+            #                                 nn.LayerNorm(self.fusion_encoder.config.hidden_size))
+            self.img_att_proj = nn.Sequential(
+                nn.Linear(self.backbone.out_channels[-1], D_fus),
+                nn.LayerNorm(D_fus),
+                nn.SiLU(),
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus)
+            )
             # Original ADVP -- we are conceptually replacing it
             self.fusion_map = VisionFusion(Dp, self.backbone.out_channels[-1], D_fus)
             # # This visual_feat_map was likely for the *output* of fusion_map
-            self.visual_feat_map = nn.Linear(D_fus, D_fus)
+            # self.visual_feat_map = nn.Linear(D_fus, D_fus)
+            self.visual_feat_map = nn.Sequential(
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus),
+                nn.SiLU(),
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus)
+            )
         else:
-            self.visual_feat_map = nn.Linear(Dp, D_fus)
+            # self.visual_feat_map = nn.Linear(Dp, D_fus)
+            self.visual_feat_map = nn.Sequential(
+                nn.Linear(Dp, D_fus),
+                nn.LayerNorm(D_fus),
+                nn.SiLU(),
+                nn.Linear(D_fus, D_fus),
+                nn.LayerNorm(D_fus)
+            )
         
         # distillation_loss_cfg
         self.use_distillation_loss = distillation_loss_cfg is not None # Check if config exists
@@ -199,7 +269,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # else:
         #     print("Using on-the-fly VCCS superpoint calculation for distillation.")
         
-        # SIMPLIFY distillation loss to only use during training if needed
+        # -- SIMPLIFY distillation loss to only use during training if needed --
         if distillation_loss_cfg is not None:
             # Only use simple 2D-3D distillation without superpoints
             self.distillation_loss_cfg = distillation_loss_cfg
@@ -215,10 +285,20 @@ class MultiViewVLMBase3DQA(BaseModel):
         # )
         
         # --- New arguments for Point-View fusion ---
+        # self.point_view_fusion = PointViewFusion(
+        #     point_dim=D_fus,  # Output dim of 3D backbone
+        #     view_dim=D_fus,            # Output dim of 2D backbone
+        #     fusion_dim=D_fus   # Common fusion dimension
+        # )
         self.point_view_fusion = PointViewFusion(
-            point_dim=D_fus,  # Output dim of 3D backbone
-            view_dim=D_fus,            # Output dim of 2D backbone
-            fusion_dim=D_fus   # Common fusion dimension
+            point_dim=D_fus,
+            view_dim=D_fus,
+            fusion_dim=D_fus,
+            hidden_dim=1024,            # Much larger hidden dimension
+            num_heads=12,               # More attention heads
+            num_layers=4,               # Deep processing
+            dropout=0.1,
+            use_gradient_checkpointing=True
         )
         
         # --- New arguments for Point-Text fusion ---
@@ -229,10 +309,20 @@ class MultiViewVLMBase3DQA(BaseModel):
         #     fusion_dim=D_fus   # Output dim
         # )
         # -- New use Direct Fusion -- 
+        # self.point_text_fusion = DirectPointTextFusion(
+        #     point_dim=D_fus,  # 3D feature dim
+        #     text_dim=D_fus,      # Text feature dim
+        #     fusion_dim=D_fus   # Output dim
+        # )
         self.point_text_fusion = DirectPointTextFusion(
-            point_dim=D_fus,  # 3D feature dim
-            text_dim=D_fus,      # Text feature dim
-            fusion_dim=D_fus   # Output dim
+            point_dim=D_fus,
+            text_dim=D_fus,
+            fusion_dim=D_fus,
+            hidden_dim=1024,            # Much larger hidden dimension
+            num_attention_heads=12,     # More attention heads
+            num_layers=6,               # Deep cross-modal processing
+            dropout=0.1,
+            use_gradient_checkpointing=True
         )
         
         
@@ -260,19 +350,27 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=D_fus,
-            num_heads=8,
-            dropout=0.1
+            hidden_dim=1536,            # 2x larger hidden dimension  
+            num_heads=8,               # More attention heads
+            num_layers=4,               # Deep cross-modal processing
+            dropout=0.1,
+            use_gradient_checkpointing=True  # Essential for memory efficiency
         )
         
         self.geometric_priors = ImplicitGeometricPriors(
             fusion_dim=D_fus,
-            num_heads=8,
-            max_distance=5.0
+            hidden_dim=1024,            # Large hidden dimension
+            num_heads=8,               # More attention heads  
+            num_layers=4,               # Deep geometric processing
+            max_distance=8.0,
+            num_distance_bins=64,       # Rich distance encoding
+            use_gradient_checkpointing=True
         )
         
         self.multi_scale_processor = MultiScaleProcessor(
             fusion_dim=D_fus,
-            scales=[512, 1024, 2048]
+            scales=[256, 512, 1024, 2048],  # More scales for robustness
+            hidden_dim=1024
         )
         
         # --- New arguments for uncertainty weighting ---
@@ -521,7 +619,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # feat_dict['fp_features'][-1] = self.fusion_map(feat_dict['fp_features'][-1].transpose(1,2),points_imgfeats).transpose(1,2) # B, C, N
         # print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
         
-        # 1. Get basic features
+        # 1. Get basic features (keep existing code)
         points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()
         F_3d = self.project_3d(points_feat)
         F_2d_raw = self.project_2d_raw(raw_points_imgfeats)
@@ -994,53 +1092,136 @@ class MultiViewVLMBase3DQA(BaseModel):
     #     losses = self.loss_collect(losses)
     #     return losses
     
+    # def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
+    #     """Updated loss method with training-only superpoint distillation."""
+        
+    #     text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
+    #     feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
+            
+    #     points = batch_inputs_dict['points']
+    #     batch_size = len(points)
+    #     losses = {}
+        
+    #     # # GEOMETRY-GUIDED DISTILLATION LOSS (training-only)
+    #     # if (self.training and self.use_distillation_loss and 
+    #     #     self.distillation_loss_calculator is not None):
+            
+    #     #     superpoint_ids_batched = feat_dict.get('superpoint_ids_batched')
+            
+    #     #     # Only compute if superpoints are available (training mode)
+    #     #     if (superpoint_ids_batched is not None and 
+    #     #         not torch.all(superpoint_ids_batched == -1)):
+                
+    #     #         F_3d_batched = feat_dict.get('F_3d')
+    #     #         F_2d_raw_batched = feat_dict.get('F_2d_raw')
+                
+    #     #         # Handle multi-view features
+    #     #         if len(F_2d_raw_batched.shape) == 4:
+    #     #             B, M, Np, D_fus = F_2d_raw_batched.shape
+    #     #             F_2d_raw_batched = F_2d_raw_batched.mean(dim=1)
+                    
+    #     #         assert F_3d_batched.shape == F_2d_raw_batched.shape
+                
+    #     #         B, Np, D_fus = F_3d_batched.shape
+    #     #         F_3d_flat = F_3d_batched.reshape(-1, D_fus)
+    #     #         F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
+    #     #         superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
+    #     #         batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1)
+                
+    #     #         loss_distill = self.distillation_loss_calculator(
+    #     #             F3D=F_3d_flat,
+    #     #             Fraw2D=F_2d_raw_flat,
+    #     #             superpoint_ids=superpoint_ids_flat,
+    #     #             batch_idx=batch_idx_flat
+    #     #         )
+    #     #         losses['loss_distill'] = loss_distill
+    #     #     else:
+    #     #         # No valid superpoints - skip distillation loss
+    #     #         if hasattr(self, 'debug_training') and self.debug_training:
+    #     #             print("Training: No valid superpoints found, skipping distillation loss")
+        
+    #     # SIMPLIFIED DISTILLATION LOSS (optional, without superpoints)
+    #     if self.training and self.use_simple_distillation:
+    #         F_3d = feat_dict['F_3d']  # [B, Np, D]
+    #         F_2d_raw = feat_dict['F_2d_raw']  # [B, Np, D]
+            
+    #         # Simple MSE loss between 3D and 2D features
+    #         distill_loss = F.mse_loss(F_3d, F_2d_raw.detach())
+    #         losses['loss_distill'] = distill_loss
+        
+    #     # Continue with standard loss computation (works for both training and inference)
+    #     head_inputs = self._forward_pid_fusion(feat_dict, text_dict)
+        
+    #     # QA Head processing
+    #     if isinstance(head_inputs, dict) and 'qa_head' in head_inputs and 'other_heads' in head_inputs:
+    #         qa_inputs_dict = head_inputs['qa_head']
+    #         other_inputs_dict = head_inputs['other_heads']
+            
+    #         qa_losses = self.qa_head.loss(**qa_inputs_dict,
+    #                                     ret_fusion_feat=True,
+    #                                     batch_data_samples=batch_data_samples)
+    #         losses.update(qa_losses)
+            
+    #         if self.with_target_bbox_head:
+    #             P_xyz = feat_dict['P_xyz']
+    #             ref_loc_losses = self.target_bbox_head.loss(**other_inputs_dict,
+    #                                                     points=points, 
+    #                                                     aggregated_points=P_xyz,
+    #                                                     batch_data_samples=batch_data_samples)
+    #             losses.update(ref_loc_losses)
+    #     else:
+    #         qa_losses = self.qa_head.loss(**head_inputs,
+    #                                     ret_fusion_feat=True,
+    #                                     batch_data_samples=batch_data_samples)
+    #         losses.update(qa_losses)
+            
+    #         if self.with_target_bbox_head:
+    #             P_xyz = feat_dict['P_xyz']
+    #             ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
+    #                                                     points=points, 
+    #                                                     aggregated_points=P_xyz,
+    #                                                     batch_data_samples=batch_data_samples)
+    #             losses.update(ref_loc_losses)
+        
+
+    #     fusion_feat = qa_losses['fusion_feat']
+
+    #     # Handle batch size 1 duplication issue
+    #     if 'duplicate_batch' in head_inputs.get('qa_head', {}) and head_inputs['qa_head']['duplicate_batch']:
+    #         fusion_feat = fusion_feat[:batch_size]
+
+    #     if self.with_target_cls_head:
+    #         if batch_size == 1 and self.training:
+    #             duplicated_fusion_feat = torch.cat([fusion_feat, fusion_feat], dim=0)
+    #             duplicated_samples = batch_data_samples + batch_data_samples
+    #             ref_cls_loss = self.target_cls_head.loss(duplicated_fusion_feat, 
+    #                                                 batch_data_samples=duplicated_samples)
+    #         else:
+    #             ref_cls_loss = self.target_cls_head.loss(fusion_feat, 
+    #                                                 batch_data_samples=batch_data_samples)
+    #         losses.update(ref_cls_loss)
+            
+    #     if self.with_situation_predict_head:
+    #         situation_predict_loss = self.situation_predict_head.loss(fusion_feat, 
+    #                                                                 batch_data_samples=batch_data_samples)
+    #         losses.update(situation_predict_loss)  
+        
+    #     # Keep uncertainty weighting if desired
+    #     # if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
+    #     #     losses = self.uncertainty_weighting(losses)
+                
+    #     losses = self.loss_collect(losses)
+    #     return losses
+    
     def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        """Updated loss method with training-only superpoint distillation."""
+        """Simplified loss computation."""
         
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
-            
+        
         points = batch_inputs_dict['points']
         batch_size = len(points)
         losses = {}
-        
-        # # GEOMETRY-GUIDED DISTILLATION LOSS (training-only)
-        # if (self.training and self.use_distillation_loss and 
-        #     self.distillation_loss_calculator is not None):
-            
-        #     superpoint_ids_batched = feat_dict.get('superpoint_ids_batched')
-            
-        #     # Only compute if superpoints are available (training mode)
-        #     if (superpoint_ids_batched is not None and 
-        #         not torch.all(superpoint_ids_batched == -1)):
-                
-        #         F_3d_batched = feat_dict.get('F_3d')
-        #         F_2d_raw_batched = feat_dict.get('F_2d_raw')
-                
-        #         # Handle multi-view features
-        #         if len(F_2d_raw_batched.shape) == 4:
-        #             B, M, Np, D_fus = F_2d_raw_batched.shape
-        #             F_2d_raw_batched = F_2d_raw_batched.mean(dim=1)
-                    
-        #         assert F_3d_batched.shape == F_2d_raw_batched.shape
-                
-        #         B, Np, D_fus = F_3d_batched.shape
-        #         F_3d_flat = F_3d_batched.reshape(-1, D_fus)
-        #         F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
-        #         superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
-        #         batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1)
-                
-        #         loss_distill = self.distillation_loss_calculator(
-        #             F3D=F_3d_flat,
-        #             Fraw2D=F_2d_raw_flat,
-        #             superpoint_ids=superpoint_ids_flat,
-        #             batch_idx=batch_idx_flat
-        #         )
-        #         losses['loss_distill'] = loss_distill
-        #     else:
-        #         # No valid superpoints - skip distillation loss
-        #         if hasattr(self, 'debug_training') and self.debug_training:
-        #             print("Training: No valid superpoints found, skipping distillation loss")
         
         # SIMPLIFIED DISTILLATION LOSS (optional, without superpoints)
         if self.training and self.use_simple_distillation:
@@ -1051,67 +1232,48 @@ class MultiViewVLMBase3DQA(BaseModel):
             distill_loss = F.mse_loss(F_3d, F_2d_raw.detach())
             losses['loss_distill'] = distill_loss
         
-        # Continue with standard loss computation (works for both training and inference)
-        head_inputs = self._forward_pid_fusion(feat_dict, text_dict)
+        # Use simplified fusion features for heads
+        head_inputs = self._forward_simplified_fusion(feat_dict, text_dict)
         
-        # QA Head processing
-        if isinstance(head_inputs, dict) and 'qa_head' in head_inputs and 'other_heads' in head_inputs:
-            qa_inputs_dict = head_inputs['qa_head']
-            other_inputs_dict = head_inputs['other_heads']
-            
-            qa_losses = self.qa_head.loss(**qa_inputs_dict,
-                                        ret_fusion_feat=True,
-                                        batch_data_samples=batch_data_samples)
-            losses.update(qa_losses)
-            
-            if self.with_target_bbox_head:
-                P_xyz = feat_dict['P_xyz']
-                ref_loc_losses = self.target_bbox_head.loss(**other_inputs_dict,
-                                                        points=points, 
-                                                        aggregated_points=P_xyz,
-                                                        batch_data_samples=batch_data_samples)
-                losses.update(ref_loc_losses)
-        else:
-            qa_losses = self.qa_head.loss(**head_inputs,
-                                        ret_fusion_feat=True,
-                                        batch_data_samples=batch_data_samples)
-            losses.update(qa_losses)
-            
-            if self.with_target_bbox_head:
-                P_xyz = feat_dict['P_xyz']
-                ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
-                                                        points=points, 
-                                                        aggregated_points=P_xyz,
-                                                        batch_data_samples=batch_data_samples)
-                losses.update(ref_loc_losses)
+        # QA Head
+        qa_losses = self.qa_head.loss(**head_inputs,
+                                    ret_fusion_feat=True,
+                                    batch_data_samples=batch_data_samples)
+        losses.update(qa_losses)
         
-
+        # Other heads (bbox, cls, etc.) - keep existing logic
+        if self.with_target_bbox_head:
+            P_xyz = feat_dict['P_xyz']
+            ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
+                                                    points=points,
+                                                    aggregated_points=P_xyz,
+                                                    batch_data_samples=batch_data_samples)
+            losses.update(ref_loc_losses)
+        
+        # Continue with other heads...
         fusion_feat = qa_losses['fusion_feat']
-
-        # Handle batch size 1 duplication issue
-        if 'duplicate_batch' in head_inputs.get('qa_head', {}) and head_inputs['qa_head']['duplicate_batch']:
-            fusion_feat = fusion_feat[:batch_size]
-
+        
         if self.with_target_cls_head:
+            # Handle batch size 1 for BatchNorm
             if batch_size == 1 and self.training:
                 duplicated_fusion_feat = torch.cat([fusion_feat, fusion_feat], dim=0)
                 duplicated_samples = batch_data_samples + batch_data_samples
-                ref_cls_loss = self.target_cls_head.loss(duplicated_fusion_feat, 
+                ref_cls_loss = self.target_cls_head.loss(duplicated_fusion_feat,
                                                     batch_data_samples=duplicated_samples)
             else:
-                ref_cls_loss = self.target_cls_head.loss(fusion_feat, 
+                ref_cls_loss = self.target_cls_head.loss(fusion_feat,
                                                     batch_data_samples=batch_data_samples)
             losses.update(ref_cls_loss)
-            
+        
         if self.with_situation_predict_head:
-            situation_predict_loss = self.situation_predict_head.loss(fusion_feat, 
+            situation_predict_loss = self.situation_predict_head.loss(fusion_feat,
                                                                     batch_data_samples=batch_data_samples)
-            losses.update(situation_predict_loss)  
+            losses.update(situation_predict_loss)
         
         # Keep uncertainty weighting if desired
-        # if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
-        #     losses = self.uncertainty_weighting(losses)
-                
+        if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
+            losses = self.uncertainty_weighting(losses)
+        
         losses = self.loss_collect(losses)
         return losses
         

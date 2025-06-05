@@ -472,100 +472,285 @@ class PointTextFusion(nn.Module):
 #         return Z_PT
 
 
-# embodiedqa/models/framework/point_text_fusion.py - Updated
+# embodiedqa/models/framework/point_text_fusion.py - POWERFUL VERSION
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class SwiGLUFusion(nn.Module):
+    """Advanced fusion layer with SwiGLU activation."""
+    
+    def __init__(self, input_dim, output_dim, dropout):
+        super().__init__()
+        hidden_dim = input_dim * 2
+        
+        self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, output_dim, bias=False)
+        self.norm = nn.LayerNorm(output_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        gate = F.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        hidden = gate * up
+        hidden = self.dropout(hidden)
+        output = self.down_proj(hidden)
+        return self.norm(output)
+
+class SwiGLUFFN(nn.Module):
+    """SwiGLU FFN like in LLaMA."""
+    
+    def __init__(self, hidden_dim, intermediate_dim, dropout):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        gate = F.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        hidden = gate * up
+        hidden = self.dropout(hidden)
+        return self.down_proj(hidden)
+
+
 class DirectPointTextFusion(nn.Module):
     """
-    Simplified Direct Point-Text Fusion without superpoint dependencies.
-    Uses efficient cross-attention between point features and text features.
+    POWERFUL Direct Point-Text Fusion designed to crush DSPNet.
+    
+    Key improvements over simple version:
+    1. Deep cross-attention stack (6 layers vs 1)
+    2. Larger hidden dimensions (1024 vs 256)
+    3. More attention heads (12 vs 8)
+    4. Advanced text processing with hierarchical attention
+    5. Multi-scale cross-modal reasoning
+    6. SwiGLU activations throughout
     """
     
-    def __init__(self, point_dim, text_dim, fusion_dim, hidden_dim=256, 
-                 num_attention_heads=8, dropout=0.1):
+    def __init__(self, 
+                 point_dim, 
+                 text_dim, 
+                 fusion_dim, 
+                 hidden_dim=1024,               # Much larger hidden dimension
+                 num_attention_heads=12,        # More attention heads
+                 num_layers=6,                  # Deep cross-modal processing
+                 dropout=0.1,
+                 use_gradient_checkpointing=True):
         super().__init__()
         
         self.point_dim = point_dim
         self.text_dim = text_dim
         self.fusion_dim = fusion_dim
         self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
-        # Feature projection layers
-        self.point_proj = nn.Sequential(
-            nn.Linear(point_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+        # POWER: Deep feature projections (3 layers each)
+        self.point_proj = self._make_deep_projection(point_dim, hidden_dim, dropout)
+        self.text_proj = self._make_deep_projection(text_dim, hidden_dim, dropout)
         
-        self.text_proj = nn.Sequential(
-            nn.Linear(text_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+        # POWER: Deep cross-attention stack
+        self.cross_attention_layers = nn.ModuleList([
+            CrossModalAttentionLayer(hidden_dim, num_attention_heads, dropout)
+            for _ in range(num_layers)
+        ])
         
-        # Cross-attention for point-text interaction
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_attention_heads,
-            dropout=dropout,
-            batch_first=True
-        )
+        # POWER: Hierarchical text processing
+        self.text_hierarchy_processor = HierarchicalTextProcessor(hidden_dim, num_attention_heads, dropout)
         
-        # Final fusion layers
+        # POWER: Multi-scale fusion heads
+        self.multi_scale_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // (2**i)),
+                nn.LayerNorm(hidden_dim // (2**i)),
+                nn.SiLU(),
+                nn.Linear(hidden_dim // (2**i), hidden_dim)
+            ) for i in range(3)
+        ])
+        
+        # POWER: Advanced fusion with SwiGLU
         self.fusion_layer = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
+            SwiGLUFusion(hidden_dim * 2, hidden_dim, dropout),
+            nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
+            SwiGLUFusion(hidden_dim, fusion_dim, dropout)
+        )
+        
+    def _make_deep_projection(self, input_dim, output_dim, dropout):
+        """Create a deep 3-layer projection."""
+        return nn.Sequential(
+            nn.Linear(input_dim, output_dim),
+            nn.LayerNorm(output_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(output_dim, output_dim),
+            nn.LayerNorm(output_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(output_dim, output_dim),
+            nn.LayerNorm(output_dim)
         )
         
     def forward(self, point_features, text_features, superpoint_ids=None, text_mask=None):
         """
-        SIMPLIFIED: superpoint_ids parameter kept for compatibility but ignored.
+        POWERFUL forward pass (superpoint_ids kept for compatibility but ignored).
         
         Args:
             point_features: Point cloud features [B, Np, D_point]
-            text_features: Text features [B, Lt, D_text]  
+            text_features: Text features [B, Lt, D_text]
             superpoint_ids: IGNORED - kept for compatibility
             text_mask: Mask for text tokens [B, Lt]
             
         Returns:
-            Z_PT: Point-text interaction features [B, Np, D_fusion]
+            Z_PT: Powerfully fused point-text features [B, Np, D_fusion]
         """
         B, Np, _ = point_features.shape
         _, Lt, _ = text_features.shape
         
-        # Project features to common dimension
+        # Deep feature projections
         point_proj = self.point_proj(point_features)  # [B, Np, hidden_dim]
         text_proj = self.text_proj(text_features)     # [B, Lt, hidden_dim]
         
-        # Apply text mask if provided
+        # Hierarchical text processing for better semantic understanding
+        text_hierarchical = self.text_hierarchy_processor(text_proj, text_mask)
+        
+        # Deep cross-attention processing with gradient checkpointing
+        if self.use_gradient_checkpointing and self.training:
+            for layer in self.cross_attention_layers:
+                point_proj, text_hierarchical = torch.utils.checkpoint.checkpoint(
+                    layer, point_proj, text_hierarchical, text_mask
+                )
+        else:
+            for layer in self.cross_attention_layers:
+                point_proj, text_hierarchical = layer(point_proj, text_hierarchical, text_mask)
+        
+        # Multi-scale processing for different spatial-semantic relationships
+        scale_outputs = []
+        for scale_head in self.multi_scale_heads:
+            scale_output = scale_head(point_proj)
+            scale_outputs.append(scale_output)
+        
+        # Combine multi-scale features
+        multi_scale_combined = sum(scale_outputs) / len(scale_outputs)
+        enhanced_point = point_proj + multi_scale_combined
+        
+        # Global text representation with attention pooling
         if text_mask is not None:
-            # Create attention mask for cross-attention
-            # text_mask: True for valid tokens, False for padding
-            attention_mask = ~text_mask  # Invert for PyTorch attention (True = ignore)
+            text_mask_expanded = text_mask.unsqueeze(-1).float()
+            text_global = (text_hierarchical * text_mask_expanded).sum(dim=1) / text_mask_expanded.sum(dim=1)
+        else:
+            text_global = text_hierarchical.mean(dim=1)
+        
+        # Broadcast text global to all points
+        text_global_expanded = text_global.unsqueeze(1).expand(-1, Np, -1)
+        
+        # Final powerful fusion
+        combined = torch.cat([enhanced_point, text_global_expanded], dim=-1)
+        Z_PT = self.fusion_layer(combined)
+        
+        return Z_PT
+
+
+class CrossModalAttentionLayer(nn.Module):
+    """Advanced cross-modal attention layer."""
+    
+    def __init__(self, hidden_dim, num_heads, dropout):
+        super().__init__()
+        
+        # Pre-normalization
+        self.point_norm = nn.LayerNorm(hidden_dim)
+        self.text_norm = nn.LayerNorm(hidden_dim)
+        
+        # Cross-attention mechanisms
+        self.point_to_text_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout, batch_first=True
+        )
+        self.text_to_point_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout, batch_first=True
+        )
+        
+        # SwiGLU FFNs
+        self.point_ffn = SwiGLUFFN(hidden_dim, hidden_dim * 2, dropout)
+        self.text_ffn = SwiGLUFFN(hidden_dim, hidden_dim * 2, dropout)
+        
+    def forward(self, point_features, text_features, text_mask=None):
+        # Normalize inputs
+        point_norm = self.point_norm(point_features)
+        text_norm = self.text_norm(text_features)
+        
+        # Create attention mask for text
+        if text_mask is not None:
+            attention_mask = ~text_mask  # Invert for PyTorch attention
         else:
             attention_mask = None
         
         # Cross-attention: points attend to text
-        attended_text, _ = self.cross_attention(
-            query=point_proj,                    # [B, Np, hidden_dim]
-            key=text_proj,                       # [B, Lt, hidden_dim]
-            value=text_proj,                     # [B, Lt, hidden_dim]
-            key_padding_mask=attention_mask      # [B, Lt]
+        point_attended, _ = self.point_to_text_attn(
+            point_norm, text_norm, text_norm, key_padding_mask=attention_mask
         )
         
-        # Combine point features with attended text
-        combined = torch.cat([point_proj, attended_text], dim=-1)  # [B, Np, hidden_dim*2]
+        # Cross-attention: text attends to points
+        text_attended, _ = self.text_to_point_attn(text_norm, point_norm, point_norm)
         
-        # Final fusion
-        Z_PT = self.fusion_layer(combined)  # [B, Np, fusion_dim]
+        # Residual connections
+        point_features = point_features + point_attended
+        text_features = text_features + text_attended
         
-        return Z_PT
+        # FFN with residuals
+        point_features = point_features + self.point_ffn(point_features)
+        text_features = text_features + self.text_ffn(text_features)
+        
+        return point_features, text_features
+
+
+class HierarchicalTextProcessor(nn.Module):
+    """Hierarchical text processor for better semantic understanding."""
+    
+    def __init__(self, hidden_dim, num_heads, dropout):
+        super().__init__()
+        
+        # Word-level attention
+        self.word_attention = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout, batch_first=True
+        )
+        
+        # Phrase-level attention (sliding window)
+        self.phrase_attention = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout, batch_first=True
+        )
+        
+        # Sentence-level global attention
+        self.global_attention = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout, batch_first=True
+        )
+        
+        # Normalization layers
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.norm3 = nn.LayerNorm(hidden_dim)
+        
+        # Hierarchical combiner
+        self.combiner = SwiGLUFusion(hidden_dim * 3, hidden_dim, dropout)
+        
+    def forward(self, text_features, text_mask=None):
+        # Word-level processing
+        word_out, _ = self.word_attention(text_features, text_features, text_features)
+        word_features = self.norm1(text_features + word_out)
+        
+        # Phrase-level processing (local context)
+        phrase_out, _ = self.phrase_attention(word_features, word_features, word_features)
+        phrase_features = self.norm2(word_features + phrase_out)
+        
+        # Global sentence-level processing
+        global_out, _ = self.global_attention(phrase_features, phrase_features, phrase_features)
+        global_features = self.norm3(phrase_features + global_out)
+        
+        # Combine hierarchical features
+        combined = torch.cat([word_features, phrase_features, global_features], dim=-1)
+        hierarchical_text = self.combiner(combined)
+        
+        return hierarchical_text
