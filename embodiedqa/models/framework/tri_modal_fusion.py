@@ -21,16 +21,14 @@ class TrimodalFusion(nn.Module):
         # Compute hidden dimension based on ratio
         hidden_dim = fusion_dim // bottleneck_ratio
         
-        # print(f"TrimodalFusion initialized with fusion_dim={fusion_dim}, hidden_dim={hidden_dim}")
-        
         # Feature transformation layers with internal residual structure
         self.tv_transform = self._make_residual_block(fusion_dim, hidden_dim)
         self.pv_transform = self._make_residual_block(fusion_dim, hidden_dim)
         self.pt_transform = self._make_residual_block(fusion_dim, hidden_dim)
         
-        # Dynamic weighting network
+        # FIXED: Dynamic weighting network - use fusion_dim instead of hidden_dim for context
         self.weight_network = nn.Sequential(
-            nn.Linear(hidden_dim*3, hidden_dim),
+            nn.Linear(fusion_dim*3, hidden_dim),  # FIXED: Use fusion_dim*3 since ResidualBlock outputs fusion_dim
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 3),
@@ -39,7 +37,7 @@ class TrimodalFusion(nn.Module):
         
         # Output projection
         self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim, fusion_dim),
+            nn.Linear(fusion_dim, fusion_dim),  # FIXED: Use fusion_dim since ResidualBlock outputs fusion_dim
             nn.LayerNorm(fusion_dim)
         )
         
@@ -51,17 +49,10 @@ class TrimodalFusion(nn.Module):
         return ResidualBlock(in_dim, hidden_dim)
         
     def forward(self, Z_TV, Z_PV, Z_PT):
-        # print(f"Z_TV shape: {Z_TV.shape}")
-        # print(f"Z_PV shape: {Z_PV.shape}")
-        # print(f"Z_PT shape: {Z_PT.shape}")
         # Transform features with internal residual connections
         TV = self.tv_transform(Z_TV)
         PV = self.pv_transform(Z_PV)
         PT = self.pt_transform(Z_PT)
-        
-        # print(f"TV shape: {TV.shape}")
-        # print(f"PV shape: {PV.shape}")
-        # print(f"PT shape: {PT.shape}")
         
         # Compute dynamic fusion weights
         context = torch.cat([
@@ -69,8 +60,6 @@ class TrimodalFusion(nn.Module):
             PV.mean(dim=1),
             PT.mean(dim=1)
         ], dim=-1)
-        # print(f"context shape: {context.shape}")
-        # print(f"weight_network[0].weight shape: {self.weight_network[0].weight.shape}")
         
         weights = self.weight_network(context)
         w_tv, w_pv, w_pt = weights[:, 0:1, None], weights[:, 1:2, None], weights[:, 2:3, None]
@@ -82,11 +71,7 @@ class TrimodalFusion(nn.Module):
         Z_projected = self.output_proj(Z_fused)
         
         if self.use_final_residual:
-            # Choose one modality as base for residual or average them
-            # Option 1: Use Z_TV as base
-            # Z_TPV = Z_TV + Z_projected
-            
-            # Option 2: Use weighted average of inputs as base
+            # Use weighted average of inputs as base
             Z_base = w_tv * Z_TV + w_pv * Z_PV + w_pt * Z_PT
             Z_TPV = Z_base + Z_projected
         else:
