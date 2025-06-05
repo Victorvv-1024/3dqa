@@ -249,14 +249,28 @@ class MultiViewVLMBase3DQA(BaseModel):
                 nn.LayerNorm(D_fus)
             )
         
-        # distillation_loss_cfg
-        self.use_distillation_loss = distillation_loss_cfg is not None # Check if config exists
+        # DISTILLATION LOSS CONFIGURATION (Updated)
+        self.use_distillation_loss = distillation_loss_cfg is not None
         if self.use_distillation_loss:
-            # Note: The 'weight' inside distillation_loss_cfg is used internally by the loss module forward pass
-            self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
-            # print(f"Geometry-Guided Distillation Loss enabled with internal weight: {self.distillation_loss_calculator.loss_weight}")
+            # Check if it's the old simplified format or new format with type
+            if 'type' in distillation_loss_cfg:
+                # New format: use MODELS.build()
+                self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
+                print(f"Distillation loss enabled: {distillation_loss_cfg['type']}")
+            else:
+                # Old simplified format: handle manually (backward compatibility)
+                loss_type = distillation_loss_cfg.get('loss_type', 'mse')
+                loss_weight = distillation_loss_cfg.get('loss_weight', 0.2)
+                
+                if loss_type == 'mse':
+                    self.distillation_loss_calculator = nn.MSELoss()
+                    self.distillation_loss_weight = loss_weight
+                    print(f"Simple MSE distillation loss enabled with weight {loss_weight}")
+                else:
+                    raise ValueError(f"Unsupported loss_type: {loss_type}")
         else:
             self.distillation_loss_calculator = None
+            print("Distillation loss disabled")
         
         # REMOVE
         # pre-computed superpoints
@@ -1214,7 +1228,7 @@ class MultiViewVLMBase3DQA(BaseModel):
     #     return losses
     
     def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        """Simplified loss computation."""
+        """Updated loss computation with proper distillation loss handling."""
         
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
@@ -1223,16 +1237,52 @@ class MultiViewVLMBase3DQA(BaseModel):
         batch_size = len(points)
         losses = {}
         
-        # SIMPLIFIED DISTILLATION LOSS (optional, without superpoints)
-        if self.training and self.use_simple_distillation:
-            F_3d = feat_dict['F_3d']  # [B, Np, D]
+        # DISTILLATION LOSS (now properly handled)
+        if self.training and self.use_distillation_loss and self.distillation_loss_calculator is not None:
+            F_3d = feat_dict['F_3d']      # [B, Np, D]
             F_2d_raw = feat_dict['F_2d_raw']  # [B, Np, D]
             
-            # Simple MSE loss between 3D and 2D features
-            distill_loss = F.mse_loss(F_3d, F_2d_raw.detach())
-            losses['loss_distill'] = distill_loss
+            # Check if we have a valid_mask (optional)
+            valid_mask = feat_dict.get('F_2d_valid_mask', None)  # [B, Np]
+            
+            # Call the distillation loss with proper arguments
+            if hasattr(self.distillation_loss_calculator, 'forward'):
+                # For SimpleDistillationLoss or AdaptiveDistillationLoss
+                if valid_mask is not None:
+                    loss_distill = self.distillation_loss_calculator(
+                        features_3d=F_3d,
+                        features_2d=F_2d_raw,
+                        valid_mask=valid_mask
+                    )
+                else:
+                    loss_distill = self.distillation_loss_calculator(
+                        features_3d=F_3d,
+                        features_2d=F_2d_raw
+                    )
+            else:
+                # For GeometryGuidedDistillationLoss (if using)
+                # This requires superpoint processing
+                superpoint_ids_batched = feat_dict.get('superpoint_ids_batched')
+                if superpoint_ids_batched is not None:
+                    B, Np, D_fus = F_3d.shape
+                    F_3d_flat = F_3d.reshape(-1, D_fus)
+                    F_2d_raw_flat = F_2d_raw.reshape(-1, D_fus)
+                    superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
+                    batch_idx_flat = torch.arange(B, device=F_3d.device).unsqueeze(1).expand(-1, Np).reshape(-1)
+                    
+                    loss_distill = self.distillation_loss_calculator(
+                        F3D=F_3d_flat,
+                        Fraw2D=F_2d_raw_flat,
+                        superpoint_ids=superpoint_ids_flat,
+                        batch_idx=batch_idx_flat
+                    )
+                else:
+                    # Skip if no superpoints available
+                    loss_distill = torch.tensor(0.0, device=F_3d.device)
+            
+            losses['loss_distill'] = loss_distill
         
-        # Use simplified fusion features for heads
+        # Continue with standard loss computation
         head_inputs = self._forward_simplified_fusion(feat_dict, text_dict)
         
         # QA Head
@@ -1241,7 +1291,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                                     batch_data_samples=batch_data_samples)
         losses.update(qa_losses)
         
-        # Other heads (bbox, cls, etc.) - keep existing logic
+        # Other heads (bbox, cls, etc.)
         if self.with_target_bbox_head:
             P_xyz = feat_dict['P_xyz']
             ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
@@ -1254,7 +1304,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         fusion_feat = qa_losses['fusion_feat']
         
         if self.with_target_cls_head:
-            # Handle batch size 1 for BatchNorm
             if batch_size == 1 and self.training:
                 duplicated_fusion_feat = torch.cat([fusion_feat, fusion_feat], dim=0)
                 duplicated_samples = batch_data_samples + batch_data_samples
@@ -1270,7 +1319,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                                                                     batch_data_samples=batch_data_samples)
             losses.update(situation_predict_loss)
         
-        # Keep uncertainty weighting if desired
+        # Apply uncertainty weighting if available
         if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
             losses = self.uncertainty_weighting(losses)
         

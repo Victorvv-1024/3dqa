@@ -148,9 +148,11 @@ model = dict(
     # ),
     # SIMPLIFIED: Optional simple distillation loss (without superpoints)
     distillation_loss_cfg=dict(
-        enabled=True,  # Set to True if you want simple 2D-3D distillation
+        type='SimpleDistillationLoss',  # CRITICAL: Add the type key
+        loss_type='cosine',  # or 'l1', 'smooth_l1', 'cosine'
         loss_weight=0.2,
-        loss_type='mse'  # Simple MSE between 2D and 3D features
+        reduction='mean',
+        temperature=1.0  # Only used for cosine loss
     ),
     
     
