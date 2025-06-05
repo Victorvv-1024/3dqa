@@ -49,94 +49,94 @@ class Answer(object):
     def __len__(self):
         return len(self.vocab)
 
-
-def compute_superpoints_for_scene(args):
-    """
-    Compute superpoints for a single scene (used in multiprocessing).
+# REMOVE
+# def compute_superpoints_for_scene(args):
+#     """
+#     Compute superpoints for a single scene (used in multiprocessing).
     
-    Args:
-        args: Tuple containing (scene_id, points_file_path, superpoint_config, cache_dir)
+#     Args:
+#         args: Tuple containing (scene_id, points_file_path, superpoint_config, cache_dir)
     
-    Returns:
-        Tuple of (scene_id, success_flag, superpoint_ids, error_message)
-    """
-    scene_id, points_file_path, superpoint_config, cache_dir = args
+#     Returns:
+#         Tuple of (scene_id, success_flag, superpoint_ids, error_message)
+#     """
+#     scene_id, points_file_path, superpoint_config, cache_dir = args
     
-    try:
-        # Load point cloud data
-        if not os.path.exists(points_file_path):
-            return scene_id, False, None, f"Points file not found: {points_file_path}"
+#     try:
+#         # Load point cloud data
+#         if not os.path.exists(points_file_path):
+#             return scene_id, False, None, f"Points file not found: {points_file_path}"
         
-        points_data = np.load(points_file_path)  # Shape: [N, 6] (x,y,z,r,g,b)
+#         points_data = np.load(points_file_path)  # Shape: [N, 6] (x,y,z,r,g,b)
         
-        if points_data.shape[0] == 0:
-            return scene_id, False, None, "Empty point cloud"
+#         if points_data.shape[0] == 0:
+#             return scene_id, False, None, "Empty point cloud"
         
-        # Extract coordinates and colors
-        points_xyz = torch.from_numpy(points_data[:, :3]).float()
-        points_colors = None
+#         # Extract coordinates and colors
+#         points_xyz = torch.from_numpy(points_data[:, :3]).float()
+#         points_colors = None
         
-        if points_data.shape[1] >= 6:
-            points_colors = torch.from_numpy(points_data[:, 3:6]).float()
-            if points_colors.max() > 1.0:
-                points_colors = points_colors / 255.0
-        else:
-            points_colors = torch.rand(points_xyz.shape[0], 3)
+#         if points_data.shape[1] >= 6:
+#             points_colors = torch.from_numpy(points_data[:, 3:6]).float()
+#             if points_colors.max() > 1.0:
+#                 points_colors = points_colors / 255.0
+#         else:
+#             points_colors = torch.rand(points_xyz.shape[0], 3)
         
-        # Estimate normals
-        points_normals = estimate_normals(points_xyz)
+#         # Estimate normals
+#         points_normals = estimate_normals(points_xyz)
         
-        # Get superpoint parameters
-        params = superpoint_config.get('params', {})
-        weights = (
-            params.get('wc', 0.2),
-            params.get('ws', 0.7), 
-            params.get('wn', 1.0)
-        )
+#         # Get superpoint parameters
+#         params = superpoint_config.get('params', {})
+#         weights = (
+#             params.get('wc', 0.2),
+#             params.get('ws', 0.7), 
+#             params.get('wn', 1.0)
+#         )
         
-        # Compute superpoints using the method specified in config
-        method = superpoint_config.get('method', 'improved')  # 'original' or 'improved'
+#         # Compute superpoints using the method specified in config
+#         method = superpoint_config.get('method', 'improved')  # 'original' or 'improved'
         
-        if method == 'improved':
-            superpoint_ids = improved_vccs_superpoints(
-                points_xyz=points_xyz,
-                points_colors=points_colors,
-                points_normals=points_normals,
-                voxel_size=params.get('voxel_size', 0.02),
-                seed_spacing=params.get('seed_spacing', 0.75),
-                search_radius=params.get('search_radius', 0.5),
-                k_neighbors=params.get('k_neighbors', 27),
-                weights=weights,
-                device=torch.device('cpu')
-            )
-        else:  # original method
-            superpoint_ids = compute_vccs_superpoints(
-                points_xyz=points_xyz,
-                points_colors=points_colors,
-                points_normals=points_normals,
-                voxel_size=params.get('voxel_size', 0.02),
-                seed_spacing=params.get('seed_spacing', 0.5),
-                weights=weights,
-                neighbor_voxel_search=params.get('neighbor_voxel_search', True),
-                neighbor_radius_search=params.get('neighbor_radius_search', 0.05),
-                max_expand_dist=params.get('max_expand_dist', 1.0),
-                device=torch.device('cpu')
-            )
+#         if method == 'improved':
+#             superpoint_ids = improved_vccs_superpoints(
+#                 points_xyz=points_xyz,
+#                 points_colors=points_colors,
+#                 points_normals=points_normals,
+#                 voxel_size=params.get('voxel_size', 0.02),
+#                 seed_spacing=params.get('seed_spacing', 0.75),
+#                 search_radius=params.get('search_radius', 0.5),
+#                 k_neighbors=params.get('k_neighbors', 27),
+#                 weights=weights,
+#                 device=torch.device('cpu')
+#             )
+#         else:  # original method
+#             superpoint_ids = compute_vccs_superpoints(
+#                 points_xyz=points_xyz,
+#                 points_colors=points_colors,
+#                 points_normals=points_normals,
+#                 voxel_size=params.get('voxel_size', 0.02),
+#                 seed_spacing=params.get('seed_spacing', 0.5),
+#                 weights=weights,
+#                 neighbor_voxel_search=params.get('neighbor_voxel_search', True),
+#                 neighbor_radius_search=params.get('neighbor_radius_search', 0.05),
+#                 max_expand_dist=params.get('max_expand_dist', 1.0),
+#                 device=torch.device('cpu')
+#             )
         
-        # Convert to numpy for storage efficiency
-        superpoint_ids_np = superpoint_ids.cpu().numpy()
+#         # Convert to numpy for storage efficiency
+#         superpoint_ids_np = superpoint_ids.cpu().numpy()
         
-        # Save to cache
-        cache_file = os.path.join(cache_dir, f"{scene_id}_superpoints.npy")
-        np.save(cache_file, superpoint_ids_np)
+#         # Save to cache
+#         cache_file = os.path.join(cache_dir, f"{scene_id}_superpoints.npy")
+#         np.save(cache_file, superpoint_ids_np)
         
         
-        return scene_id, True, superpoint_ids_np, None
+#         return scene_id, True, superpoint_ids_np, None
         
-    except Exception as e:
-        error_msg = f"Error computing superpoints for {scene_id}: {str(e)}"
-        raise ValueError(f"✗ {error_msg}")
-        return scene_id, False, None, error_msg
+#     except Exception as e:
+#         error_msg = f"Error computing superpoints for {scene_id}: {str(e)}"
+#         raise ValueError(f"✗ {error_msg}")
+#         return scene_id, False, None, error_msg
 
 
 @DATASETS.register_module()
@@ -155,12 +155,13 @@ class MultiViewScanQADataset(BaseDataset):
                  test_mode: bool = False,
                  load_eval_anns: bool = True,
                  anno_indices: Optional[Union[int, Sequence[int]]] = None,
+                 # REMOVE
                  # New parameters for pre-computed superpoints
-                 use_precomputed_superpoints: bool = True,
-                 superpoint_config: Optional[dict] = None,
-                 superpoint_cache_dir: Optional[str] = None,
-                 force_recompute_superpoints: bool = False,
-                 max_workers: int = 4,
+                #  use_precomputed_superpoints: bool = True,
+                #  superpoint_config: Optional[dict] = None,
+                #  superpoint_cache_dir: Optional[str] = None,
+                #  force_recompute_superpoints: bool = False,
+                #  max_workers: int = 4,
                  **kwargs) -> None:
         
         self.box_type_3d, self.box_mode_3d = get_box_type(box_type_3d)
@@ -169,19 +170,20 @@ class MultiViewScanQADataset(BaseDataset):
         self.remove_dontcare = remove_dontcare
         self.load_eval_anns = load_eval_anns
         
+        # REMOVE
         # Superpoint-related parameters
-        self.use_precomputed_superpoints = use_precomputed_superpoints
-        self.superpoint_config = superpoint_config or self._get_default_superpoint_config()
-        self.force_recompute_superpoints = force_recompute_superpoints
-        self.max_workers = max_workers
+        # self.use_precomputed_superpoints = use_precomputed_superpoints
+        # self.superpoint_config = superpoint_config or self._get_default_superpoint_config()
+        # self.force_recompute_superpoints = force_recompute_superpoints
+        # self.max_workers = max_workers
         
-        # Set up cache directory
-        if superpoint_cache_dir is None:
-            self.superpoint_cache_dir = osp.join(data_root, 'superpoint_cache')
-        else:
-            self.superpoint_cache_dir = superpoint_cache_dir
+        # # Set up cache directory
+        # if superpoint_cache_dir is None:
+        #     self.superpoint_cache_dir = osp.join(data_root, 'superpoint_cache')
+        # else:
+        #     self.superpoint_cache_dir = superpoint_cache_dir
         
-        os.makedirs(self.superpoint_cache_dir, exist_ok=True)
+        # os.makedirs(self.superpoint_cache_dir, exist_ok=True)
         
         super().__init__(data_root=data_root,
                          ann_file=ann_file,
@@ -194,138 +196,139 @@ class MultiViewScanQADataset(BaseDataset):
         self.qa_file = osp.join(self.data_root, qa_file)
         self.convert_info_to_scan()
         
-        # Pre-compute superpoints if enabled
-        if self.use_precomputed_superpoints:
-            self._setup_precomputed_superpoints()
+        # REMOVE
+        # # Pre-compute superpoints if enabled
+        # if self.use_precomputed_superpoints:
+        #     self._setup_precomputed_superpoints()
         
         self.data_list = self.load_language_data()
         
         if anno_indices is not None:
             self.data_list = self._get_unserialized_subset(anno_indices)
 
-    def _get_default_superpoint_config(self):
-        """Get default superpoint configuration."""
-        return {
-            'method': 'improved',  # 'original' or 'improved'
-            'params': {
-                'voxel_size': 0.02,
-                'seed_spacing': 0.75,
-                'search_radius': 0.5,
-                'k_neighbors': 27,
-                'wc': 0.2,
-                'ws': 0.7,
-                'wn': 1.0,
-                'neighbor_voxel_search': True,
-                'neighbor_radius_search': 0.05,
-                'max_expand_dist': 1.0,
-            }
-        }
+    # def _get_default_superpoint_config(self):
+    #     """Get default superpoint configuration."""
+    #     return {
+    #         'method': 'improved',  # 'original' or 'improved'
+    #         'params': {
+    #             'voxel_size': 0.02,
+    #             'seed_spacing': 0.75,
+    #             'search_radius': 0.5,
+    #             'k_neighbors': 27,
+    #             'wc': 0.2,
+    #             'ws': 0.7,
+    #             'wn': 1.0,
+    #             'neighbor_voxel_search': True,
+    #             'neighbor_radius_search': 0.05,
+    #             'max_expand_dist': 1.0,
+    #         }
+    #     }
 
-    def _get_superpoint_config_hash(self):
-        """Generate a hash for the current superpoint configuration."""
-        config_str = json.dumps(self.superpoint_config, sort_keys=True)
-        return hashlib.md5(config_str.encode()).hexdigest()[:8]
+    # def _get_superpoint_config_hash(self):
+    #     """Generate a hash for the current superpoint configuration."""
+    #     config_str = json.dumps(self.superpoint_config, sort_keys=True)
+    #     return hashlib.md5(config_str.encode()).hexdigest()[:8]
 
-    def _setup_precomputed_superpoints(self):
-        """Set up pre-computed superpoints for all scenes."""
-        # Use the base cache directory without config-specific subdirectories
-        os.makedirs(self.superpoint_cache_dir, exist_ok=True)
+    # def _setup_precomputed_superpoints(self):
+    #     """Set up pre-computed superpoints for all scenes."""
+    #     # Use the base cache directory without config-specific subdirectories
+    #     os.makedirs(self.superpoint_cache_dir, exist_ok=True)
         
-        # Save configuration for reference (in base directory)
-        config_file = osp.join(self.superpoint_cache_dir, "dataset_superpoint_config.json")
-        with open(config_file, 'w') as f:
-            json.dump(self.superpoint_config, f, indent=2)
+        # # Save configuration for reference (in base directory)
+        # config_file = osp.join(self.superpoint_cache_dir, "dataset_superpoint_config.json")
+        # with open(config_file, 'w') as f:
+        #     json.dump(self.superpoint_config, f, indent=2)
         
-        # CRITICAL: Don't load all superpoints during initialization
-        # Just verify the cache directory exists and count available files
-        available_files = []
-        if os.path.exists(self.superpoint_cache_dir):
-            available_files = [f for f in os.listdir(self.superpoint_cache_dir) 
-                            if f.endswith('_superpoints.npy')]
+        # # CRITICAL: Don't load all superpoints during initialization
+        # # Just verify the cache directory exists and count available files
+        # available_files = []
+        # if os.path.exists(self.superpoint_cache_dir):
+        #     available_files = [f for f in os.listdir(self.superpoint_cache_dir) 
+        #                     if f.endswith('_superpoints.npy')]
         
         # Don't pre-load anything - use lazy loading instead!
 
-    def load_precomputed_superpoints(self, scene_id: str) -> Optional[np.ndarray]:
-        """Load pre-computed superpoints for a scene."""
-        if not self.use_precomputed_superpoints:
-            return None
+    # def load_precomputed_superpoints(self, scene_id: str) -> Optional[np.ndarray]:
+    #     """Load pre-computed superpoints for a scene."""
+    #     if not self.use_precomputed_superpoints:
+    #         return None
         
-        # Clean scene_id: remove 'scannet/' prefix if present
-        clean_scene_id = scene_id.replace('scannet/', '') if scene_id.startswith('scannet/') else scene_id
+    #     # Clean scene_id: remove 'scannet/' prefix if present
+    #     clean_scene_id = scene_id.replace('scannet/', '') if scene_id.startswith('scannet/') else scene_id
         
-        cache_file = osp.join(self.superpoint_cache_dir, f"{clean_scene_id}_superpoints.npy")
+    #     cache_file = osp.join(self.superpoint_cache_dir, f"{clean_scene_id}_superpoints.npy")
         
-        if osp.exists(cache_file):
-            try:
-                superpoint_ids = np.load(cache_file)
-                return superpoint_ids
-            except Exception as e:
-                raise ValueError(f"Warning: Failed to load superpoints for {clean_scene_id}: {e}")
-                return None
-        else:
-            return None
+    #     if osp.exists(cache_file):
+    #         try:
+    #             superpoint_ids = np.load(cache_file)
+    #             return superpoint_ids
+    #         except Exception as e:
+    #             raise ValueError(f"Warning: Failed to load superpoints for {clean_scene_id}: {e}")
+    #             return None
+    #     else:
+    #         return None
 
-    def apply_augmentation_to_superpoints(self, 
-                                        superpoint_ids: np.ndarray,
-                                        original_points: np.ndarray,
-                                        augmented_points: np.ndarray,
-                                        transformation_info: dict) -> np.ndarray:
-        """
-        Apply augmentation transformations to superpoint assignments.
+    # def apply_augmentation_to_superpoints(self, 
+    #                                     superpoint_ids: np.ndarray,
+    #                                     original_points: np.ndarray,
+    #                                     augmented_points: np.ndarray,
+    #                                     transformation_info: dict) -> np.ndarray:
+    #     """
+    #     Apply augmentation transformations to superpoint assignments.
         
-        This is crucial for maintaining consistency between augmented point clouds
-        and their superpoint assignments.
+    #     This is crucial for maintaining consistency between augmented point clouds
+    #     and their superpoint assignments.
         
-        Args:
-            superpoint_ids: Original superpoint IDs [N]
-            original_points: Original point coordinates [N, 3]
-            augmented_points: Augmented point coordinates [N_aug, 3] 
-            transformation_info: Information about applied transformations
+    #     Args:
+    #         superpoint_ids: Original superpoint IDs [N]
+    #         original_points: Original point coordinates [N, 3]
+    #         augmented_points: Augmented point coordinates [N_aug, 3] 
+    #         transformation_info: Information about applied transformations
             
-        Returns:
-            Augmented superpoint IDs [N_aug]
-        """
-        # Handle different augmentation scenarios
+    #     Returns:
+    #         Augmented superpoint IDs [N_aug]
+    #     """
+    #     # Handle different augmentation scenarios
         
-        # Case 1: Point sampling/subsampling
-        if 'point_sample_idx' in transformation_info:
-            # Points were subsampled, select corresponding superpoint IDs
-            sample_idx = transformation_info['point_sample_idx']
-            return superpoint_ids[sample_idx]
+    #     # Case 1: Point sampling/subsampling
+    #     if 'point_sample_idx' in transformation_info:
+    #         # Points were subsampled, select corresponding superpoint IDs
+    #         sample_idx = transformation_info['point_sample_idx']
+    #         return superpoint_ids[sample_idx]
         
-        # Case 2: Spatial transformations (rotation, translation, scaling)
-        # For most spatial transformations, superpoint structure should be preserved
-        # since relative spatial relationships are maintained
+    #     # Case 2: Spatial transformations (rotation, translation, scaling)
+    #     # For most spatial transformations, superpoint structure should be preserved
+    #     # since relative spatial relationships are maintained
         
-        if len(augmented_points) == len(original_points):
-            # Same number of points, assume 1:1 correspondence
-            return superpoint_ids.copy()
+    #     if len(augmented_points) == len(original_points):
+    #         # Same number of points, assume 1:1 correspondence
+    #         return superpoint_ids.copy()
         
-        # Case 3: Complex augmentations requiring re-mapping
-        elif len(augmented_points) != len(original_points):
-            # Points were added/removed, need to find nearest neighbors
-            # This is more computationally expensive but maintains accuracy
+    #     # Case 3: Complex augmentations requiring re-mapping
+    #     elif len(augmented_points) != len(original_points):
+    #         # Points were added/removed, need to find nearest neighbors
+    #         # This is more computationally expensive but maintains accuracy
             
-            from scipy.spatial import cKDTree
+    #         from scipy.spatial import cKDTree
             
-            # Build KDTree on original points
-            tree = cKDTree(original_points)
+    #         # Build KDTree on original points
+    #         tree = cKDTree(original_points)
             
-            # Find nearest original point for each augmented point
-            distances, indices = tree.query(augmented_points, k=1)
+    #         # Find nearest original point for each augmented point
+    #         distances, indices = tree.query(augmented_points, k=1)
             
-            # Assign superpoint IDs based on nearest neighbors
-            augmented_superpoint_ids = superpoint_ids[indices]
+    #         # Assign superpoint IDs based on nearest neighbors
+    #         augmented_superpoint_ids = superpoint_ids[indices]
             
-            # Handle points that are too far from any original point
-            max_distance_threshold = transformation_info.get('max_distance_threshold', 0.1)
-            invalid_mask = distances > max_distance_threshold
-            augmented_superpoint_ids[invalid_mask] = -1  # Mark as invalid
+    #         # Handle points that are too far from any original point
+    #         max_distance_threshold = transformation_info.get('max_distance_threshold', 0.1)
+    #         invalid_mask = distances > max_distance_threshold
+    #         augmented_superpoint_ids[invalid_mask] = -1  # Mark as invalid
             
-            return augmented_superpoint_ids
+    #         return augmented_superpoint_ids
         
-        # Default case: return original superpoint IDs
-        return superpoint_ids
+    #     # Default case: return original superpoint IDs
+    #     return superpoint_ids
 
     def process_metainfo(self):
         """This function will be processed after metainfos from ann_file and
@@ -524,11 +527,12 @@ class MultiViewScanQADataset(BaseDataset):
                 language_info['clean_global_points_file_name'] = os.path.join(
                     self.data_root, f'scannet/scannet_data', f'{scene_id}_aligned_vert.npy')
             
-            if self.use_precomputed_superpoints:
-                # Store the scene_id for potential on-demand loading in the pipeline
-                language_info['precomputed_superpoint_scene_id'] = scene_id
-                # Don't store the actual superpoint data here - it will be loaded by transforms
-                language_info['precomputed_superpoint_ids'] = None
+            # REMOVE
+            # if self.use_precomputed_superpoints:
+            #     # Store the scene_id for potential on-demand loading in the pipeline
+            #     language_info['precomputed_superpoint_scene_id'] = scene_id
+            #     # Don't store the actual superpoint data here - it will be loaded by transforms
+            #     language_info['precomputed_superpoint_ids'] = None
             
             ann_info = data['ann_info']
             language_anno_info = dict()
@@ -704,118 +708,113 @@ class MultiViewScanQADataset(BaseDataset):
         # Get the original data sample through normal pipeline
         data_sample = super().__getitem__(idx)
         
-        # The superpoint loading should now be handled by:
-        # 1. SuperpointLoader transform (if included in pipeline)
-        # 2. LoadSuperpointAnnotations transform
-        # These transforms will populate the precomputed_superpoint_ids field
-        
         return data_sample
 
-    def get_superpoint_statistics(self):
-        """Get statistics about pre-computed superpoints."""
-        if not self.use_precomputed_superpoints:
-            print("Pre-computed superpoints are not enabled.")
-            return
+    # def get_superpoint_statistics(self):
+    #     """Get statistics about pre-computed superpoints."""
+    #     if not self.use_precomputed_superpoints:
+    #         print("Pre-computed superpoints are not enabled.")
+    #         return
         
-        stats = {}
-        scene_count = 0
-        total_points = 0
-        total_superpoints = 0
-        superpoint_sizes = []
+    #     stats = {}
+    #     scene_count = 0
+    #     total_points = 0
+    #     total_superpoints = 0
+    #     superpoint_sizes = []
         
-        # NEW CODE:
-        missing_files = []
-        for data_info in self.data_list:
-            if 'precomputed_superpoint_scene_id' in data_info:
-                scene_id = data_info['precomputed_superpoint_scene_id']
-                superpoint_ids = self.load_precomputed_superpoints(scene_id)
+    #     # NEW CODE:
+    #     missing_files = []
+    #     for data_info in self.data_list:
+    #         if 'precomputed_superpoint_scene_id' in data_info:
+    #             scene_id = data_info['precomputed_superpoint_scene_id']
+    #             superpoint_ids = self.load_precomputed_superpoints(scene_id)
                 
-                if superpoint_ids is not None:
-                    scene_count += 1
-                    total_points += len(superpoint_ids)
+    #             if superpoint_ids is not None:
+    #                 scene_count += 1
+    #                 total_points += len(superpoint_ids)
                     
-                    valid_mask = superpoint_ids >= 0
-                    if valid_mask.any():
-                        unique_ids, counts = np.unique(superpoint_ids[valid_mask], return_counts=True)
-                        total_superpoints += len(unique_ids)
-                        superpoint_sizes.extend(counts.tolist())
-                else:
-                    missing_files.append(scene_id)
+    #                 valid_mask = superpoint_ids >= 0
+    #                 if valid_mask.any():
+    #                     unique_ids, counts = np.unique(superpoint_ids[valid_mask], return_counts=True)
+    #                     total_superpoints += len(unique_ids)
+    #                     superpoint_sizes.extend(counts.tolist())
+    #             else:
+    #                 missing_files.append(scene_id)
 
-        # ADD THIS AFTER THE STATS CALCULATION:
-        if missing_files:
-            print(f"Missing superpoint files for {len(missing_files)} scenes:")
-            for scene_id in missing_files[:5]:  # Show first 5
-                print(f"  - {scene_id}")
-            if len(missing_files) > 5:
-                print(f"  ... and {len(missing_files) - 5} more")
+    #     # ADD THIS AFTER THE STATS CALCULATION:
+    #     if missing_files:
+    #         print(f"Missing superpoint files for {len(missing_files)} scenes:")
+    #         for scene_id in missing_files[:5]:  # Show first 5
+    #             print(f"  - {scene_id}")
+    #         if len(missing_files) > 5:
+    #             print(f"  ... and {len(missing_files) - 5} more")
         
-        if superpoint_sizes:
-            superpoint_sizes = np.array(superpoint_sizes)
-            stats = {
-                'scenes_with_superpoints': scene_count,
-                'total_scenes': len(self.data_list),
-                'total_points': total_points,
-                'total_superpoints': total_superpoints,
-                'avg_points_per_scene': total_points / scene_count if scene_count > 0 else 0,
-                'avg_superpoints_per_scene': total_superpoints / scene_count if scene_count > 0 else 0,
-                'avg_superpoint_size': superpoint_sizes.mean(),
-                'min_superpoint_size': superpoint_sizes.min(),
-                'max_superpoint_size': superpoint_sizes.max(),
-                'std_superpoint_size': superpoint_sizes.std(),
-            }
+    #     if superpoint_sizes:
+    #         superpoint_sizes = np.array(superpoint_sizes)
+    #         stats = {
+    #             'scenes_with_superpoints': scene_count,
+    #             'total_scenes': len(self.data_list),
+    #             'total_points': total_points,
+    #             'total_superpoints': total_superpoints,
+    #             'avg_points_per_scene': total_points / scene_count if scene_count > 0 else 0,
+    #             'avg_superpoints_per_scene': total_superpoints / scene_count if scene_count > 0 else 0,
+    #             'avg_superpoint_size': superpoint_sizes.mean(),
+    #             'min_superpoint_size': superpoint_sizes.min(),
+    #             'max_superpoint_size': superpoint_sizes.max(),
+    #             'std_superpoint_size': superpoint_sizes.std(),
+    #         }
         
-        print("Superpoint Statistics:")
-        for key, value in stats.items():
-            print(f"  {key}: {value:.2f}" if isinstance(value, float) else f"  {key}: {value}")
+    #     print("Superpoint Statistics:")
+    #     for key, value in stats.items():
+    #         print(f"  {key}: {value:.2f}" if isinstance(value, float) else f"  {key}: {value}")
         
-        return stats
+    #     return stats
 
-    def benchmark_superpoint_loading(self, num_samples=100):
-        """Benchmark the speed of loading pre-computed superpoints."""
-        if not self.use_precomputed_superpoints:
-            print("Pre-computed superpoints are not enabled.")
-            return
+    # def benchmark_superpoint_loading(self, num_samples=100):
+    #     """Benchmark the speed of loading pre-computed superpoints."""
+    #     if not self.use_precomputed_superpoints:
+    #         print("Pre-computed superpoints are not enabled.")
+    #         return
         
-        import time
-        import random
+    #     import time
+    #     import random
         
-        # Sample random data points
-        valid_indices = []
-        for idx, data_info in enumerate(self.data_list):
-            if 'precomputed_superpoint_scene_id' in data_info:
-                valid_indices.append(idx)
+    #     # Sample random data points
+    #     valid_indices = []
+    #     for idx, data_info in enumerate(self.data_list):
+    #         if 'precomputed_superpoint_scene_id' in data_info:
+    #             valid_indices.append(idx)
                 
-        sample_indices = random.sample(valid_indices, min(num_samples, len(valid_indices)))
-        failed_count = 0
+    #     sample_indices = random.sample(valid_indices, min(num_samples, len(valid_indices)))
+    #     failed_count = 0
         
-        start_time = time.time()
-        loaded_count = 0
+    #     start_time = time.time()
+    #     loaded_count = 0
         
-        for idx in sample_indices:
-            data_info = self.data_list[idx]
-            scene_id = data_info['precomputed_superpoint_scene_id']
+    #     for idx in sample_indices:
+    #         data_info = self.data_list[idx]
+    #         scene_id = data_info['precomputed_superpoint_scene_id']
             
-            superpoint_ids = self.load_precomputed_superpoints(scene_id)
+    #         superpoint_ids = self.load_precomputed_superpoints(scene_id)
             
-            if superpoint_ids is not None:
-                loaded_count += 1
-            else:
-                failed_count += 1
+    #         if superpoint_ids is not None:
+    #             loaded_count += 1
+    #         else:
+    #             failed_count += 1
         
-        elapsed_time = time.time() - start_time
-        avg_time_per_load = elapsed_time / loaded_count if loaded_count > 0 else 0
+    #     elapsed_time = time.time() - start_time
+    #     avg_time_per_load = elapsed_time / loaded_count if loaded_count > 0 else 0
         
-        print(f"Superpoint Loading Benchmark:")
-        print(f"  Failed to load {failed_count} samples ")
-        print(f"  Samples tested: {loaded_count}/{num_samples}")
-        print(f"  Total time: {elapsed_time:.4f}s")
-        print(f"  Average time per superpoint load: {avg_time_per_load:.6f}s")
-        print(f"  Loading rate: {loaded_count/elapsed_time:.2f} samples/second")
+    #     print(f"Superpoint Loading Benchmark:")
+    #     print(f"  Failed to load {failed_count} samples ")
+    #     print(f"  Samples tested: {loaded_count}/{num_samples}")
+    #     print(f"  Total time: {elapsed_time:.4f}s")
+    #     print(f"  Average time per superpoint load: {avg_time_per_load:.6f}s")
+    #     print(f"  Loading rate: {loaded_count/elapsed_time:.2f} samples/second")
         
-        return {
-            'samples_tested': loaded_count,
-            'total_time': elapsed_time,
-            'avg_time_per_load': avg_time_per_load,
-            'loading_rate': loaded_count/elapsed_time if elapsed_time > 0 else 0
-        }
+    #     return {
+    #         'samples_tested': loaded_count,
+    #         'total_time': elapsed_time,
+    #         'avg_time_per_load': avg_time_per_load,
+    #         'loading_rate': loaded_count/elapsed_time if elapsed_time > 0 else 0
+    #     }

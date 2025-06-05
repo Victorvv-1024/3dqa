@@ -110,35 +110,43 @@ model = dict(
                  dropout=0.3,
                  ),
     
-    # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    # +++ MODIFIED: Superpoint Configuration for Pre-computation +++
-    # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    superpoint_cfg=dict(
-        # Use pre-computed superpoints for optimal performance
-        enabled_on_the_fly=False,  # CRITICAL: Set to False to use pre-computed
-        use_colors=use_color,
-        # Parameters kept for reference (used during pre-computation)
-        params=dict(
-            voxel_size=0.02,
-            seed_spacing=0.5,
-            neighbor_voxel_search=True,
-            neighbor_radius_search=0.05,
-            max_expand_dist=1.0,
-            wc=0.2,
-            ws=0.4,
-            wn=1.0,
-        )),
+    # REMOVE
+    # # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    # # +++ MODIFIED: Superpoint Configuration for Pre-computation +++
+    # # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    # superpoint_cfg=dict(
+    #     # Use pre-computed superpoints for optimal performance
+    #     enabled_on_the_fly=False,  # CRITICAL: Set to False to use pre-computed
+    #     use_colors=use_color,
+    #     # Parameters kept for reference (used during pre-computation)
+    #     params=dict(
+    #         voxel_size=0.02,
+    #         seed_spacing=0.5,
+    #         neighbor_voxel_search=True,
+    #         neighbor_radius_search=0.05,
+    #         max_expand_dist=1.0,
+    #         wc=0.2,
+    #         ws=0.4,
+    #         wn=1.0,
+    #     )),
     
-    # Keep existing distillation loss configuration
+    # # Keep existing distillation loss configuration
+    # distillation_loss_cfg=dict(
+    #     type='GeometryGuidedDistillationLoss',
+    #     loss_weight=1.0,
+    #     lambda_p=1.0,
+    #     lambda_sp=1.0,
+    #     loss_type='cosine',
+    #     reduction='mean',
+    #     debug=False,  # CHANGED: Set to False for production (was True)
+    # ),
+    # SIMPLIFIED: Optional simple distillation loss (without superpoints)
     distillation_loss_cfg=dict(
-        type='GeometryGuidedDistillationLoss',
-        loss_weight=1.0,
-        lambda_p=1.0,
-        lambda_sp=1.0,
-        loss_type='cosine',
-        reduction='mean',
-        debug=False,  # CHANGED: Set to False for production (was True)
+        enabled=True,  # Set to True if you want simple 2D-3D distillation
+        loss_weight=0.1,
+        loss_type='mse'  # Simple MSE between 2D and 3D features
     ),
+    
     
     # model training and testing settings
     train_cfg=dict(
@@ -154,14 +162,49 @@ model = dict(
 dataset_type = 'MultiViewScanQADataset'
 data_root = 'data'
 
+# REMOVE
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # +++ MODIFIED: Updated Pipeline with Superpoint Support    +++
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# train_pipeline = [
+#     dict(type='LoadAnnotations3D', with_answer_labels=True, with_target_objects_mask=True),
+#     # ADD THIS LINE:
+#     dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
+#     dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
+#     dict(type='MultiViewPipeline',
+#          n_images=20,
+#          transforms=[
+#              dict(type='LoadImageFromFile', backend_args=backend_args),
+#              dict(type='LoadDepthFromFile', backend_args=backend_args),
+#              dict(type='ConvertRGBDToPoints', coord_type='CAMERA', 
+#                   use_color=~use_clean_global_points&use_color),
+#              dict(type='PointSample', num_points=n_points // 10),
+#              dict(type='Resize', scale=(224, 224), keep_ratio=False)
+#          ]),
+#     dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True,
+#          use_clean_global_points=use_clean_global_points, use_color=use_color),
+#     # MODIFIED: Use superpoint-aware point sampling
+#     dict(type='PointSampleWithSuperpoints', num_points=n_points),
+#     # MODIFIED: Use superpoint-aware transformations
+#     dict(type='GlobalRotScaleTransWithSuperpoints',
+#          rot_range=[-0.087266, 0.087266],
+#          scale_ratio_range=[.9, 1.1],
+#          translation_std=[.1, .1, .1],
+#          shift_height=False),
+#     # NEW: Apply superpoint augmentation consistency
+#     dict(type='SuperpointAugmentation', track_transformations=True),
+#     dict(type='Pack3DDetInputs',
+#          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
+#                'target_objects_mask', 'superpoint_3d', 'views_points'],  # NEW: Include superpoint_3d
+#          meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
+#                     'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
+#                     'context', 'token', 'superpoint_scene_id', 'scene_id'])  # Add scene_id here
+# ]
+
+# SIMPLIFIED: Pipeline without superpoint transforms
 train_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True, with_target_objects_mask=True),
-    # ADD THIS LINE:
-    dict(type='SuperpointLoader', superpoint_cache_dir='data/superpoint_cache'),
-    dict(type='LoadSuperpointAnnotations', with_superpoint_3d=True),
+    # REMOVED: SuperpointLoader and LoadSuperpointAnnotations
     dict(type='MultiViewPipeline',
          n_images=20,
          transforms=[
@@ -174,23 +217,46 @@ train_pipeline = [
          ]),
     dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True,
          use_clean_global_points=use_clean_global_points, use_color=use_color),
-    # MODIFIED: Use superpoint-aware point sampling
-    dict(type='PointSampleWithSuperpoints', num_points=n_points),
-    # MODIFIED: Use superpoint-aware transformations
-    dict(type='GlobalRotScaleTransWithSuperpoints',
+    # SIMPLIFIED: Use standard point sampling (no superpoint awareness needed)
+    dict(type='PointSample', num_points=n_points),
+    # SIMPLIFIED: Use standard transformations
+    dict(type='GlobalRotScaleTrans',
          rot_range=[-0.087266, 0.087266],
          scale_ratio_range=[.9, 1.1],
          translation_std=[.1, .1, .1],
          shift_height=False),
-    # NEW: Apply superpoint augmentation consistency
-    dict(type='SuperpointAugmentation', track_transformations=True),
+    # REMOVED: SuperpointAugmentation
     dict(type='Pack3DDetInputs',
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
-               'target_objects_mask', 'superpoint_3d', 'views_points'],  # NEW: Include superpoint_3d
+               'target_objects_mask', 'views_points'],  # REMOVED: superpoint_3d
          meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
                     'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
-                    'context', 'token', 'superpoint_scene_id', 'scene_id'])  # Add scene_id here
+                    'context', 'token', 'scene_id'])  # REMOVED: superpoint_scene_id
 ]
+# REMOVE
+# test_pipeline = [
+#     dict(type='LoadAnnotations3D', with_answer_labels=True),
+#     dict(type='MultiViewPipeline',
+#          n_images=20,
+#          ordered=True,
+#          transforms=[
+#              dict(type='LoadImageFromFile', backend_args=backend_args),
+#              dict(type='LoadDepthFromFile', backend_args=backend_args),
+#              dict(type='ConvertRGBDToPoints', coord_type='CAMERA',
+#                   use_color=~use_clean_global_points&use_color),
+#              dict(type='PointSample', num_points=n_points // 10),
+#              dict(type='Resize', scale=(224, 224), keep_ratio=False)
+#          ]),
+#     dict(type='AggregateMultiViewPoints', coord_type='DEPTH', save_views_points=True,
+#          use_clean_global_points=use_clean_global_points, use_color=use_color),
+#     # Note: data_preprocessor will handle point sampling for test
+#     dict(type='Pack3DDetInputs',
+#          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
+#                'superpoint_3d', 'views_points'],  # NEW: Include superpoint_3d
+#          meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
+#                     'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
+#                     'context', 'token', 'superpoint_scene_id', 'scene_id'])  # Add scene_id here
+# ]
 
 test_pipeline = [
     dict(type='LoadAnnotations3D', with_answer_labels=True),
@@ -210,18 +276,102 @@ test_pipeline = [
     # Note: data_preprocessor will handle point sampling for test
     dict(type='Pack3DDetInputs',
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
-               'superpoint_3d', 'views_points'],  # NEW: Include superpoint_3d
+               'views_points'],  # REMOVED: superpoint_3d
          meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
                     'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
-                    'context', 'token', 'superpoint_scene_id', 'scene_id'])  # Add scene_id here
+                    'context', 'token', 'scene_id'])  # REMOVED: superpoint_scene_id
 ]
 
+# REMOVE
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 # +++ MODIFIED: Dataset Configuration with Pre-computed     +++
 # +++ Superpoints Support                                   +++
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# train_dataloader = dict(
+#     batch_size=4,  # Keep your original batch size
+#     num_workers=12,
+#     persistent_workers=True,
+#     pin_memory=True,
+#     drop_last=True,
+#     sampler=dict(type='DefaultSampler', shuffle=True),
+#     dataset=dict(type='RepeatDataset',
+#                  times=1,
+#                  dataset=dict(type=dataset_type,
+#                               data_root=data_root,
+#                               ann_file='mv_scannetv2_infos_train.pkl',
+#                               qa_file='qa/ScanQA_v1.0_train.json',
+#                               metainfo=dict(classes=classes),
+#                               pipeline=train_pipeline,
+#                               anno_indices=None,
+#                               test_mode=False,
+#                               filter_empty_gt=True,
+#                               box_type_3d='Depth',
+#                               remove_dontcare=True,
+#                               # NEW: Pre-computed superpoint configuration
+#                               use_precomputed_superpoints=True,
+#                               superpoint_config=dict(
+#                                 method='original',  # Match the method used for pre-computation
+#                                 params=dict(
+#                                     voxel_size=0.02,
+#                                     seed_spacing=0.5,
+#                                     neighbor_voxel_search=True,
+#                                     neighbor_radius_search=0.05,
+#                                     max_expand_dist=1.0,
+#                                     wc=0.2,
+#                                     ws=0.4,
+#                                     wn=1.0,
+#                                 )
+#                               ),
+#                               superpoint_cache_dir=None,  # Will use default: data_root/superpoint_cache
+#                               force_recompute_superpoints=False,
+#                               max_workers=8,
+#                               )))
+
+# val_dataloader = dict(
+#     batch_size=12,
+#     num_workers=12,
+#     persistent_workers=True,
+#     pin_memory=True,
+#     drop_last=False,
+#     sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
+#     dataset=dict(type=dataset_type,
+#                  data_root=data_root,
+#                  ann_file='mv_scannetv2_infos_val.pkl',
+#                  qa_file='qa/ScanQA_v1.0_val.json',
+#                  metainfo=dict(classes=classes),
+#                  pipeline=test_pipeline,  # Uses inference pipeline (no superpoints)
+#                  anno_indices=None,
+#                  test_mode=True,
+#                  filter_empty_gt=True,
+#                  box_type_3d='Depth',
+#                  remove_dontcare=True,
+#                  use_precomputed_superpoints=False,
+#                  ))
+
+# test_dataloader = dict(
+#     batch_size=12,
+#     num_workers=12,
+#     persistent_workers=True,
+#     pin_memory=True,
+#     drop_last=False,
+#     sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
+#     dataset=dict(type=dataset_type,
+#                  data_root=data_root,
+#                  ann_file='mv_scannetv2_infos_val.pkl',
+#                  qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+#                  metainfo=dict(classes=classes),
+#                  pipeline=test_pipeline,  # Uses inference pipeline (no superpoints)
+#                  anno_indices=None,
+#                  test_mode=True,
+#                  filter_empty_gt=False,
+#                  box_type_3d='Depth',
+#                  remove_dontcare=False,
+#                  use_precomputed_superpoints=False,
+#                  ))
+
+# SIMPLIFIED: Dataset configuration without pre-computed superpoints
 train_dataloader = dict(
-    batch_size=4,  # Keep your original batch size
+    batch_size=4,
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -240,24 +390,7 @@ train_dataloader = dict(
                               filter_empty_gt=True,
                               box_type_3d='Depth',
                               remove_dontcare=True,
-                              # NEW: Pre-computed superpoint configuration
-                              use_precomputed_superpoints=True,
-                              superpoint_config=dict(
-                                method='original',  # Match the method used for pre-computation
-                                params=dict(
-                                    voxel_size=0.02,
-                                    seed_spacing=0.5,
-                                    neighbor_voxel_search=True,
-                                    neighbor_radius_search=0.05,
-                                    max_expand_dist=1.0,
-                                    wc=0.2,
-                                    ws=0.4,
-                                    wn=1.0,
-                                )
-                              ),
-                              superpoint_cache_dir=None,  # Will use default: data_root/superpoint_cache
-                              force_recompute_superpoints=False,
-                              max_workers=8,
+                              # REMOVED: All superpoint configuration
                               )))
 
 val_dataloader = dict(
@@ -272,13 +405,12 @@ val_dataloader = dict(
                  ann_file='mv_scannetv2_infos_val.pkl',
                  qa_file='qa/ScanQA_v1.0_val.json',
                  metainfo=dict(classes=classes),
-                 pipeline=test_pipeline,  # Uses inference pipeline (no superpoints)
+                 pipeline=test_pipeline,
                  anno_indices=None,
                  test_mode=True,
                  filter_empty_gt=True,
                  box_type_3d='Depth',
                  remove_dontcare=True,
-                 use_precomputed_superpoints=False,
                  ))
 
 test_dataloader = dict(
@@ -293,13 +425,12 @@ test_dataloader = dict(
                  ann_file='mv_scannetv2_infos_val.pkl',
                  qa_file='qa/ScanQA_v1.0_test_w_obj.json',
                  metainfo=dict(classes=classes),
-                 pipeline=test_pipeline,  # Uses inference pipeline (no superpoints)
+                 pipeline=test_pipeline,
                  anno_indices=None,
                  test_mode=True,
                  filter_empty_gt=False,
                  box_type_3d='Depth',
                  remove_dontcare=False,
-                 use_precomputed_superpoints=False,
                  ))
 
 # Keep all your existing configurations
