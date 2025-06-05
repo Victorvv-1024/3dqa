@@ -40,17 +40,12 @@ model = dict(
                        ),
     text_max_length=512,
 
-    # backbone_fusion=dict(type='CrossModalityEncoder',
-    #                      hidden_size=768, 
-    #                      num_attention_heads=12,
-    #                      num_hidden_layers=4,
-    #                      ),
-    
     backbone_fusion=dict(type='CrossModalityEncoder',
-                         hidden_size=1024,         # INCREASED from 768 to 1024
-                         num_attention_heads=16,   
-                         num_hidden_layers=4,     
+                         hidden_size=768, 
+                         num_attention_heads=12,
+                         num_hidden_layers=4,
                          ),
+
     # point cloud backbone
     backbone_lidar=dict(
         type='PointNet2SASSG',
@@ -97,22 +92,22 @@ model = dict(
                           train_cfg=dict(
                               pos_distance_thr=0.3, neg_distance_thr=0.6),
                           num_classes=1,
-                          in_channels=1024, # INCREASED from 768 to 1024
-                          hidden_channels=1024, # INCREASED from 768 to 1024
+                          in_channels=768, # INCREASED from 768 to 1024
+                          hidden_channels=768, # INCREASED from 768 to 1024
                           dropout=0.3,
                           loss_weight=1.0,
                           ),
     target_cls_head=dict(type='RefClsHead',
                          num_classes=18,
-                         in_channels=1024*2, # INCREASED from 768*2 to 1024*2
-                         hidden_channels=1024, # INCREASED from 768 to 1024
+                         in_channels=768*2, # INCREASED from 768*2 to 1024*2
+                         hidden_channels=768, # INCREASED from 768 to 1024
                          dropout=0.3,
                          loss_weight=1.0,
                          ),
     qa_head=dict(type='QAHead',
                  num_classes=8864,
-                 in_channels=1024, # INCREASED from 768 to 1024
-                 hidden_channels=1024, # INCREASED from 768 to 1024
+                 in_channels=768, # INCREASED from 768 to 1024
+                 hidden_channels=768, # INCREASED from 768 to 1024
                  dropout=0.3,
                  ),
     
@@ -236,7 +231,7 @@ train_pipeline = [
     # REMOVED: SuperpointAugmentation
     dict(type='Pack3DDetInputs',
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
-               'target_objects_mask', 'views_points'],  # REMOVED: superpoint_3d
+               'target_objects_mask', 'views_points'],
          meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
                     'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
                     'context', 'token', 'scene_id'])  # REMOVED: superpoint_scene_id
@@ -284,10 +279,10 @@ test_pipeline = [
     # Note: data_preprocessor will handle point sampling for test
     dict(type='Pack3DDetInputs',
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_answer_labels', 
-               'views_points'],  # REMOVED: superpoint_3d
+               'views_points'],
          meta_keys=['cam2img', 'img_shape', 'lidar2cam', 'depth2img', 'cam2depth', 
                     'ori_shape', 'axis_align_matrix', 'box_type_3d', 'sample_idx',
-                    'context', 'token', 'scene_id'])  # REMOVED: superpoint_scene_id
+                    'context', 'token', 'scene_id'])
 ]
 
 # REMOVE
@@ -398,7 +393,6 @@ train_dataloader = dict(
                               filter_empty_gt=True,
                               box_type_3d='Depth',
                               remove_dontcare=True,
-                              # REMOVED: All superpoint configuration
                               )))
 
 val_dataloader = dict(
@@ -488,8 +482,6 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', save_best='EM@1', rule='greater', 
                    interval=1, max_keep_ckpts=3))
 
-find_unused_parameters = False
+find_unused_parameters = True
 auto_scale_lr = dict(enable=True, base_batch_size=8)  # Auto-scale for different GPU counts
-# POWER: Mixed precision training for 4x4090 efficiency
-fp16 = dict(loss_scale='dynamic')
 load_from = './work_dirs/scannet-det/scannet-votenet-12xb12/epoch_12.pth'

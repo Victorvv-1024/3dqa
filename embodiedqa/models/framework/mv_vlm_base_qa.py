@@ -38,9 +38,6 @@ from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingL
 
 import traceback
 
-def debug_superpoint_call(location_name):
-    pass  # Debug function disabled for production
-
 
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
@@ -107,7 +104,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
         self.use_2d = use_2d
-        D_fus = 1024
+        D_fus = 768
         #MCGR
         self.fusion_encoder = MODELS.build(backbone_fusion)
         
@@ -212,7 +209,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             # self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
             #                                         nn.LayerNorm(self.fusion_encoder.config.hidden_size))
             self.text_global_att_proj = nn.Sequential(
-                nn.Linear(self.text_encoder.config.hidden_size, D_fus),
+                nn.Linear(D_fus, D_fus),
                 nn.LayerNorm(D_fus),
                 nn.SiLU(),
                 nn.Linear(D_fus, D_fus),
@@ -309,7 +306,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             view_dim=D_fus,
             fusion_dim=D_fus,
             hidden_dim=1024,            # Much larger hidden dimension
-            num_heads=12,               # More attention heads
+            num_heads=16,               # More attention heads
             num_layers=4,               # Deep processing
             dropout=0.1,
             use_gradient_checkpointing=True
@@ -333,7 +330,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             text_dim=D_fus,
             fusion_dim=D_fus,
             hidden_dim=1024,            # Much larger hidden dimension
-            num_attention_heads=12,     # More attention heads
+            num_attention_heads=16,     # More attention heads
             num_layers=6,               # Deep cross-modal processing
             dropout=0.1,
             use_gradient_checkpointing=True
@@ -362,29 +359,39 @@ class MultiViewVLMBase3DQA(BaseModel):
         # )
         # self.use_pid_fusion_encoder = True if self.pid_fusion_encoder else False
         
+        # SIMPLIFIED: Use simplified adaptive fusion
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=D_fus,
-            hidden_dim=1536,            # 2x larger hidden dimension  
-            num_heads=8,               # More attention heads
-            num_layers=4,               # Deep cross-modal processing
+            hidden_dim=1024,            # Reasonable hidden dimension  
+            num_heads=8,               # Standard attention heads
+            num_layers=2,               # REDUCED from 4 to 2 for stability
             dropout=0.1,
-            use_gradient_checkpointing=True  # Essential for memory efficiency
-        )
-        
-        self.geometric_priors = ImplicitGeometricPriors(
-            fusion_dim=D_fus,
-            hidden_dim=1024,            # Large hidden dimension
-            num_heads=8,               # More attention heads  
-            num_layers=4,               # Deep geometric processing
-            max_distance=8.0,
-            num_distance_bins=64,       # Rich distance encoding
             use_gradient_checkpointing=True
         )
         
+        # SIMPLIFIED: Use simplified geometric priors
+        self.geometric_priors = ImplicitGeometricPriors(
+            fusion_dim=D_fus,
+            hidden_dim=D_fus,           # SIMPLIFIED: Same as fusion_dim
+            num_heads=8,               # Standard attention heads  
+            num_layers=2,               # REDUCED from 4 to 2 for stability
+            max_distance=8.0,
+            num_distance_bins=32,       # REDUCED from 64 to 32
+            use_gradient_checkpointing=True
+        )
+        
+        # SIMPLIFIED: Use simplified multi-scale processor
         self.multi_scale_processor = MultiScaleProcessor(
             fusion_dim=D_fus,
-            scales=[256, 512, 1024, 2048],  # More scales for robustness
-            hidden_dim=1024
+            scales=[512, 1024],         # SIMPLIFIED: Only 2 scales instead of 4
+        )
+        
+        self.pooler_projection = nn.Sequential(
+            nn.Linear(D_fus * 2, D_fus),  # From concatenated [global_visual, text_global] to D_fus
+            nn.LayerNorm(D_fus),
+            nn.ReLU(),
+            nn.Linear(D_fus, D_fus),
+            nn.LayerNorm(D_fus)
         )
         
         # --- New arguments for uncertainty weighting ---
@@ -616,14 +623,16 @@ class MultiViewVLMBase3DQA(BaseModel):
                 return_valid_flag=True,
                 text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
                 img_features_for_att=img_features_for_att[idx])
-            # print(f"points_imgfeat shape: {points_imgfeat.shape}") # [Np, Di] = [1024, 1024]
             
             points_imgfeats.append(points_imgfeat)  # all sample
             raw_points_imgfeats.append(raw_points_imgfeat) # all sample
             img_feat_valid_flags.append(img_feat_valid_flag) # last_level
 
         points_imgfeats = torch.stack(points_imgfeats) # B, Np, D_i
-        raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, Np, D_i
+        raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, M, Np, D_i
+        if raw_points_imgfeats.dim() == 4:
+            # Collapse view dimension by averaging
+            raw_points_imgfeats = raw_points_imgfeats.mean(dim=1)  # [B, Np, D_i]
         # print(f"points_imgfeats shape: {points_imgfeats.shape}") # [B, Np, Di] = [12, 1024, 1024]
         img_feat_valid_flags = torch.stack(img_feat_valid_flags) # B, Np
         # print(f"img_feat_valid_flags shape: {img_feat_valid_flags.shape}") # [B, Np] = [12, 1024]
@@ -633,18 +642,25 @@ class MultiViewVLMBase3DQA(BaseModel):
         # feat_dict['fp_features'][-1] = self.fusion_map(feat_dict['fp_features'][-1].transpose(1,2),points_imgfeats).transpose(1,2) # B, C, N
         # print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
         
-        # 1. Get basic features (keep existing code)
-        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()
-        F_3d = self.project_3d(points_feat)
-        F_2d_raw = self.project_2d_raw(raw_points_imgfeats)
-        Z_TV = self.project_2d_guided(points_imgfeats)
+        # 1. Get basic features (ensure correct dimensions)
+        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp]
+        F_3d = self.project_3d(points_feat)  # [B, Np, D_fus]
+        
+        # CRITICAL FIX: Ensure 2D features are properly shaped
+        
+        F_2d_raw = self.project_2d_raw(raw_points_imgfeats)  # [B, Np, D_fus]
+        Z_TV = self.project_2d_guided(points_imgfeats)  # [B, Np, D_fus]
+        
+        # Ensure all tensors are 3D [B, Np, D_fus]
+        if F_3d.dim() != 3 or F_2d_raw.dim() != 3 or Z_TV.dim() != 3:
+            raise ValueError(f"Expected 3D tensors, got F_3d: {F_3d.shape}, F_2d_raw: {F_2d_raw.shape}, Z_TV: {Z_TV.shape}")
         
         # Store basic features
         feat_dict['F_3d'] = F_3d
         feat_dict['F_2d_raw'] = F_2d_raw
         feat_dict['Z_TV'] = Z_TV
         
-        # 2. Create Z_PV (Point-View fusion) - REMOVE superpoint dependency
+        # 2. Create Z_PV (Point-View fusion) with correct dimensions
         Z_PV = self.point_view_fusion(F_3d, F_2d_raw, superpoint_ids=None)
         feat_dict['Z_PV'] = Z_PV
         
@@ -670,6 +686,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 6. Multi-scale processing for robustness
         Z_multi_scale = self.multi_scale_processor(Z_geo_aware, P_xyz)
         feat_dict['Z_final'] = Z_multi_scale
+        
 
         # REMOVE
         # if self.training:
@@ -863,41 +880,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         return text_dict
 
-    # def forward_transformer(self,
-    #                         point_feats: Tensor,
-    #                         point_pos: Tensor,
-    #                         point_mask:Tensor,
-    #                         text_dict: Dict,
-    #                         full_point_feats: Tensor = None,
-    #                         full_point_pos: Tensor = None,
-    #                         full_point_mask: Tensor = None
-    #                         ) -> Dict:
-    #     #feats: mapping and add pos embedding
-    #     point_feats = self.visual_feat_map(point_feats)
-    #     point_feats += self.pos_embedding(point_pos)
-    #     point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
-        
-    #     full_point_feats = self.full_visual_feat_map(full_point_feats)
-    #     full_point_feats += self.full_pos_embedding(full_point_pos)
-    #     full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
-        
-    #     fusion_encoder_inputs_dict = dict(
-    #         lang_feats = text_dict['text_feats'],
-    #         lang_attention_mask = text_dict['text_token_mask'],
-    #         visual_feats = point_feats,
-    #         visual_attention_mask = point_mask,
-    #         full_visual_feats = full_point_feats,
-    #         full_visual_attention_mask = full_point_mask,
-    #         )
-    #     fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
-    #     head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
-    #                             visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
-    #                             fusion_feat_language=fusion_output['lang_feats'], 
-    #                             language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
-    #                             fusion_feat_pooler=fusion_output.get('pooler_feat',None)
-    #                             )
-        
-    #     return head_inputs_dict
+    
 
     # def loss(self, batch_inputs_dict: dict, batch_data_samples: SampleList,
     #          **kwargs) -> Union[dict, list]:        
@@ -1106,132 +1089,13 @@ class MultiViewVLMBase3DQA(BaseModel):
     #     losses = self.loss_collect(losses)
     #     return losses
     
-    # def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
-    #     """Updated loss method with training-only superpoint distillation."""
-        
-    #     text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-    #     feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
-            
-    #     points = batch_inputs_dict['points']
-    #     batch_size = len(points)
-    #     losses = {}
-        
-    #     # # GEOMETRY-GUIDED DISTILLATION LOSS (training-only)
-    #     # if (self.training and self.use_distillation_loss and 
-    #     #     self.distillation_loss_calculator is not None):
-            
-    #     #     superpoint_ids_batched = feat_dict.get('superpoint_ids_batched')
-            
-    #     #     # Only compute if superpoints are available (training mode)
-    #     #     if (superpoint_ids_batched is not None and 
-    #     #         not torch.all(superpoint_ids_batched == -1)):
-                
-    #     #         F_3d_batched = feat_dict.get('F_3d')
-    #     #         F_2d_raw_batched = feat_dict.get('F_2d_raw')
-                
-    #     #         # Handle multi-view features
-    #     #         if len(F_2d_raw_batched.shape) == 4:
-    #     #             B, M, Np, D_fus = F_2d_raw_batched.shape
-    #     #             F_2d_raw_batched = F_2d_raw_batched.mean(dim=1)
-                    
-    #     #         assert F_3d_batched.shape == F_2d_raw_batched.shape
-                
-    #     #         B, Np, D_fus = F_3d_batched.shape
-    #     #         F_3d_flat = F_3d_batched.reshape(-1, D_fus)
-    #     #         F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
-    #     #         superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
-    #     #         batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1)
-                
-    #     #         loss_distill = self.distillation_loss_calculator(
-    #     #             F3D=F_3d_flat,
-    #     #             Fraw2D=F_2d_raw_flat,
-    #     #             superpoint_ids=superpoint_ids_flat,
-    #     #             batch_idx=batch_idx_flat
-    #     #         )
-    #     #         losses['loss_distill'] = loss_distill
-    #     #     else:
-    #     #         # No valid superpoints - skip distillation loss
-    #     #         if hasattr(self, 'debug_training') and self.debug_training:
-    #     #             print("Training: No valid superpoints found, skipping distillation loss")
-        
-    #     # SIMPLIFIED DISTILLATION LOSS (optional, without superpoints)
-    #     if self.training and self.use_simple_distillation:
-    #         F_3d = feat_dict['F_3d']  # [B, Np, D]
-    #         F_2d_raw = feat_dict['F_2d_raw']  # [B, Np, D]
-            
-    #         # Simple MSE loss between 3D and 2D features
-    #         distill_loss = F.mse_loss(F_3d, F_2d_raw.detach())
-    #         losses['loss_distill'] = distill_loss
-        
-    #     # Continue with standard loss computation (works for both training and inference)
-    #     head_inputs = self._forward_pid_fusion(feat_dict, text_dict)
-        
-    #     # QA Head processing
-    #     if isinstance(head_inputs, dict) and 'qa_head' in head_inputs and 'other_heads' in head_inputs:
-    #         qa_inputs_dict = head_inputs['qa_head']
-    #         other_inputs_dict = head_inputs['other_heads']
-            
-    #         qa_losses = self.qa_head.loss(**qa_inputs_dict,
-    #                                     ret_fusion_feat=True,
-    #                                     batch_data_samples=batch_data_samples)
-    #         losses.update(qa_losses)
-            
-    #         if self.with_target_bbox_head:
-    #             P_xyz = feat_dict['P_xyz']
-    #             ref_loc_losses = self.target_bbox_head.loss(**other_inputs_dict,
-    #                                                     points=points, 
-    #                                                     aggregated_points=P_xyz,
-    #                                                     batch_data_samples=batch_data_samples)
-    #             losses.update(ref_loc_losses)
-    #     else:
-    #         qa_losses = self.qa_head.loss(**head_inputs,
-    #                                     ret_fusion_feat=True,
-    #                                     batch_data_samples=batch_data_samples)
-    #         losses.update(qa_losses)
-            
-    #         if self.with_target_bbox_head:
-    #             P_xyz = feat_dict['P_xyz']
-    #             ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
-    #                                                     points=points, 
-    #                                                     aggregated_points=P_xyz,
-    #                                                     batch_data_samples=batch_data_samples)
-    #             losses.update(ref_loc_losses)
-        
-
-    #     fusion_feat = qa_losses['fusion_feat']
-
-    #     # Handle batch size 1 duplication issue
-    #     if 'duplicate_batch' in head_inputs.get('qa_head', {}) and head_inputs['qa_head']['duplicate_batch']:
-    #         fusion_feat = fusion_feat[:batch_size]
-
-    #     if self.with_target_cls_head:
-    #         if batch_size == 1 and self.training:
-    #             duplicated_fusion_feat = torch.cat([fusion_feat, fusion_feat], dim=0)
-    #             duplicated_samples = batch_data_samples + batch_data_samples
-    #             ref_cls_loss = self.target_cls_head.loss(duplicated_fusion_feat, 
-    #                                                 batch_data_samples=duplicated_samples)
-    #         else:
-    #             ref_cls_loss = self.target_cls_head.loss(fusion_feat, 
-    #                                                 batch_data_samples=batch_data_samples)
-    #         losses.update(ref_cls_loss)
-            
-    #     if self.with_situation_predict_head:
-    #         situation_predict_loss = self.situation_predict_head.loss(fusion_feat, 
-    #                                                                 batch_data_samples=batch_data_samples)
-    #         losses.update(situation_predict_loss)  
-        
-    #     # Keep uncertainty weighting if desired
-    #     # if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
-    #     #     losses = self.uncertainty_weighting(losses)
-                
-    #     losses = self.loss_collect(losses)
-    #     return losses
     
     def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
         """Updated loss computation with proper distillation loss handling."""
         
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
+        print('feats extracted successfully')
         
         points = batch_inputs_dict['points']
         batch_size = len(points)
@@ -1539,8 +1403,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # Simple fusion for pooler feature
         global_visual = visual_feats.mean(dim=1)  # [B, D]
-        pooler_feat = torch.cat([global_visual, text_global], dim=-1)  # [B, 2*D]
-        pooler_feat = nn.Linear(pooler_feat.size(-1), visual_feats.size(-1))(pooler_feat)  # [B, D]
+        pooler_feat_concat = torch.cat([global_visual, text_global], dim=-1)  # [B, 2*D]
+        
+        # FIXED: Use pre-defined projection layer (already on correct device)
+        pooler_feat = self.pooler_projection(pooler_feat_concat)  # [B, D]
         
         head_inputs_dict = {
             'fusion_feat_visual': visual_feats,
@@ -1657,332 +1523,332 @@ class MultiViewVLMBase3DQA(BaseModel):
         
     #     return head_inputs_dict
 
-    def _extract_precomputed_superpoints(self, batch_data_samples, batch_size, num_points, device):
-        """Extract precomputed superpoints (training-only)."""
+    # def _extract_precomputed_superpoints(self, batch_data_samples, batch_size, num_points, device):
+    #     """Extract precomputed superpoints (training-only)."""
         
-        # Only called during training mode
-        if not self.training:
-            return None
+    #     # Only called during training mode
+    #     if not self.training:
+    #         return None
             
-        batch_superpoint_ids = []
+    #     batch_superpoint_ids = []
         
-        for b in range(batch_size):
-            data_sample = batch_data_samples[b]
+    #     for b in range(batch_size):
+    #         data_sample = batch_data_samples[b]
             
-            if hasattr(data_sample, 'superpoint_3d') and data_sample.superpoint_3d is not None:
-                original_superpoints = data_sample.superpoint_3d.long().to(device)
+    #         if hasattr(data_sample, 'superpoint_3d') and data_sample.superpoint_3d is not None:
+    #             original_superpoints = data_sample.superpoint_3d.long().to(device)
                 
-                # Map to downsampled points if we have FP indices
-                if hasattr(self, 'current_fp_indices') and self.current_fp_indices is not None:
-                    fp_indices_b = self.current_fp_indices[b]
-                    fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoints.shape[0] - 1)
-                    mapped_superpoints = original_superpoints[fp_indices_b]
-                    batch_superpoint_ids.append(mapped_superpoints)
-                else:
-                    # Fallback: truncate or pad
-                    if original_superpoints.shape[0] >= num_points:
-                        batch_superpoint_ids.append(original_superpoints[:num_points])
-                    else:
-                        padded = torch.full((num_points,), -1, dtype=torch.long, device=device)
-                        padded[:original_superpoints.shape[0]] = original_superpoints
-                        batch_superpoint_ids.append(padded)
-            else:
-                raise ValueError(f"Warning: No superpoints found for training batch {b}")
+    #             # Map to downsampled points if we have FP indices
+    #             if hasattr(self, 'current_fp_indices') and self.current_fp_indices is not None:
+    #                 fp_indices_b = self.current_fp_indices[b]
+    #                 fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoints.shape[0] - 1)
+    #                 mapped_superpoints = original_superpoints[fp_indices_b]
+    #                 batch_superpoint_ids.append(mapped_superpoints)
+    #             else:
+    #                 # Fallback: truncate or pad
+    #                 if original_superpoints.shape[0] >= num_points:
+    #                     batch_superpoint_ids.append(original_superpoints[:num_points])
+    #                 else:
+    #                     padded = torch.full((num_points,), -1, dtype=torch.long, device=device)
+    #                     padded[:original_superpoints.shape[0]] = original_superpoints
+    #                     batch_superpoint_ids.append(padded)
+    #         else:
+    #             raise ValueError(f"Warning: No superpoints found for training batch {b}")
         
-        return torch.stack(batch_superpoint_ids, dim=0)
+    #     return torch.stack(batch_superpoint_ids, dim=0)
 
-    def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
-        """
-        Validate and provide statistics about the loaded pre-computed superpoints.
+    # def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
+    #     """
+    #     Validate and provide statistics about the loaded pre-computed superpoints.
         
-        Args:
-            superpoint_ids_batched: Tensor of shape [B, Np] with superpoint IDs
+    #     Args:
+    #         superpoint_ids_batched: Tensor of shape [B, Np] with superpoint IDs
             
-        Returns:
-            Dictionary with validation statistics
-        """
-        B, Np = superpoint_ids_batched.shape
-        stats = {}
+    #     Returns:
+    #         Dictionary with validation statistics
+    #     """
+    #     B, Np = superpoint_ids_batched.shape
+    #     stats = {}
         
-        for b in range(B):
-            sp_ids = superpoint_ids_batched[b]
-            valid_mask = sp_ids >= 0
+    #     for b in range(B):
+    #         sp_ids = superpoint_ids_batched[b]
+    #         valid_mask = sp_ids >= 0
             
-            if valid_mask.sum() > 0:
-                unique_ids = torch.unique(sp_ids[valid_mask])
-                stats[f'batch_{b}'] = {
-                    'valid_points': valid_mask.sum().item(),
-                    'total_points': Np,
-                    'num_superpoints': len(unique_ids),
-                    'coverage': valid_mask.sum().item() / Np
-                }
-            else:
-                stats[f'batch_{b}'] = {
-                    'valid_points': 0,
-                    'total_points': Np,
-                    'num_superpoints': 0,
-                    'coverage': 0.0
-                }
+    #         if valid_mask.sum() > 0:
+    #             unique_ids = torch.unique(sp_ids[valid_mask])
+    #             stats[f'batch_{b}'] = {
+    #                 'valid_points': valid_mask.sum().item(),
+    #                 'total_points': Np,
+    #                 'num_superpoints': len(unique_ids),
+    #                 'coverage': valid_mask.sum().item() / Np
+    #             }
+    #         else:
+    #             stats[f'batch_{b}'] = {
+    #                 'valid_points': 0,
+    #                 'total_points': Np,
+    #                 'num_superpoints': 0,
+    #                 'coverage': 0.0
+    #             }
         
-        # Overall statistics
-        total_valid = sum(stats[f'batch_{b}']['valid_points'] for b in range(B))
-        total_points = B * Np
-        overall_coverage = total_valid / total_points if total_points > 0 else 0.0
+    #     # Overall statistics
+    #     total_valid = sum(stats[f'batch_{b}']['valid_points'] for b in range(B))
+    #     total_points = B * Np
+    #     overall_coverage = total_valid / total_points if total_points > 0 else 0.0
         
-        stats['overall'] = {
-            'total_valid_points': total_valid,
-            'total_points': total_points,
-            'overall_coverage': overall_coverage,
-            'batch_size': B,
-            'points_per_sample': Np
-        }
+    #     stats['overall'] = {
+    #         'total_valid_points': total_valid,
+    #         'total_points': total_points,
+    #         'overall_coverage': overall_coverage,
+    #         'batch_size': B,
+    #         'points_per_sample': Np
+    #     }
         
-        return stats
+    #     return stats
     
     # --- For debugging purposes ---
     # ... existing code ...
-    @torch.no_grad()
-    def debug_visualize_superpoints(self, feat_dict, batch_idx=0, output_dir="superpoint_debug"):
-        """
-        Computes and visualizes superpoints using both the original and improved VCCS methods.
-        Also visualizes the original scene for comparison.
+    # @torch.no_grad()
+    # def debug_visualize_superpoints(self, feat_dict, batch_idx=0, output_dir="superpoint_debug"):
+    #     """
+    #     Computes and visualizes superpoints using both the original and improved VCCS methods.
+    #     Also visualizes the original scene for comparison.
         
-        Args:
-            feat_dict: Dictionary containing feature information
-            batch_idx: Index in the batch to process
-            output_dir: Directory for saving visualization outputs
-        """
-        # Debug function - no output
-        pass  # Superpoint visualization debug function
+    #     Args:
+    #         feat_dict: Dictionary containing feature information
+    #         batch_idx: Index in the batch to process
+    #         output_dir: Directory for saving visualization outputs
+    #     """
+    #     # Debug function - no output
+    #     pass  # Superpoint visualization debug function
 
-        # --- Save Original RGB Images if Available ---
-        try:
-            # Try to get the original images from batch_inputs_dict
-            if hasattr(self, 'batch_inputs_dict') and 'imgs' in self.batch_inputs_dict:
-                imgs = self.batch_inputs_dict['imgs']
-                if len(imgs.shape) > 4:  # [B, M, C, H, W]
-                    # Multi-view case
-                    num_views = min(5, imgs.shape[1])  # Save up to 5 views to avoid too many files
-                    for view_idx in range(num_views):
-                        img = imgs[batch_idx, view_idx].cpu().permute(1, 2, 0).numpy()
-                        # Convert to uint8 if float
-                        if img.dtype != np.uint8:
-                            img = (img * 255).astype(np.uint8)
-                        output_img_path = os.path.join(output_dir, f"original_rgb_view{view_idx}_batch{batch_idx}.png")
-                        import cv2
-                        cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-                        print(f"Saved original RGB image (view {view_idx}) to: {output_img_path}")
-                else:  # [B, C, H, W]
-                    # Single view case
-                    img = imgs[batch_idx].cpu().permute(1, 2, 0).numpy()
-                    if img.dtype != np.uint8:
-                        img = (img * 255).astype(np.uint8)
-                    output_img_path = os.path.join(output_dir, f"original_rgb_batch{batch_idx}.png")
-                    import cv2
-                    cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-                    print(f"Saved original RGB image to: {output_img_path}")
-        except Exception as e:
-            raise ValueError(f"Could not save original RGB images: {e}")
+    #     # --- Save Original RGB Images if Available ---
+    #     try:
+    #         # Try to get the original images from batch_inputs_dict
+    #         if hasattr(self, 'batch_inputs_dict') and 'imgs' in self.batch_inputs_dict:
+    #             imgs = self.batch_inputs_dict['imgs']
+    #             if len(imgs.shape) > 4:  # [B, M, C, H, W]
+    #                 # Multi-view case
+    #                 num_views = min(5, imgs.shape[1])  # Save up to 5 views to avoid too many files
+    #                 for view_idx in range(num_views):
+    #                     img = imgs[batch_idx, view_idx].cpu().permute(1, 2, 0).numpy()
+    #                     # Convert to uint8 if float
+    #                     if img.dtype != np.uint8:
+    #                         img = (img * 255).astype(np.uint8)
+    #                     output_img_path = os.path.join(output_dir, f"original_rgb_view{view_idx}_batch{batch_idx}.png")
+    #                     import cv2
+    #                     cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    #                     print(f"Saved original RGB image (view {view_idx}) to: {output_img_path}")
+    #             else:  # [B, C, H, W]
+    #                 # Single view case
+    #                 img = imgs[batch_idx].cpu().permute(1, 2, 0).numpy()
+    #                 if img.dtype != np.uint8:
+    #                     img = (img * 255).astype(np.uint8)
+    #                 output_img_path = os.path.join(output_dir, f"original_rgb_batch{batch_idx}.png")
+    #                 import cv2
+    #                 cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    #                 print(f"Saved original RGB image to: {output_img_path}")
+    #     except Exception as e:
+    #         raise ValueError(f"Could not save original RGB images: {e}")
 
-        # --- Get Original Input Data ---
-        original_stack_points = feat_dict.get('original_stack_points', None)
-        if original_stack_points is None:
-            raise ValueError("Error: 'original_stack_points' not found in feat_dict.")
-            return
+    #     # --- Get Original Input Data ---
+    #     original_stack_points = feat_dict.get('original_stack_points', None)
+    #     if original_stack_points is None:
+    #         raise ValueError("Error: 'original_stack_points' not found in feat_dict.")
+    #         return
 
-        # Get points for the specified batch
-        original_points_sample = original_stack_points[batch_idx].detach()
-        points_xyz_original = original_points_sample[:, :3].cpu()
-        num_original_points = points_xyz_original.shape[0]
+    #     # Get points for the specified batch
+    #     original_points_sample = original_stack_points[batch_idx].detach()
+    #     points_xyz_original = original_points_sample[:, :3].cpu()
+    #     num_original_points = points_xyz_original.shape[0]
         
-        # print(f"Processing original point cloud with {num_original_points} points.")
+    #     # print(f"Processing original point cloud with {num_original_points} points.")
 
-        # --- Get Original Colors ---
-        if original_points_sample.shape[1] >= 6:
-            point_colors_original = original_points_sample[:, 3:6].float()
-            if point_colors_original.max() > 1.0:
-                # print("Normalizing original colors (assuming range 0-255).")
-                point_colors_original = point_colors_original / 255.0
-            point_colors_original = point_colors_original.cpu()
-        else:
-            raise ValueError("Warning: Using random colors for VCCS calculation.")
-            point_colors_original = torch.rand_like(points_xyz_original).cpu()
+    #     # --- Get Original Colors ---
+    #     if original_points_sample.shape[1] >= 6:
+    #         point_colors_original = original_points_sample[:, 3:6].float()
+    #         if point_colors_original.max() > 1.0:
+    #             # print("Normalizing original colors (assuming range 0-255).")
+    #             point_colors_original = point_colors_original / 255.0
+    #         point_colors_original = point_colors_original.cpu()
+    #     else:
+    #         raise ValueError("Warning: Using random colors for VCCS calculation.")
+    #         point_colors_original = torch.rand_like(points_xyz_original).cpu()
 
-        # --- Save Original Point Cloud with RGB Colors ---
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-        pcd.colors = o3d.utility.Vector3dVector(point_colors_original.numpy())
+    #     # --- Save Original Point Cloud with RGB Colors ---
+    #     pcd = o3d.geometry.PointCloud()
+    #     pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+    #     pcd.colors = o3d.utility.Vector3dVector(point_colors_original.numpy())
         
-        output_path = os.path.join(output_dir, f"original_rgb_point_cloud_batch{batch_idx}.ply")
-        o3d.io.write_point_cloud(output_path, pcd)
-        # print(f"Saved original RGB point cloud to: {output_path}")
+    #     output_path = os.path.join(output_dir, f"original_rgb_point_cloud_batch{batch_idx}.ply")
+    #     o3d.io.write_point_cloud(output_path, pcd)
+    #     # print(f"Saved original RGB point cloud to: {output_path}")
 
-        # --- Estimate Normals ---
-        # print("Estimating normals...")
-        t0 = time.time()
-        points_normals_original = estimate_normals(points_xyz_original)
-        # print(f"Normals estimated. ({time.time() - t0:.2f}s)")
+    #     # --- Estimate Normals ---
+    #     # print("Estimating normals...")
+    #     t0 = time.time()
+    #     points_normals_original = estimate_normals(points_xyz_original)
+    #     # print(f"Normals estimated. ({time.time() - t0:.2f}s)")
 
-        # --- Common VCCS Parameters ---
-        vccs_voxel_size = 0.02
-        vccs_seed_spacing = 0.8 # 0.5 for original, 0.75 for improved
-        vccs_search_radius = 0.5
-        vccs_k_neighbors = 27
-        vccs_weights = (0.2, 0.7, 1.0)  # wc, ws, wn default weights (0.2, 0.4, 1.0)
-        vccs_max_expand_dist = 1.25
-        vccs_device = torch.device('cpu')
+    #     # --- Common VCCS Parameters ---
+    #     vccs_voxel_size = 0.02
+    #     vccs_seed_spacing = 0.8 # 0.5 for original, 0.75 for improved
+    #     vccs_search_radius = 0.5
+    #     vccs_k_neighbors = 27
+    #     vccs_weights = (0.2, 0.7, 1.0)  # wc, ws, wn default weights (0.2, 0.4, 1.0)
+    #     vccs_max_expand_dist = 1.25
+    #     vccs_device = torch.device('cpu')
         
-        # --- Generate Superpoints with Original Method ---
-        # print("\n=== Running Original VCCS Implementation ===")
-        t0 = time.time()
-        # Import the function directly from the module
-        from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints
+    #     # --- Generate Superpoints with Original Method ---
+    #     # print("\n=== Running Original VCCS Implementation ===")
+    #     t0 = time.time()
+    #     # Import the function directly from the module
+    #     from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints
         
-        original_superpoint_ids = compute_vccs_superpoints(
-            points_xyz_original.to(vccs_device),
-            point_colors_original.to(vccs_device),
-            points_normals_original.to(vccs_device),
-            voxel_size=vccs_voxel_size,
-            seed_spacing=vccs_seed_spacing,
-            # search_radius=vccs_search_radius,
-            # k_neighbors=vccs_k_neighbors,
-            max_expand_dist=vccs_max_expand_dist,
-            weights=vccs_weights,
-            device=vccs_device
-        ).cpu()
+    #     original_superpoint_ids = compute_vccs_superpoints(
+    #         points_xyz_original.to(vccs_device),
+    #         point_colors_original.to(vccs_device),
+    #         points_normals_original.to(vccs_device),
+    #         voxel_size=vccs_voxel_size,
+    #         seed_spacing=vccs_seed_spacing,
+    #         # search_radius=vccs_search_radius,
+    #         # k_neighbors=vccs_k_neighbors,
+    #         max_expand_dist=vccs_max_expand_dist,
+    #         weights=vccs_weights,
+    #         device=vccs_device
+    #     ).cpu()
         
-        # print(f"Original VCCS completed in {time.time() - t0:.2f}s")
+    #     # print(f"Original VCCS completed in {time.time() - t0:.2f}s")
         
-        # --- Analyze Original Superpoints ---
-        if original_superpoint_ids is not None and (original_superpoint_ids != -1).any():
-            valid_mask = (original_superpoint_ids != -1)
-            unique_ids, counts = torch.unique(original_superpoint_ids[valid_mask], return_counts=True)
-            num_superpoints = len(unique_ids)
-            total_points_assigned = valid_mask.sum().item()
+    #     # --- Analyze Original Superpoints ---
+    #     if original_superpoint_ids is not None and (original_superpoint_ids != -1).any():
+    #         valid_mask = (original_superpoint_ids != -1)
+    #         unique_ids, counts = torch.unique(original_superpoint_ids[valid_mask], return_counts=True)
+    #         num_superpoints = len(unique_ids)
+    #         total_points_assigned = valid_mask.sum().item()
             
-            # print(f"Original VCCS Statistics:")
-            # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
-            # print(f"  Number of superpoints: {num_superpoints}")
+    #         # print(f"Original VCCS Statistics:")
+    #         # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
+    #         # print(f"  Number of superpoints: {num_superpoints}")
             
-            if num_superpoints > 0:
-                # print(f"  Min size: {counts.min().item()}")
-                # print(f"  Max size: {counts.max().item()}")
-                # print(f"  Mean size: {counts.float().mean().item():.2f}")
+    #         if num_superpoints > 0:
+    #             # print(f"  Min size: {counts.min().item()}")
+    #             # print(f"  Max size: {counts.max().item()}")
+    #             # print(f"  Mean size: {counts.float().mean().item():.2f}")
                 
-                # Visualize original superpoints
-                color_map = torch.rand(num_superpoints, 3)
-                id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
+    #             # Visualize original superpoints
+    #             color_map = torch.rand(num_superpoints, 3)
+    #             id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
                 
-                point_colors_viz = torch.zeros_like(points_xyz_original)
+    #             point_colors_viz = torch.zeros_like(points_xyz_original)
                 
-                for i in range(num_original_points):
-                    sp_id = original_superpoint_ids[i].item()
-                    if sp_id != -1:
-                        color_idx = id_to_map_idx.get(sp_id, 0)
-                        point_colors_viz[i] = color_map[color_idx]
+    #             for i in range(num_original_points):
+    #                 sp_id = original_superpoint_ids[i].item()
+    #                 if sp_id != -1:
+    #                     color_idx = id_to_map_idx.get(sp_id, 0)
+    #                     point_colors_viz[i] = color_map[color_idx]
                 
-                # Save colored point cloud
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-                pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
+    #             # Save colored point cloud
+    #             pcd = o3d.geometry.PointCloud()
+    #             pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+    #             pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
                 
-                output_path = os.path.join(output_dir, f"original_vccs_batch{batch_idx}.ply")
-                o3d.io.write_point_cloud(output_path, pcd)
-                # print(f"Saved visualization to: {output_path}")
+    #             output_path = os.path.join(output_dir, f"original_vccs_batch{batch_idx}.ply")
+    #             o3d.io.write_point_cloud(output_path, pcd)
+    #             # print(f"Saved visualization to: {output_path}")
         
-        # --- Generate Superpoints with Improved Method ---
-        # print("\n=== Running Improved VCCS Implementation ===")
-        t0 = time.time()
-        # Import the improved function
-        from embodiedqa.utils.superpoint_segmentation import improved_vccs_superpoints
+    #     # --- Generate Superpoints with Improved Method ---
+    #     # print("\n=== Running Improved VCCS Implementation ===")
+    #     t0 = time.time()
+    #     # Import the improved function
+    #     from embodiedqa.utils.superpoint_segmentation import improved_vccs_superpoints
         
-        improved_superpoint_ids = improved_vccs_superpoints(
-            points_xyz_original.to(vccs_device),
-            point_colors_original.to(vccs_device),
-            points_normals_original.to(vccs_device),
-            voxel_size=vccs_voxel_size,
-            seed_spacing=vccs_seed_spacing,
-            search_radius=vccs_search_radius,
-            k_neighbors=vccs_k_neighbors,
-            weights=vccs_weights,
-            device=vccs_device
-        ).cpu()
+    #     improved_superpoint_ids = improved_vccs_superpoints(
+    #         points_xyz_original.to(vccs_device),
+    #         point_colors_original.to(vccs_device),
+    #         points_normals_original.to(vccs_device),
+    #         voxel_size=vccs_voxel_size,
+    #         seed_spacing=vccs_seed_spacing,
+    #         search_radius=vccs_search_radius,
+    #         k_neighbors=vccs_k_neighbors,
+    #         weights=vccs_weights,
+    #         device=vccs_device
+    #     ).cpu()
         
-        # print(f"Improved VCCS completed in {time.time() - t0:.2f}s")
+    #     # print(f"Improved VCCS completed in {time.time() - t0:.2f}s")
         
-        # --- Analyze Improved Superpoints ---
-        if improved_superpoint_ids is not None and (improved_superpoint_ids != -1).any():
-            valid_mask = (improved_superpoint_ids != -1)
-            unique_ids, counts = torch.unique(improved_superpoint_ids[valid_mask], return_counts=True)
-            num_superpoints = len(unique_ids)
-            total_points_assigned = valid_mask.sum().item()
+    #     # --- Analyze Improved Superpoints ---
+    #     if improved_superpoint_ids is not None and (improved_superpoint_ids != -1).any():
+    #         valid_mask = (improved_superpoint_ids != -1)
+    #         unique_ids, counts = torch.unique(improved_superpoint_ids[valid_mask], return_counts=True)
+    #         num_superpoints = len(unique_ids)
+    #         total_points_assigned = valid_mask.sum().item()
             
-            # print(f"Improved VCCS Statistics:")
-            # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
-            # print(f"  Number of superpoints: {num_superpoints}")
+    #         # print(f"Improved VCCS Statistics:")
+    #         # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
+    #         # print(f"  Number of superpoints: {num_superpoints}")
             
-            if num_superpoints > 0:
-                # print(f"  Min size: {counts.min().item()}")
-                # print(f"  Max size: {counts.max().item()}")
-                # print(f"  Mean size: {counts.float().mean().item():.2f}")
+    #         if num_superpoints > 0:
+    #             # print(f"  Min size: {counts.min().item()}")
+    #             # print(f"  Max size: {counts.max().item()}")
+    #             # print(f"  Mean size: {counts.float().mean().item():.2f}")
                 
-                # Visualize improved superpoints
-                color_map = torch.rand(num_superpoints, 3)
-                id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
+    #             # Visualize improved superpoints
+    #             color_map = torch.rand(num_superpoints, 3)
+    #             id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
                 
-                point_colors_viz = torch.zeros_like(points_xyz_original)
+    #             point_colors_viz = torch.zeros_like(points_xyz_original)
                 
-                for i in range(num_original_points):
-                    sp_id = improved_superpoint_ids[i].item()
-                    if sp_id != -1:
-                        color_idx = id_to_map_idx.get(sp_id, 0)
-                        point_colors_viz[i] = color_map[color_idx]
+    #             for i in range(num_original_points):
+    #                 sp_id = improved_superpoint_ids[i].item()
+    #                 if sp_id != -1:
+    #                     color_idx = id_to_map_idx.get(sp_id, 0)
+    #                     point_colors_viz[i] = color_map[color_idx]
                 
-                # Save colored point cloud
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-                pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
+    #             # Save colored point cloud
+    #             pcd = o3d.geometry.PointCloud()
+    #             pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+    #             pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
                 
-                output_path = os.path.join(output_dir, f"improved_vccs_batch{batch_idx}.ply")
-                o3d.io.write_point_cloud(output_path, pcd)
-                # print(f"Saved visualization to: {output_path}")
+    #             output_path = os.path.join(output_dir, f"improved_vccs_batch{batch_idx}.ply")
+    #             o3d.io.write_point_cloud(output_path, pcd)
+    #             # print(f"Saved visualization to: {output_path}")
         
-        # --- Create Difference Visualization ---
-        # if original_superpoint_ids is not None and improved_superpoint_ids is not None:
-        #     print("\n=== Creating Difference Visualization ===")
+    #     # --- Create Difference Visualization ---
+    #     # if original_superpoint_ids is not None and improved_superpoint_ids is not None:
+    #     #     print("\n=== Creating Difference Visualization ===")
             
-        #     # Red: Only in original, Green: Only in improved, Blue: In both
-        #     diff_colors = torch.zeros_like(points_xyz_original)
+    #     #     # Red: Only in original, Green: Only in improved, Blue: In both
+    #     #     diff_colors = torch.zeros_like(points_xyz_original)
             
-        #     original_valid = (original_superpoint_ids != -1)
-        #     improved_valid = (improved_superpoint_ids != -1)
+    #     #     original_valid = (original_superpoint_ids != -1)
+    #     #     improved_valid = (improved_superpoint_ids != -1)
             
-        #     # Both assigned (blue)
-        #     both_mask = original_valid & improved_valid
-        #     diff_colors[both_mask] = torch.tensor([0.0, 0.0, 1.0])
+    #     #     # Both assigned (blue)
+    #     #     both_mask = original_valid & improved_valid
+    #     #     diff_colors[both_mask] = torch.tensor([0.0, 0.0, 1.0])
             
-        #     # Only original (red)
-        #     only_original = original_valid & ~improved_valid
-        #     diff_colors[only_original] = torch.tensor([1.0, 0.0, 0.0])
+    #     #     # Only original (red)
+    #     #     only_original = original_valid & ~improved_valid
+    #     #     diff_colors[only_original] = torch.tensor([1.0, 0.0, 0.0])
             
-        #     # Only improved (green)
-        #     only_improved = ~original_valid & improved_valid
-        #     diff_colors[only_improved] = torch.tensor([0.0, 1.0, 0.0])
+    #     #     # Only improved (green)
+    #     #     only_improved = ~original_valid & improved_valid
+    #     #     diff_colors[only_improved] = torch.tensor([0.0, 1.0, 0.0])
             
-        #     # Save comparison
-        #     pcd = o3d.geometry.PointCloud()
-        #     pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-        #     pcd.colors = o3d.utility.Vector3dVector(diff_colors.numpy())
+    #     #     # Save comparison
+    #     #     pcd = o3d.geometry.PointCloud()
+    #     #     pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
+    #     #     pcd.colors = o3d.utility.Vector3dVector(diff_colors.numpy())
             
-        #     output_path = os.path.join(output_dir, f"vccs_comparison_batch{batch_idx}.ply")
-        #     o3d.io.write_point_cloud(output_path, pcd)
-        #     print(f"Saved comparison visualization to: {output_path}")
+    #     #     output_path = os.path.join(output_dir, f"vccs_comparison_batch{batch_idx}.ply")
+    #     #     o3d.io.write_point_cloud(output_path, pcd)
+    #     #     print(f"Saved comparison visualization to: {output_path}")
         
-        # Debug visualization complete - no output
-        pass
+    #     # Debug visualization complete - no output
+    #     pass
         
-        # Exit for debugging purposes
-        import sys
-        sys.exit("Debug complete - terminating execution")
+    #     # Exit for debugging purposes
+    #     import sys
+    #     sys.exit("Debug complete - terminating execution")
         
     
