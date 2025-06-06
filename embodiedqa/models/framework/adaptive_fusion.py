@@ -512,3 +512,259 @@ class MultiScaleProcessor(nn.Module):
                 interpolated[b, i] = sampled_features[b, nearest_idx]
         
         return interpolated
+    
+class EnhancedPositionalEncoding(nn.Module):
+    """
+    Multi-scale positional encoding that captures different spatial granularities
+    for better 3D scene understanding in QA tasks.
+    """
+    
+    def __init__(self, fusion_dim: int = 768):
+        super().__init__()
+        
+        # Ensure dimensions add up correctly
+        global_dim = fusion_dim // 2      # 384 for room-level position
+        local_dim = fusion_dim // 4       # 192 for object-level position  
+        height_dim = fusion_dim // 4      # 192 for height-specific encoding
+        
+        assert global_dim + local_dim + height_dim == fusion_dim, \
+            f"Dimension mismatch: {global_dim} + {local_dim} + {height_dim} != {fusion_dim}"
+        
+        # Global room coordinates - where objects are in the overall scene
+        self.global_pos = nn.Sequential(
+            nn.Linear(3, global_dim),
+            nn.LayerNorm(global_dim),
+            nn.SiLU(),
+        )
+        
+        # Local relative coordinates - object-level spatial relationships
+        self.local_pos = nn.Sequential(
+            nn.Linear(3, local_dim),
+            nn.LayerNorm(local_dim),
+            nn.SiLU(),
+        )
+        
+        # Height-specific encoding - critical for "above/below/on top of" questions
+        self.height_pos = nn.Sequential(
+            nn.Linear(1, height_dim),
+            nn.LayerNorm(height_dim),
+            nn.SiLU(),
+        )
+        
+        # Learnable scaling factors for each component
+        self.global_scale = nn.Parameter(torch.ones(1))
+        self.local_scale = nn.Parameter(torch.ones(1))
+        self.height_scale = nn.Parameter(torch.ones(1))
+        
+    def forward(self, points_xyz: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            points_xyz: [B, Np, 3] - 3D coordinates
+            
+        Returns:
+            multi_scale_encoding: [B, Np, fusion_dim] - Multi-scale position encoding
+        """
+        B, Np, _ = points_xyz.shape
+        
+        # 1. Global room coordinates (absolute position in scene)
+        global_enc = self.global_pos(points_xyz) * self.global_scale
+        
+        # 2. Local relative coordinates (centered around scene centroid)
+        # This helps capture object-level spatial relationships
+        scene_center = points_xyz.mean(dim=1, keepdim=True)  # [B, 1, 3]
+        centered_xyz = points_xyz - scene_center  # [B, Np, 3]
+        local_enc = self.local_pos(centered_xyz) * self.local_scale
+        
+        # 3. Height-specific encoding (Z-axis is crucial for spatial reasoning)
+        # "What's above the table?" - height relationships are key
+        height_enc = self.height_pos(points_xyz[:, :, 2:3]) * self.height_scale
+        
+        # 4. Concatenate all encodings
+        multi_scale_encoding = torch.cat([global_enc, local_enc, height_enc], dim=-1)
+        
+        return multi_scale_encoding
+
+
+class QuestionAwareGeometricLayer(nn.Module):
+    """
+    Geometric attention layer that adapts spatial reasoning based on the question content.
+    This allows the model to focus on relevant spatial relationships for each question.
+    """
+    
+    def __init__(self, fusion_dim: int = 768, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        
+        self.fusion_dim = fusion_dim
+        self.num_heads = num_heads
+        
+        # Project text features to same dimension as geometric features
+        self.text_proj = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Question-conditioned spatial attention
+        self.spatial_attention = nn.MultiheadAttention(
+            embed_dim=fusion_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Layer normalization for stability
+        self.norm1 = nn.LayerNorm(fusion_dim)
+        self.norm2 = nn.LayerNorm(fusion_dim)
+        
+        # Feed-forward network with SiLU activation
+        self.ffn = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim * 2),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, features: torch.Tensor, text_global: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            features: [B, Np, D] - Geometric features
+            text_global: [B, D] - Global text representation
+            
+        Returns:
+            enhanced_features: [B, Np, D] - Question-aware geometric features
+        """
+        B, Np, D = features.shape
+        
+        # 1. Project text to geometric feature space
+        text_bias = self.text_proj(text_global).unsqueeze(1)  # [B, 1, D]
+        
+        # 2. Add question context to geometric features (broadcast across all points)
+        question_conditioned_features = features + text_bias  # [B, Np, D]
+        
+        # 3. Self-attention with question conditioning
+        # Query: question-conditioned features (what to look for)
+        # Key/Value: original features (what's available)
+        attended_features, attention_weights = self.spatial_attention(
+            query=self.norm1(question_conditioned_features),
+            key=self.norm1(features),
+            value=features
+        )
+        
+        # 4. Residual connection
+        features = features + attended_features
+        
+        # 5. Feed-forward network with residual connection
+        ffn_output = self.ffn(self.norm2(features))
+        features = features + ffn_output
+        
+        return features
+
+
+class EnhancedImplicitGeometricPriors(nn.Module):
+    """
+    Enhanced version of ImplicitGeometricPriors that integrates:
+    1. Multi-scale positional encoding
+    2. Question-aware geometric attention
+    3. Your existing stable 2-layer architecture
+    """
+    
+    def __init__(self, 
+                 fusion_dim: int = 768,
+                 hidden_dim: int = 768,
+                 num_heads: int = 8,
+                 num_layers: int = 4,
+                 dropout: float = 0.1,
+                 use_gradient_checkpointing: bool = True):
+        super().__init__()
+        
+        self.fusion_dim = fusion_dim
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        
+        # 1. ENHANCED: Multi-scale positional encoding
+        self.enhanced_pos_encoding = EnhancedPositionalEncoding(fusion_dim)
+        
+        # 2. Feature projection to ensure dimension compatibility
+        self.feature_proj = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.SiLU(),
+        )
+        
+        # 3. ENHANCED: Question-aware geometric attention layers (keep 2-layer limit)
+        self.geo_attention_layers = nn.ModuleList([
+            QuestionAwareGeometricLayer(fusion_dim, num_heads, dropout) 
+            for _ in range(min(num_layers, 2))  # Keep your smart 2-layer limit!
+        ])
+        
+        # 4. Multi-scale processors (keep your existing simplified approach)
+        self.scale_processors = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim),
+                nn.SiLU(),
+            ) for _ in range(2)  # Keep 2 scales for efficiency
+        ])
+        
+        # 5. Final output projection
+        self.output_proj = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        
+    def forward(self, 
+                features: torch.Tensor, 
+                points_xyz: torch.Tensor,
+                text_global: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Enhanced forward pass with multi-scale encoding and question awareness.
+        
+        Args:
+            features: Input features [B, Np, D]
+            points_xyz: 3D coordinates [B, Np, 3]
+            text_global: Global text features [B, D] - NEW parameter
+            
+        Returns:
+            geo_features: Geometrically-aware features [B, Np, D]
+        """
+        B, Np, D = features.shape
+        
+        # 1. ENHANCED: Multi-scale positional encodings
+        pos_encodings = self.enhanced_pos_encoding(points_xyz)
+        
+        # 2. Project and enhance features with positional information
+        processed_features = self.feature_proj(features)
+        enhanced_features = processed_features + pos_encodings
+        
+        # 3. ENHANCED: Question-aware geometric attention layers
+        if text_global is not None:
+            # Use question-conditioned geometric processing
+            if self.use_gradient_checkpointing and self.training:
+                for layer in self.geo_attention_layers:
+                    enhanced_features = torch.utils.checkpoint.checkpoint(
+                        layer, enhanced_features, text_global
+                    )
+            else:
+                for layer in self.geo_attention_layers:
+                    enhanced_features = layer(enhanced_features, text_global)
+        else:
+            # Fallback: standard geometric processing (for compatibility)
+            for layer in self.geo_attention_layers:
+                enhanced_features = layer(enhanced_features, 
+                                        torch.zeros(B, D, device=features.device))
+        
+        # 4. Multi-scale processing (keep your existing approach)
+        scale_outputs = []
+        for processor in self.scale_processors:
+            scale_output = processor(enhanced_features)
+            scale_outputs.append(scale_output)
+        
+        # 5. Combine scales and final projection
+        if scale_outputs:
+            multi_scale_features = sum(scale_outputs) / len(scale_outputs)
+            enhanced_features = enhanced_features + multi_scale_features
+        
+        geo_features = self.output_proj(enhanced_features)
+        
+        return geo_features

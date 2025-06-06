@@ -33,7 +33,7 @@ from .tri_modal_fusion import TrimodalFusion
 # from .pid import PIDDecomposition
 # from .pid_fusion_encoder import PIDFusionEncoder, OptimizedPIDFusionEncoder
 # -- NEW Simplified method --
-from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors, MultiScaleProcessor
+from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors, MultiScaleProcessor, EnhancedImplicitGeometricPriors
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
 import traceback
@@ -108,9 +108,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         #MCGR
         self.fusion_encoder = MODELS.build(backbone_fusion)
         
-        # self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
-        #                                    nn.LayerNorm(self.fusion_encoder.config.hidden_size)
-        #                                    ) 
         self.text_feat_map = nn.Sequential(
             nn.Linear(self.text_encoder.config.hidden_size, D_fus),
             nn.LayerNorm(D_fus),
@@ -157,12 +154,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # --- New arguments for GGD ---
         Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
-        # Define D_fus (target fusion dimension, e.g., hidden size of fusion_encoder)
-        # D_fus = self.fusion_encoder.config.hidden_size
-        # self.project_3d = nn.Sequential(
-        #     nn.Linear(Dp, D_fus),
-        #     nn.LayerNorm(D_fus)
-        # )
         
         self.project_3d = nn.Sequential(
             nn.Linear(Dp, D_fus * 2),
@@ -370,13 +361,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # SIMPLIFIED: Use simplified geometric priors
-        self.geometric_priors = ImplicitGeometricPriors(
-            fusion_dim=D_fus,
-            hidden_dim=D_fus,           # SIMPLIFIED: Same as fusion_dim
-            num_heads=8,               # Standard attention heads  
-            num_layers=2,               # REDUCED from 4 to 2 for stability
-            max_distance=8.0,
-            num_distance_bins=32,       # REDUCED from 64 to 32
+        self.geometric_priors = EnhancedImplicitGeometricPriors(
+            fusion_dim=D_fus,  # 768
+            hidden_dim=D_fus,  # Keep same for stability
+            num_heads=8,       # Your existing value
+            num_layers=2,      # Keep your smart 2-layer limit
+            dropout=0.1,
             use_gradient_checkpointing=True
         )
         
@@ -630,10 +620,9 @@ class MultiViewVLMBase3DQA(BaseModel):
 
         points_imgfeats = torch.stack(points_imgfeats) # B, Np, D_i
         raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, M, Np, D_i
-        if raw_points_imgfeats.dim() == 4:
-            # Collapse view dimension by averaging
-            raw_points_imgfeats = raw_points_imgfeats.mean(dim=1)  # [B, Np, D_i]
+        
         # print(f"points_imgfeats shape: {points_imgfeats.shape}") # [B, Np, Di] = [12, 1024, 1024]
+        
         img_feat_valid_flags = torch.stack(img_feat_valid_flags) # B, Np
         # print(f"img_feat_valid_flags shape: {img_feat_valid_flags.shape}") # [B, Np] = [12, 1024]
         all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device) # B, n_views, 4, 4
@@ -643,17 +632,16 @@ class MultiViewVLMBase3DQA(BaseModel):
         # print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
         
         # 1. Get basic features (ensure correct dimensions)
-        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp]
+        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12]
         F_3d = self.project_3d(points_feat)  # [B, Np, D_fus]
         
         # CRITICAL FIX: Ensure 2D features are properly shaped
-        
+        if raw_points_imgfeats.dim() == 4:
+            # Collapse view dimension by averaging
+            raw_points_imgfeats = raw_points_imgfeats.mean(dim=1)  # [B, Np, D_i]
         F_2d_raw = self.project_2d_raw(raw_points_imgfeats)  # [B, Np, D_fus]
-        Z_TV = self.project_2d_guided(points_imgfeats)  # [B, Np, D_fus]
         
-        # Ensure all tensors are 3D [B, Np, D_fus]
-        if F_3d.dim() != 3 or F_2d_raw.dim() != 3 or Z_TV.dim() != 3:
-            raise ValueError(f"Expected 3D tensors, got F_3d: {F_3d.shape}, F_2d_raw: {F_2d_raw.shape}, Z_TV: {Z_TV.shape}")
+        Z_TV = self.project_2d_guided(points_imgfeats)  # [B, Np, D_fus]
         
         # Store basic features
         feat_dict['F_3d'] = F_3d
@@ -664,7 +652,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         Z_PV = self.point_view_fusion(F_3d, F_2d_raw, superpoint_ids=None)
         feat_dict['Z_PV'] = Z_PV
         
-        # 3. Create Z_PT (Point-Text fusion) - REMOVE superpoint dependency  
+        # 3. Create Z_PT (Point-Text fusion) 
         Z_PT = self.point_text_fusion(
             F_3d,
             text_dict['text_feats'],
@@ -679,12 +667,15 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['fusion_weights'] = fusion_weights
         
         # 5. Apply implicit geometric priors
-        P_xyz = feat_dict['P_xyz']  # [B, Np, 3]
-        Z_geo_aware = self.geometric_priors(Z_fused, P_xyz)
+        Z_geo_aware = self.geometric_priors(
+            features=Z_fused,                           # Your fused features [B, Np, D]
+            points_xyz=feat_dict['P_xyz'],             # 3D coordinates [B, Np, 3]
+            text_global=text_dict['text_global_token'] # Question context [B, D]
+        )
         feat_dict['Z_geo_aware'] = Z_geo_aware
         
         # 6. Multi-scale processing for robustness
-        Z_multi_scale = self.multi_scale_processor(Z_geo_aware, P_xyz)
+        Z_multi_scale = self.multi_scale_processor(Z_geo_aware, feat_dict['P_xyz'])
         feat_dict['Z_final'] = Z_multi_scale
         
 
@@ -1207,14 +1198,14 @@ class MultiViewVLMBase3DQA(BaseModel):
     
     def add_prefix_to_loss_dict_keys(self, d, prefix):
         """
-        给字典中的所有键添加指定前缀。
+        Add a specified prefix to all keys in the dictionary.
 
         Args:
-            d (dict): 需要处理的字典。
-            prefix (str): 要添加的前缀字符串。
+            d (dict): The dictionary to process.
+            prefix (str): The prefix string to add.
 
         Returns:
-            dict: 添加前缀后的新字典。
+            dict: A new dictionary with the prefix added to each key.
         """
         new_dict = {}
         for key, value in d.items():
