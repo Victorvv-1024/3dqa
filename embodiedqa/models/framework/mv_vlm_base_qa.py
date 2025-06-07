@@ -55,6 +55,19 @@ class PositionEmbeddingLearned(BaseModule):
         xyz = xyz.transpose(1, 2).contiguous()
         position_embedding = self.position_embedding_head(xyz)
         return position_embedding.transpose(1, 2).contiguous()
+    
+class SimpleProjection(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.ReLU()
+        )
+    
+    def forward(self, x):
+        return self.proj(x)    
+
 @MODELS.register_module()
 class MultiViewVLMBase3DQA(BaseModel):
     """MultiViewVLMBase3DQA.
@@ -104,38 +117,27 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
         self.use_2d = use_2d
-        D_fus = 768
-        #MCGR
-        self.fusion_encoder = MODELS.build(backbone_fusion)
+        self.D_fus = 768
         
-        self.text_feat_map = nn.Sequential(
-            nn.Linear(self.text_encoder.config.hidden_size, D_fus),
-            nn.LayerNorm(D_fus),
-            nn.SiLU(),
-            nn.Dropout(0.1),
-            nn.Linear(D_fus, D_fus),
-            nn.LayerNorm(D_fus)
-        )
         
-        # self.pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
-        self.pos_embedding = nn.Sequential(
-            nn.Linear(3, D_fus // 2),
-            nn.LayerNorm(D_fus // 2),
-            nn.SiLU(),
-            nn.Linear(D_fus // 2, D_fus),
-            nn.LayerNorm(D_fus)
-        )
         
-        # self.fusion_encoder_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
-        #                                                     nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
-        #                                                     )
+        if self.use_2d:
+            self.backbone = MODELS.build(backbone)
+            Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
+            #for TGMF
+            self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
+                                                    nn.LayerNorm(self.D_fus))
+            self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
+                                            nn.LayerNorm(self.D_fus))
+        else:
+            self.visual_feat_map = nn.Linear(self.backbone_lidar.fp_channels[-1][-1],self.D_fus)
+
+        self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
+                                           nn.LayerNorm(self.D_fus)
+                                           )
         
-        # #dense visual feature
-        # self.full_visual_feat_map = deepcopy(self.visual_feat_map)
-        # self.full_pos_embedding = PositionEmbeddingLearned(3,self.fusion_encoder.config.hidden_size)
-        # self.fusion_encoder_full_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.fusion_encoder.config.hidden_size),
-        #                                                 nn.Dropout(self.fusion_encoder.config.hidden_dropout_prob)
-        #                                                 )
+        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)
+
         
         self.text_max_length = text_max_length
         self.vision_num_queries = vision_num_queries
@@ -145,6 +147,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.target_cls_head = MODELS.build(target_cls_head)
         if situation_predict_head is not None:
             self.situation_predict_head = MODELS.build(situation_predict_head)
+            
         self.qa_head = MODELS.build(qa_head)
         
         self.train_cfg = train_cfg
@@ -152,8 +155,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.coord_type = coord_type
         self.voxel_size = voxel_size
         
-        # --- New arguments for GGD ---
+        """ --- New arguments for our framework --- """
         Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
+        # Simple Projections
+        self.project_3d = SimpleProjection(Dp, D_fus)
+        self.project_2d_raw = SimpleProjection(Di, D_fus)
+        self.project_2d_guided = SimpleProjection(Di, D_fus)
         
         self.project_3d = nn.Sequential(
             nn.Linear(Dp, D_fus * 2),
@@ -672,11 +679,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             points_xyz=feat_dict['P_xyz'],             # 3D coordinates [B, Np, 3]
             text_global=text_dict['text_global_token'] # Question context [B, D]
         )
-        feat_dict['Z_geo_aware'] = Z_geo_aware
+        feat_dict['Z_final'] = Z_geo_aware
         
-        # 6. Multi-scale processing for robustness
-        Z_multi_scale = self.multi_scale_processor(Z_geo_aware, feat_dict['P_xyz'])
-        feat_dict['Z_final'] = Z_multi_scale
+        # # 6. Multi-scale processing for robustness
+        # Z_multi_scale = self.multi_scale_processor(Z_geo_aware, feat_dict['P_xyz'])
+        # feat_dict['Z_final'] = Z_multi_scale
         
 
         # REMOVE
@@ -1219,30 +1226,6 @@ class MultiViewVLMBase3DQA(BaseModel):
                     new_dict[key] = value
         return new_dict
     
-    # def predict(self, batch_inputs_dict, batch_data_samples,**kwargs):
-        # text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-        # feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-        # full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
-        # full_point_pos = feat_dict['fp_xyz'][-1]
-        # batch_size = full_point_feats.shape[0]
-        # point_mask = None #B,proposal_num
-        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        # point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
-        # point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
-
-        # head_inputs_dict = self.forward_transformer(point_feats=point_feats,
-        #                                             point_pos=point_pos,
-        #                                             point_mask=point_mask,
-        #                                             text_dict=text_dict,
-        #                                             full_point_feats=full_point_feats,
-        #                                             full_point_pos=full_point_pos)
-        # results_list = self.qa_head.predict(**head_inputs_dict,
-        #                              batch_data_samples=batch_data_samples)
-
-        # for data_sample, pred_scores in zip(batch_data_samples,
-        #                                           results_list):
-        #     data_sample.pred_scores = pred_scores
-        # return batch_data_samples
         
     def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
         """Simplified prediction without superpoints."""
