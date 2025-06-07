@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class PIDDecomposition(nn.Module):
+class PIDDecomposer(nn.Module):
     """
     PID Decomposition Module: Mathematically rigorous implementation to decompose 
     multimodal representation into Redundancy, Uniqueness, and Synergy components.

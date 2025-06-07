@@ -509,10 +509,11 @@ def batch_point_sample_in_visible(img_meta: dict,
                 save_point_cloud_with_visibility(points[0],visible_valid.sum(dim=0)>0, valid.sum(dim=0)>0, 'visulization_output/all.ply')
         
         valid = valid & visible_valid # Mp, Np
-        point_features = point_features * valid.float().unsqueeze(1)  # BxCxN feats
+        point_features = point_features * valid.float().unsqueeze(1)  # Mp x Di x Np feats
+        raw_features = point_features.clone()
         valid_num = valid.sum(dim=0)  # Np,
         # print(f'valid_num is {valid_num}')
-        raw_features = point_features.clone() # BxCxN feats
+        
         
         # Text-guided Multi-view Fusion (TGMF) module
         if use_views_attention:
@@ -533,6 +534,7 @@ def batch_point_sample_in_visible(img_meta: dict,
             # print(f'after TGMF, point_features shape is {point_features.shape}') # [Mp, Di, Np] = [20, 1024, 1024]
 
         valid_features = point_features.sum(dim=0).t()  # Np,Di
+        raw_features = raw_features.sum(dim=0).t()  # Np,Di
         valid_each = valid
         valid = valid_num > 0
         if len(valid) != len(valid_features):

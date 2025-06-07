@@ -9,11 +9,6 @@ import numpy as np
 import time
 from copy import deepcopy
 from mmengine.model import BaseModel,BaseModule
-try:
-    from torch_scatter import scatter_mean
-except ImportError:
-    scatter_mean = None
-    print("Warning: torch_scatter not installed. Some functionality may be limited.")
 from mmengine.structures import InstanceData
 from mmcv.ops import furthest_point_sample,gather_points
 from embodiedqa.models.layers.fusion_layers.point_fusion import (
@@ -23,17 +18,13 @@ from embodiedqa.structures.bbox_3d import get_proj_mat_by_coord_type
 from embodiedqa.utils import ConfigType, OptConfigType
 from embodiedqa.utils.typing_config import (ForwardResults, InstanceList,
                                               OptSampleList, SampleList)
-from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints, estimate_normals, improved_vccs_superpoints
 import open3d as o3d
 import os
-from .vision_fusion import VisionFusion
 from .point_view_fusion import PointViewFusion
-from .point_text_fusion import PointTextFusion, DirectPointTextFusion
-from .tri_modal_fusion import TrimodalFusion
-# from .pid import PIDDecomposition
+from .point_text_fusion import PointTextFusion
 # from .pid_fusion_encoder import PIDFusionEncoder, OptimizedPIDFusionEncoder
-# -- NEW Simplified method --
-from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors, MultiScaleProcessor, EnhancedImplicitGeometricPriors
+from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors
+from .compositional_pid import CompositionalPID
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
 import traceback
@@ -119,16 +110,18 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.use_2d = use_2d
         self.D_fus = 768
         
-        
-        
         if self.use_2d:
             self.backbone = MODELS.build(backbone)
-            Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
+            
             #for TGMF
+            # This projects Z_t to G_t
             self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
                                                     nn.LayerNorm(self.D_fus))
+            # This projects U_i to G_i
             self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
                                             nn.LayerNorm(self.D_fus))
+            # for ADVP (we might need to COMMENT IT OUTß)
+            self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
         else:
             self.visual_feat_map = nn.Linear(self.backbone_lidar.fp_channels[-1][-1],self.D_fus)
 
@@ -158,105 +151,26 @@ class MultiViewVLMBase3DQA(BaseModel):
         """ --- New arguments for our framework --- """
         Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
         # Simple Projections
-        self.project_3d = SimpleProjection(Dp, D_fus)
-        self.project_2d_raw = SimpleProjection(Di, D_fus)
-        self.project_2d_guided = SimpleProjection(Di, D_fus)
-        
-        self.project_3d = nn.Sequential(
-            nn.Linear(Dp, D_fus * 2),
-            nn.LayerNorm(D_fus * 2),
-            nn.SiLU(),  # Better activation than ReLU
-            nn.Dropout(0.1),
-            nn.Linear(D_fus * 2, D_fus),
-            nn.LayerNorm(D_fus),
-            nn.SiLU(),
-            nn.Linear(D_fus, D_fus),  # Extra layer for more capacity
-            nn.LayerNorm(D_fus)
-        )
-        
-        if self.use_2d: # whether to use 2D multi-view images
-            self.backbone = MODELS.build(backbone)
-            
+        self.project_3d = SimpleProjection(Dp, self.D_fus)
+        self.project_text = SimpleProjection(self.text_encoder.config.hidden_size, self.D_fus)
+        if self.use_2d:
             Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
-            # projection for raw 2D features
-            self.project_2d_raw = nn.Sequential(
-                nn.Linear(Di, D_fus * 2),
-                nn.LayerNorm(D_fus * 2),
-                nn.SiLU(),
-                nn.Dropout(0.1),
-                nn.Linear(D_fus * 2, D_fus),
-                nn.LayerNorm(D_fus),
-                nn.SiLU(),
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus)
-            )
-            # projection for Text-Guided 2D features
-            self.project_2d_guided = nn.Sequential(
-                nn.Linear(Di, D_fus * 2),
-                nn.LayerNorm(D_fus * 2),
-                nn.SiLU(),
-                nn.Dropout(0.1),
-                nn.Linear(D_fus * 2, D_fus),
-                nn.LayerNorm(D_fus),
-                nn.SiLU(),
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus)
-            )
-            
-            # This projects Z_t to G_t
-            # self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.fusion_encoder.config.hidden_size),
-            #                                         nn.LayerNorm(self.fusion_encoder.config.hidden_size))
-            self.text_global_att_proj = nn.Sequential(
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus),
-                nn.SiLU(),
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus)
-            )
-            # This projects U_i to G_i
-            # self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.fusion_encoder.config.hidden_size),
-            #                                 nn.LayerNorm(self.fusion_encoder.config.hidden_size))
-            self.img_att_proj = nn.Sequential(
-                nn.Linear(self.backbone.out_channels[-1], D_fus),
-                nn.LayerNorm(D_fus),
-                nn.SiLU(),
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus)
-            )
-            # Original ADVP -- we are conceptually replacing it
-            self.fusion_map = VisionFusion(Dp, self.backbone.out_channels[-1], D_fus)
-            # # This visual_feat_map was likely for the *output* of fusion_map
-            # self.visual_feat_map = nn.Linear(D_fus, D_fus)
-            self.visual_feat_map = nn.Sequential(
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus),
-                nn.SiLU(),
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus)
-            )
-        else:
-            # self.visual_feat_map = nn.Linear(Dp, D_fus)
-            self.visual_feat_map = nn.Sequential(
-                nn.Linear(Dp, D_fus),
-                nn.LayerNorm(D_fus),
-                nn.SiLU(),
-                nn.Linear(D_fus, D_fus),
-                nn.LayerNorm(D_fus)
-            )
+            self.project_2d_raw = SimpleProjection(Di, self.D_fus)
+            self.project_2d_guided = SimpleProjection(Di, self.D_fus)
         
-        # DISTILLATION LOSS CONFIGURATION (Updated)
+        # DISTILLATION LOSS CONFIGURATION
+        self.distillation_loss_cfg = distillation_loss_cfg
         self.use_distillation_loss = distillation_loss_cfg is not None
+
         if self.use_distillation_loss:
-            # Check if it's the old simplified format or new format with type
-            if 'type' in distillation_loss_cfg:
-                # New format: use MODELS.build()
+            # Prefer new config with 'type' key for MODELS.build()
+            if isinstance(distillation_loss_cfg, dict) and 'type' in distillation_loss_cfg:
                 self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
                 print(f"Distillation loss enabled: {distillation_loss_cfg['type']}")
             else:
-                # Old simplified format: handle manually (backward compatibility)
-                loss_type = distillation_loss_cfg.get('loss_type', 'mse')
-                loss_weight = distillation_loss_cfg.get('loss_weight', 0.2)
-                
+                # Fallback: simple MSE loss for backward compatibility
+                loss_type = distillation_loss_cfg.get('loss_type', 'mse') if distillation_loss_cfg else 'mse'
+                loss_weight = distillation_loss_cfg.get('loss_weight', 0.2) if distillation_loss_cfg else 0.2
                 if loss_type == 'mse':
                     self.distillation_loss_calculator = nn.MSELoss()
                     self.distillation_loss_weight = loss_weight
@@ -267,187 +181,44 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.distillation_loss_calculator = None
             print("Distillation loss disabled")
         
-        # REMOVE
-        # pre-computed superpoints
-        # self.superpoint_config = superpoint_cfg if superpoint_cfg is not None else {}
-        # print("----Debugging MultiViewVLMBase3DQA----")
-        # print(f"superpoint_config: {self.superpoint_config}")
-        # self._vccs_on_the_fly = self.superpoint_config.get('enabled_on_the_fly', False)
-        # if not self._vccs_on_the_fly:
-        #     print("Using pre-computed superpoints for distillation.")
-        # else:
-        #     print("Using on-the-fly VCCS superpoint calculation for distillation.")
         
-        # -- SIMPLIFY distillation loss to only use during training if needed --
-        if distillation_loss_cfg is not None:
-            # Only use simple 2D-3D distillation without superpoints
-            self.distillation_loss_cfg = distillation_loss_cfg
-            self.use_simple_distillation = True
-        else:
-            self.use_simple_distillation = False
-        
-        # REMOVE
-        # pid decomposition module
-        # self.pid_decomposition = PIDDecomposition(
-        #     fusion_dim=self.fusion_encoder.config.hidden_size,
-        #     bottleneck_ratio=2  # Adjust as needed for your feature dimensions
-        # )
-        
-        # --- New arguments for Point-View fusion ---
-        # self.point_view_fusion = PointViewFusion(
-        #     point_dim=D_fus,  # Output dim of 3D backbone
-        #     view_dim=D_fus,            # Output dim of 2D backbone
-        #     fusion_dim=D_fus   # Common fusion dimension
-        # )
-        self.point_view_fusion = PointViewFusion(
-            point_dim=D_fus,
-            view_dim=D_fus,
-            fusion_dim=D_fus,
-            hidden_dim=1024,            # Much larger hidden dimension
-            num_heads=16,               # More attention heads
-            num_layers=4,               # Deep processing
-            dropout=0.1,
-            use_gradient_checkpointing=True
+        # Bi-Modal fusion
+        self.pv_fusion = PointViewFusion(
+            point_dim=self.D_fus,  # 3D feature dim
+            view_dim=self.D_fus,    # 2D feature dim
+            fusion_dim=self.D_fus,  # Output dim
+            hidden_dim=512          # Reasonable hidden dimension
         )
         
-        # --- New arguments for Point-Text fusion ---
-        # self.point_text_fusion = PointTextFusion(
-        #     point_dim=D_fus,  # 3D feature dim
-        #     text_dim=D_fus,      # Text feature dim
-        #     view_dim=D_fus,    # View feature dim
-        #     fusion_dim=D_fus   # Output dim
-        # )
-        # -- New use Direct Fusion -- 
-        # self.point_text_fusion = DirectPointTextFusion(
-        #     point_dim=D_fus,  # 3D feature dim
-        #     text_dim=D_fus,      # Text feature dim
-        #     fusion_dim=D_fus   # Output dim
-        # )
-        self.point_text_fusion = DirectPointTextFusion(
-            point_dim=D_fus,
-            text_dim=D_fus,
-            fusion_dim=D_fus,
-            hidden_dim=1024,            # Much larger hidden dimension
-            num_attention_heads=16,     # More attention heads
-            num_layers=6,               # Deep cross-modal processing
-            dropout=0.1,
-            use_gradient_checkpointing=True
+        self.pt_fusion = PointTextFusion(
+            point_dim=self.D_fus,  # 3D feature dim
+            text_dim=self.D_fus,  # Text feature dim
+            fusion_dim=self.D_fus,  # Output dim
+            hidden_dim=512          # Reasonable hidden dimension
         )
         
-        
-        # --- New arguments for Tri-modal fusion ---
-        self.trimodal_fusion = TrimodalFusion(
-            fusion_dim=D_fus,
-            bottleneck_ratio=1,  # Adjust as needed for your feature dimensions
-        )
-        
-        # REMOVED
-        # --- New arguments for PID fusion encoder ---
-        # self.pid_fusion_encoder = PIDFusionEncoder(
-        #     fusion_dim=D_fus,
-        #     hidden_dim=D_fus,
-        #     num_heads=8,
-        #     num_layers=3,
-        # )
-        # self.pid_fusion_encoder = OptimizedPIDFusionEncoder(
-        #     fusion_dim=D_fus,           # 768
-        #     architecture='hierarchical',  # Best balance of performance and efficiency
-        #     num_heads=8,
-        #     num_layers=3,
-        # )
-        # self.use_pid_fusion_encoder = True if self.pid_fusion_encoder else False
-        
-        # SIMPLIFIED: Use simplified adaptive fusion
+        # Tri-modal fusion
         self.adaptive_fusion = AdaptiveTrimodalFusion(
-            fusion_dim=D_fus,
-            hidden_dim=1024,            # Reasonable hidden dimension  
-            num_heads=8,               # Standard attention heads
-            num_layers=2,               # REDUCED from 4 to 2 for stability
+            fusion_dim=self.D_fus,
+            hidden_dim=self.D_fus*2,            
+            num_heads=6,               
+            num_layers=2,
             dropout=0.1,
             use_gradient_checkpointing=True
         )
+        
+        # Compositional PID
+        self.pid = CompositionalPID(self.D_fus)
         
         # SIMPLIFIED: Use simplified geometric priors
-        self.geometric_priors = EnhancedImplicitGeometricPriors(
-            fusion_dim=D_fus,  # 768
-            hidden_dim=D_fus,  # Keep same for stability
-            num_heads=8,       # Your existing value
-            num_layers=2,      # Keep your smart 2-layer limit
-            dropout=0.1,
-            use_gradient_checkpointing=True
-        )
-        
-        # SIMPLIFIED: Use simplified multi-scale processor
-        self.multi_scale_processor = MultiScaleProcessor(
-            fusion_dim=D_fus,
-            scales=[512, 1024],         # SIMPLIFIED: Only 2 scales instead of 4
-        )
-        
-        self.pooler_projection = nn.Sequential(
-            nn.Linear(D_fus * 2, D_fus),  # From concatenated [global_visual, text_global] to D_fus
-            nn.LayerNorm(D_fus),
-            nn.ReLU(),
-            nn.Linear(D_fus, D_fus),
-            nn.LayerNorm(D_fus)
-        )
-        
-        # --- New arguments for uncertainty weighting ---
-        # Initialize uncertainty weighting for multi-task learning
-        if train_cfg is not None and train_cfg.get('use_uncertainty_weighting', True):
-            # print("Initializing uncertainty weighting for multi-task learning...")
-            
-            # Define task configurations
-            uncertainty_task_configs = []
-            
-            # Always include QA classification task
-            uncertainty_task_configs.append({
-                'name': 'qa_cls_loss',
-                'type': 'classification'
-            })
-            
-            # Add target bbox head (3D localization - regression task)  
-            if target_bbox_head is not None:
-                uncertainty_task_configs.append({
-                    'name': 'ref_loc_loss',
-                    'type': 'regression'
-                })
-            
-            # Add target classification head
-            if target_cls_head is not None:
-                uncertainty_task_configs.append({
-                    'name': 'ref_cls_loss', 
-                    'type': 'classification'
-                })
-            
-            # Add situation prediction head if present
-            if situation_predict_head is not None:
-                uncertainty_task_configs.append({
-                    'name': 'situation_predict_loss',
-                    'type': 'classification'
-                })
-            
-            # Add distillation loss if enabled
-            if self.use_distillation_loss:
-                uncertainty_task_configs.append({
-                    'name': 'loss_distill',
-                    'type': 'regression'
-                })
-            
-            # Initialize the uncertainty weighting layer
-            self.uncertainty_weighting = UncertaintyWeightingLayer(
-                task_configs=uncertainty_task_configs,
-                init_log_var_range=(-1.0, 1.0),  # Initial log variance range
-                min_log_var=-10.0,               # For numerical stability
-                max_log_var=10.0                 # Prevent infinite weights
-            )
-            
-            print(f"Uncertainty weighting initialized with {len(uncertainty_task_configs)} tasks")
-            for config in uncertainty_task_configs:
-                print(f"  - {config['name']}: {config['type']}")
-        else:
-            self.uncertainty_weighting = None
-            print("Uncertainty weighting disabled")
-            
+        # self.geometric_priors = EnhancedImplicitGeometricPriors(
+        #     fusion_dim=self.D_fus,  # 768
+        #     hidden_dim=self.D_fus,  # Keep same for stability
+        #     num_heads=8,       # Your existing value
+        #     num_layers=2,      # Keep your smart 2-layer limit
+        #     dropout=0.1,
+        #     use_gradient_checkpointing=True
+        # )
         
 
     @property
@@ -503,8 +274,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         # print(f"feat_dict['fp_features'] shape: {feat_dict['fp_features'][-1].shape}") 
         # In paper, the framework is Np x Dp --> likely to be feat_dict['fp_features'][-1].transpose(1,2) --> [B, Np, Dp]
         
-        if 'fp_indices' not in feat_dict or not feat_dict['fp_indices']:
-            raise ValueError("PointNet+++ backbone must return 'fp_indices' in feat_dict.")
+        if not self.use_2d:
+            raise ValueError("Not implemented yet")
         
         feat_dict['original_stack_points'] = stack_points
         feat_dict['last_fp_indices'] = feat_dict['fp_indices'][-1] # [B, Np] = [12, 1024]
@@ -512,13 +283,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.current_fp_indices = feat_dict['last_fp_indices']
         feat_dict['P_xyz'] = feat_dict['fp_xyz'][-1] # [B, Np, 3] = [12, 1024, 3]
         
-        if not self.use_2d:
-            # Project 3D features if only using 3D
-            points_feat = feat_dict['fp_features'][-1].transpose(1, 2).contiguous() # [B, Np, Dp]
-            F_3d = self.project_3d(points_feat) # [B, Np, D_fusion]
-            feat_dict['F_3d'] = F_3d
-            # Note: F_2d_raw and F_2d_text_guided won't exist here
-            return feat_dict
         
         # Multi-view 2D Images Processing
         # print(f"batch_inputs_dict['imgs'] shape: {batch_inputs_dict['imgs'].shape}") # [B, M, C, H, W] = [12, 20, 3, 224, 224]
@@ -528,8 +292,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_samples.metainfo for data_samples in batch_data_samples
         ]
         batch_size = img.shape[0]
-        B, Np, _ = feat_dict['P_xyz'].shape
-        current_device = feat_dict['P_xyz'].device
 
         if len(img.shape) > 4:  # (B, M, C, H, W) = [12, 20, 3, 224, 224]
             img = img.reshape([-1] + list(img.shape)[2:]).contiguous() # B*M, C, H, W = [240, 3, 224, 224]
@@ -625,10 +387,9 @@ class MultiViewVLMBase3DQA(BaseModel):
             raw_points_imgfeats.append(raw_points_imgfeat) # all sample
             img_feat_valid_flags.append(img_feat_valid_flag) # last_level
 
-        points_imgfeats = torch.stack(points_imgfeats) # B, Np, D_i
-        raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, M, Np, D_i
+        points_imgfeats = torch.stack(points_imgfeats) # B, Np, Di
+        raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, Np, Di
         
-        # print(f"points_imgfeats shape: {points_imgfeats.shape}") # [B, Np, Di] = [12, 1024, 1024]
         
         img_feat_valid_flags = torch.stack(img_feat_valid_flags) # B, Np
         # print(f"img_feat_valid_flags shape: {img_feat_valid_flags.shape}") # [B, Np] = [12, 1024]
@@ -637,15 +398,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         # points_imgfeats is the sampled image features from TGMF [B, Np, Di]
         # feat_dict['fp_features'][-1] = self.fusion_map(feat_dict['fp_features'][-1].transpose(1,2),points_imgfeats).transpose(1,2) # B, C, N
         # print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
-        
+
+        """ 
+        Our code starts here 
+        """
         # 1. Get basic features (ensure correct dimensions)
-        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12]
+        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 1024]
         F_3d = self.project_3d(points_feat)  # [B, Np, D_fus]
         
-        # CRITICAL FIX: Ensure 2D features are properly shaped
-        if raw_points_imgfeats.dim() == 4:
-            # Collapse view dimension by averaging
-            raw_points_imgfeats = raw_points_imgfeats.mean(dim=1)  # [B, Np, D_i]
         F_2d_raw = self.project_2d_raw(raw_points_imgfeats)  # [B, Np, D_fus]
         
         Z_TV = self.project_2d_guided(points_imgfeats)  # [B, Np, D_fus]
@@ -668,149 +428,22 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         feat_dict['Z_PT'] = Z_PT
         
-        # 4. REPLACE PID decomposition with adaptive fusion
+        # 4. Tri-modal fusion
         Z_fused, fusion_weights = self.adaptive_fusion(Z_TV, Z_PV, Z_PT)
         feat_dict['Z_fused'] = Z_fused
         feat_dict['fusion_weights'] = fusion_weights
         
+        # 5. Compositional PID
+        pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_dict['text_feats'], text_dict['text_token_mask'])
+        feat_dict['Z_final'] = pid_output
         # 5. Apply implicit geometric priors
-        Z_geo_aware = self.geometric_priors(
-            features=Z_fused,                           # Your fused features [B, Np, D]
-            points_xyz=feat_dict['P_xyz'],             # 3D coordinates [B, Np, 3]
-            text_global=text_dict['text_global_token'] # Question context [B, D]
-        )
-        feat_dict['Z_final'] = Z_geo_aware
-        
-        # # 6. Multi-scale processing for robustness
-        # Z_multi_scale = self.multi_scale_processor(Z_geo_aware, feat_dict['P_xyz'])
-        # feat_dict['Z_final'] = Z_multi_scale
-        
-
-        # REMOVE
-        # if self.training:
-        #     # +++Superpoint Calculation Block+++
-        #     # +++Computes on ORIGINAL points, then maps to Np downsampled points+++
-        #     # Compute superpoints on-the-fly for each batch item
-        #     if self._vccs_on_the_fly:
-        #         # on-the-fly computation
-        #         superpoints_params = self.superpoint_config.get('params', {})
-        #         # predefine weights here
-        #         wc = superpoints_params.get('wc', 0.2)
-        #         ws = superpoints_params.get('ws', 0.7)
-        #         wn = superpoints_params.get('wn', 1.0)
-        #         weights = (wc, ws, wn)
-        #         batch_superpoint_ids_for_Np_points = [] # Store final IDs for the Np points
-                
-        #         for b in range(B):
-        #             # --- Inputs for VCCS from ORIGINAL points ---
-        #             original_points_b = feat_dict['original_stack_points'][b] # [N_raw, 6] = [40000, 6]
-        #             P_xyz_original_b_np = original_points_b[:, :3].cpu().numpy() # [N_raw, 3]
-                    
-        #             if P_xyz_original_b_np.shape[0] == 0:
-        #                 # Handle case where original cloud is empty
-        #                 batch_superpoint_ids_for_Np_points.append(
-        #                     torch.full((Np,), -1, dtype=torch.long, device=current_device) # Assign invalid ID
-        #                 )
-        #                 continue
-                    
-        #             P_colors_original_b_np = None
-        #             if self.superpoint_config.get('use_colors', False) and original_points_b.shape[1] >= 6:
-        #                 P_colors_original_b = original_points_b[:, 3:6].float()
-        #                 if P_colors_original_b.max() > 1.0: P_colors_original_b /= 255.0
-        #                 P_colors_original_b_np = P_colors_original_b.cpu().numpy()
-                    
-        #             # --- Call VCCS on ORIGINAL points ---
-        #             # estimate normals
-        #             points_normals = estimate_normals(P_xyz_original_b_np)
-        #             superpoint_ids_on_original_np = compute_vccs_superpoints(
-        #                 points_xyz=torch.from_numpy(P_xyz_original_b_np).to(current_device),
-        #                 points_colors=torch.from_numpy(P_colors_original_b_np).to(current_device) if P_colors_original_b_np is not None else None,
-        #                 points_normals=torch.from_numpy(points_normals).to(current_device),  # Use estimated normals
-        #                 voxel_size=superpoints_params.get('voxel_size', 0.02),
-        #                 seed_spacing=superpoints_params.get('seed_spacing', 0.5),
-        #                 weights=weights,
-        #                 neighbor_voxel_search=superpoints_params.get('neighbor_voxel_search', True),
-        #                 neighbor_radius_search=superpoints_params.get('neighbor_radius_search', 0.05),
-        #                 max_expand_dist=superpoints_params.get('max_expand_dist', 1.0),
-        #             )
-                    
-                    
-        #             superpoint_ids_on_original_torch = superpoint_ids_on_original_np.long().to(current_device)
-        #             # print(f"superpoint_ids_on_original_torch shape: {superpoint_ids_on_original_torch.shape}") # [N_raw]
-        #             # --- Map Superpoint IDs to Np downsampled points ---
-        #             fp_indices_b = feat_dict['last_fp_indices'][b] # Indices [Np] into original N_raw points
-        #             # print(f"fp_indices_b shape: {fp_indices_b.shape}") # [Np]
-        #             # Handle potential out-of-bounds if indices somehow exceed original point count
-        #             fp_indices_b = torch.clamp(fp_indices_b, 0, superpoint_ids_on_original_torch.shape[0] - 1)
-        #             # print(f"fp_indices_b is: {fp_indices_b}") 
-        #             superpoints_for_Np = superpoint_ids_on_original_torch[fp_indices_b] # Shape [Np]
-        #             # print(f"superpoints_for_Np shape: {superpoints_for_Np.shape}") # [Np]
-        #             batch_superpoint_ids_for_Np_points.append(superpoints_for_Np)
-                
-        #         # --- Store the mapped superpoint IDs ---
-        #         # Check if Np is consistent across batch
-        #         if all(sp.shape[0] == Np for sp in batch_superpoint_ids_for_Np_points):
-        #             feat_dict['superpoint_ids_batched'] = torch.stack(batch_superpoint_ids_for_Np_points, dim=0)
-        #         else:
-        #             raise ValueError("Number of points Np varied across batch.")
-                
-        #     # If not on-the-fly, use pre-computed superpoints
-        #     else:
-        #         # Use pre-computed superpoints (silent loading)
-        #         feat_dict['superpoint_ids_batched'] = self._extract_precomputed_superpoints(
-        #             batch_data_samples, B, Np, current_device
-        #         )
-        # else:
-        #     # Inference mode: Skip superpoint processing entirely
-        #     feat_dict['superpoint_ids_batched'] = None
-        #     if hasattr(self, 'debug_inference') and self.debug_inference:
-        #         print("Inference mode: Skipping superpoint processing for faster inference")       
-        # # --- creating the Z_PV ---
-        # Z_PV = self.point_view_fusion(
-        #     F_3d, 
-        #     F_2d_raw, 
-        #     superpoint_ids=feat_dict.get('superpoint_ids_batched') if self.training else None,
+        # Z_geo_aware = self.geometric_priors(
+        #     features=Z_fused,                           # Your fused features [B, Np, D]
+        #     points_xyz=feat_dict['P_xyz'],             # 3D coordinates [B, Np, 3]
+        #     text_global=text_dict['text_global_token'] # Question context [B, D]
         # )
-        # feat_dict['Z_PV'] = Z_PV # [B, Np, D_fusion]
+        # feat_dict['Z_final'] = Z_geo_aware
         
-        # create the Z_PT
-        # Z_PT = self.point_text_fusion(
-        #     F_3d,
-        #     text_dict['text_feats'],
-        #     Z_PV,
-        #     Z_TV,
-        #     superpoint_ids=feat_dict.get('superpoint_ids_batched'),
-        #     text_mask=text_dict['text_token_mask']
-        # )
-        
-        # -- Direct Z_PT Fusion --  
-        # Z_PT = self.point_text_fusion(
-        #     F_3d,  # point_features
-        #     text_dict['text_feats'],  # text_features
-        #     superpoint_ids=feat_dict.get('superpoint_ids_batched') if self.training else None,
-        #     text_mask=text_dict['text_token_mask']
-        # )
-
-        # feat_dict['Z_PT'] = Z_PT # [B, Np, D_fusion]
-        
-        # Z_TPV, fusion_weights = self.trimodal_fusion(
-        #     feat_dict['Z_TV'],
-        #     feat_dict['Z_PV'],
-        #     feat_dict['Z_PT']
-        # )
-        
-        # feat_dict['Z_TPV'] = Z_TPV
-        # feat_dict['fusion_weights'] = fusion_weights
-        
-        # pid_output = self.pid_decomposition(
-        #     Z_TPV, 
-        #     feat_dict['Z_TV'],
-        #     feat_dict['Z_PV'],
-        #     feat_dict['Z_PT']
-        # )
-        
-        # feat_dict['pid_components'] = pid_output['components']
-        # feat_dict['pid_weights'] = pid_output['weights']
         
         return feat_dict
     
@@ -904,102 +537,6 @@ class MultiViewVLMBase3DQA(BaseModel):
     #     points = batch_inputs_dict['points']
     #     batch_size = len(points)
     #     losses = {}
-        
-    #     # geometry-guided distillation loss
-    #     if (self.training and self.use_distillation_loss and 
-    #         self.distillation_loss_calculator is not None):
-    #         superpoint_ids_batched = feat_dict.get('superpoint_ids_batched')
-        
-    #         # Only compute if superpoints are available (training mode)
-    #         if (superpoint_ids_batched is not None and 
-    #             not torch.all(superpoint_ids_batched == -1)):
-                
-    #             F_3d_batched = feat_dict.get('F_3d')
-    #             F_2d_raw_batched = feat_dict.get('F_2d_raw')
-                
-    #             # Handle multi-view features
-    #             if len(F_2d_raw_batched.shape) == 4:
-    #                 B, M, Np, D_fus = F_2d_raw_batched.shape
-    #                 F_2d_raw_batched = F_2d_raw_batched.mean(dim=1)
-                    
-    #             assert F_3d_batched.shape == F_2d_raw_batched.shape
-                
-    #             B, Np, D_fus = F_3d_batched.shape
-    #             F_3d_flat = F_3d_batched.reshape(-1, D_fus)
-    #             F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
-    #             superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
-    #             batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1)
-                
-    #             loss_distill = self.distillation_loss_calculator(
-    #                 F3D=F_3d_flat,
-    #                 Fraw2D=F_2d_raw_flat,
-    #                 superpoint_ids=superpoint_ids_flat,
-    #                 batch_idx=batch_idx_flat
-    #             )
-    #             losses['loss_distill'] = loss_distill
-    #         else:
-    #             # No valid superpoints - skip distillation loss
-    #             if hasattr(self, 'debug_training') and self.debug_training:
-    #                 print("Training: No valid superpoints found, skipping distillation loss")
-                    
-    #     if self.use_distillation_loss and self.distillation_loss_calculator is not None:
-    #         F_3d_batched = feat_dict.get('F_3d') #  [B, Np, D_fus]
-    #         F_2d_raw_batched = feat_dict.get('F_2d_raw')  # [B, M, Np, D_fus]
-    #         # Handle multi-view features by averaging across views
-    #         if len(F_2d_raw_batched.shape) == 4:
-    #             # Extract dimensions
-    #             B, M, Np, D_fus = F_2d_raw_batched.shape
-                
-    #             # Since invisible points have already been zeroed out in batch_point_sample_in_visible,
-    #             # simple averaging effectively gives us a weighted average over only visible views
-    #             F_2d_raw_batched = F_2d_raw_batched.mean(dim=1)  # [B, Np, D_fus]
-                
-    #         assert F_3d_batched.shape == F_2d_raw_batched.shape, f"F_3d and F_2d_raw must have the same shape, but got {F_3d_batched.shape} and {F_2d_raw_batched.shape}"
-    #         superpoint_ids_batched = feat_dict.get('superpoint_ids_batched', None) # Expected [B, Np]
-            
-    #         # ADD THIS CHECK:
-    #         if (F_3d_batched is not None and F_2d_raw_batched is not None and 
-    #             superpoint_ids_batched is not None and 
-    #             not torch.all(superpoint_ids_batched == -1)):
-                
-    #             B, Np, D_fus = F_3d_batched.shape
-    #             F_3d_flat = F_3d_batched.reshape(-1, D_fus)
-    #             # print(f"F_3d_flat shape: {F_3d_flat.shape}") # [B*Np, D_fus]
-    #             F_2d_raw_flat = F_2d_raw_batched.reshape(-1, D_fus)
-    #             # print(f"F_2d_raw_flat shape: {F_2d_raw_flat.shape}") # [B*Np, D_fus]
-    #             superpoint_ids_flat = superpoint_ids_batched.reshape(-1) # [B*Np]
-    #             # print(f"superpoint_ids_flat shape: {superpoint_ids_flat.shape}")
-                
-    #             # Create batch_idx for scatter_mean
-    #             batch_idx_flat = torch.arange(B, device=F_3d_batched.device).unsqueeze(1).expand(-1, Np).reshape(-1) # [B*Np]
-    #             # Call the instantiated loss module with flattened inputs
-    #             loss_distill = self.distillation_loss_calculator(
-    #                 F3D=F_3d_flat,
-    #                 Fraw2D=F_2d_raw_flat,
-    #                 superpoint_ids=superpoint_ids_flat,
-    #                 batch_idx=batch_idx_flat
-    #             )
-    #             losses['loss_distill'] = loss_distill
-    #         else:
-    #             # raise ValueError("Distillation loss inputs are not available.")
-    #             pass  # Skip distillation loss when no valid superpoints found
-            
-    #     """Original MCGR"""
-    #     # full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
-    #     # full_point_pos = feat_dict['fp_xyz'][-1]
-    #     # point_mask = None #B,proposal_num
-
-    #     # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-    #     # point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
-    #     # point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
-
-    #     # head_inputs_dict = self.forward_transformer(point_feats=point_feats,
-    #     #                                             point_pos=point_pos,
-    #     #                                             point_mask=point_mask,
-    #     #                                             text_dict=text_dict,
-    #     #                                             full_point_feats=full_point_feats,
-    #     #                                             full_point_pos=full_point_pos)
-        
     #     # TODO: We need to think about how to use the features we created from PID decomposition
     #     # head_inputs_dict = self._forward_pid_fusion(feat_dict, text_dict)
     #     # Add masks from original inputs
@@ -1093,7 +630,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
-        print('feats extracted successfully')
         
         points = batch_inputs_dict['points']
         batch_size = len(points)
@@ -1497,332 +1033,5 @@ class MultiViewVLMBase3DQA(BaseModel):
         
     #     return head_inputs_dict
 
-    # def _extract_precomputed_superpoints(self, batch_data_samples, batch_size, num_points, device):
-    #     """Extract precomputed superpoints (training-only)."""
-        
-    #     # Only called during training mode
-    #     if not self.training:
-    #         return None
-            
-    #     batch_superpoint_ids = []
-        
-    #     for b in range(batch_size):
-    #         data_sample = batch_data_samples[b]
-            
-    #         if hasattr(data_sample, 'superpoint_3d') and data_sample.superpoint_3d is not None:
-    #             original_superpoints = data_sample.superpoint_3d.long().to(device)
-                
-    #             # Map to downsampled points if we have FP indices
-    #             if hasattr(self, 'current_fp_indices') and self.current_fp_indices is not None:
-    #                 fp_indices_b = self.current_fp_indices[b]
-    #                 fp_indices_b = torch.clamp(fp_indices_b, 0, original_superpoints.shape[0] - 1)
-    #                 mapped_superpoints = original_superpoints[fp_indices_b]
-    #                 batch_superpoint_ids.append(mapped_superpoints)
-    #             else:
-    #                 # Fallback: truncate or pad
-    #                 if original_superpoints.shape[0] >= num_points:
-    #                     batch_superpoint_ids.append(original_superpoints[:num_points])
-    #                 else:
-    #                     padded = torch.full((num_points,), -1, dtype=torch.long, device=device)
-    #                     padded[:original_superpoints.shape[0]] = original_superpoints
-    #                     batch_superpoint_ids.append(padded)
-    #         else:
-    #             raise ValueError(f"Warning: No superpoints found for training batch {b}")
-        
-    #     return torch.stack(batch_superpoint_ids, dim=0)
-
-    # def _validate_precomputed_superpoints(self, superpoint_ids_batched: torch.Tensor) -> dict:
-    #     """
-    #     Validate and provide statistics about the loaded pre-computed superpoints.
-        
-    #     Args:
-    #         superpoint_ids_batched: Tensor of shape [B, Np] with superpoint IDs
-            
-    #     Returns:
-    #         Dictionary with validation statistics
-    #     """
-    #     B, Np = superpoint_ids_batched.shape
-    #     stats = {}
-        
-    #     for b in range(B):
-    #         sp_ids = superpoint_ids_batched[b]
-    #         valid_mask = sp_ids >= 0
-            
-    #         if valid_mask.sum() > 0:
-    #             unique_ids = torch.unique(sp_ids[valid_mask])
-    #             stats[f'batch_{b}'] = {
-    #                 'valid_points': valid_mask.sum().item(),
-    #                 'total_points': Np,
-    #                 'num_superpoints': len(unique_ids),
-    #                 'coverage': valid_mask.sum().item() / Np
-    #             }
-    #         else:
-    #             stats[f'batch_{b}'] = {
-    #                 'valid_points': 0,
-    #                 'total_points': Np,
-    #                 'num_superpoints': 0,
-    #                 'coverage': 0.0
-    #             }
-        
-    #     # Overall statistics
-    #     total_valid = sum(stats[f'batch_{b}']['valid_points'] for b in range(B))
-    #     total_points = B * Np
-    #     overall_coverage = total_valid / total_points if total_points > 0 else 0.0
-        
-    #     stats['overall'] = {
-    #         'total_valid_points': total_valid,
-    #         'total_points': total_points,
-    #         'overall_coverage': overall_coverage,
-    #         'batch_size': B,
-    #         'points_per_sample': Np
-    #     }
-        
-    #     return stats
-    
-    # --- For debugging purposes ---
-    # ... existing code ...
-    # @torch.no_grad()
-    # def debug_visualize_superpoints(self, feat_dict, batch_idx=0, output_dir="superpoint_debug"):
-    #     """
-    #     Computes and visualizes superpoints using both the original and improved VCCS methods.
-    #     Also visualizes the original scene for comparison.
-        
-    #     Args:
-    #         feat_dict: Dictionary containing feature information
-    #         batch_idx: Index in the batch to process
-    #         output_dir: Directory for saving visualization outputs
-    #     """
-    #     # Debug function - no output
-    #     pass  # Superpoint visualization debug function
-
-    #     # --- Save Original RGB Images if Available ---
-    #     try:
-    #         # Try to get the original images from batch_inputs_dict
-    #         if hasattr(self, 'batch_inputs_dict') and 'imgs' in self.batch_inputs_dict:
-    #             imgs = self.batch_inputs_dict['imgs']
-    #             if len(imgs.shape) > 4:  # [B, M, C, H, W]
-    #                 # Multi-view case
-    #                 num_views = min(5, imgs.shape[1])  # Save up to 5 views to avoid too many files
-    #                 for view_idx in range(num_views):
-    #                     img = imgs[batch_idx, view_idx].cpu().permute(1, 2, 0).numpy()
-    #                     # Convert to uint8 if float
-    #                     if img.dtype != np.uint8:
-    #                         img = (img * 255).astype(np.uint8)
-    #                     output_img_path = os.path.join(output_dir, f"original_rgb_view{view_idx}_batch{batch_idx}.png")
-    #                     import cv2
-    #                     cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-    #                     print(f"Saved original RGB image (view {view_idx}) to: {output_img_path}")
-    #             else:  # [B, C, H, W]
-    #                 # Single view case
-    #                 img = imgs[batch_idx].cpu().permute(1, 2, 0).numpy()
-    #                 if img.dtype != np.uint8:
-    #                     img = (img * 255).astype(np.uint8)
-    #                 output_img_path = os.path.join(output_dir, f"original_rgb_batch{batch_idx}.png")
-    #                 import cv2
-    #                 cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-    #                 print(f"Saved original RGB image to: {output_img_path}")
-    #     except Exception as e:
-    #         raise ValueError(f"Could not save original RGB images: {e}")
-
-    #     # --- Get Original Input Data ---
-    #     original_stack_points = feat_dict.get('original_stack_points', None)
-    #     if original_stack_points is None:
-    #         raise ValueError("Error: 'original_stack_points' not found in feat_dict.")
-    #         return
-
-    #     # Get points for the specified batch
-    #     original_points_sample = original_stack_points[batch_idx].detach()
-    #     points_xyz_original = original_points_sample[:, :3].cpu()
-    #     num_original_points = points_xyz_original.shape[0]
-        
-    #     # print(f"Processing original point cloud with {num_original_points} points.")
-
-    #     # --- Get Original Colors ---
-    #     if original_points_sample.shape[1] >= 6:
-    #         point_colors_original = original_points_sample[:, 3:6].float()
-    #         if point_colors_original.max() > 1.0:
-    #             # print("Normalizing original colors (assuming range 0-255).")
-    #             point_colors_original = point_colors_original / 255.0
-    #         point_colors_original = point_colors_original.cpu()
-    #     else:
-    #         raise ValueError("Warning: Using random colors for VCCS calculation.")
-    #         point_colors_original = torch.rand_like(points_xyz_original).cpu()
-
-    #     # --- Save Original Point Cloud with RGB Colors ---
-    #     pcd = o3d.geometry.PointCloud()
-    #     pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-    #     pcd.colors = o3d.utility.Vector3dVector(point_colors_original.numpy())
-        
-    #     output_path = os.path.join(output_dir, f"original_rgb_point_cloud_batch{batch_idx}.ply")
-    #     o3d.io.write_point_cloud(output_path, pcd)
-    #     # print(f"Saved original RGB point cloud to: {output_path}")
-
-    #     # --- Estimate Normals ---
-    #     # print("Estimating normals...")
-    #     t0 = time.time()
-    #     points_normals_original = estimate_normals(points_xyz_original)
-    #     # print(f"Normals estimated. ({time.time() - t0:.2f}s)")
-
-    #     # --- Common VCCS Parameters ---
-    #     vccs_voxel_size = 0.02
-    #     vccs_seed_spacing = 0.8 # 0.5 for original, 0.75 for improved
-    #     vccs_search_radius = 0.5
-    #     vccs_k_neighbors = 27
-    #     vccs_weights = (0.2, 0.7, 1.0)  # wc, ws, wn default weights (0.2, 0.4, 1.0)
-    #     vccs_max_expand_dist = 1.25
-    #     vccs_device = torch.device('cpu')
-        
-    #     # --- Generate Superpoints with Original Method ---
-    #     # print("\n=== Running Original VCCS Implementation ===")
-    #     t0 = time.time()
-    #     # Import the function directly from the module
-    #     from embodiedqa.utils.superpoint_segmentation import compute_vccs_superpoints
-        
-    #     original_superpoint_ids = compute_vccs_superpoints(
-    #         points_xyz_original.to(vccs_device),
-    #         point_colors_original.to(vccs_device),
-    #         points_normals_original.to(vccs_device),
-    #         voxel_size=vccs_voxel_size,
-    #         seed_spacing=vccs_seed_spacing,
-    #         # search_radius=vccs_search_radius,
-    #         # k_neighbors=vccs_k_neighbors,
-    #         max_expand_dist=vccs_max_expand_dist,
-    #         weights=vccs_weights,
-    #         device=vccs_device
-    #     ).cpu()
-        
-    #     # print(f"Original VCCS completed in {time.time() - t0:.2f}s")
-        
-    #     # --- Analyze Original Superpoints ---
-    #     if original_superpoint_ids is not None and (original_superpoint_ids != -1).any():
-    #         valid_mask = (original_superpoint_ids != -1)
-    #         unique_ids, counts = torch.unique(original_superpoint_ids[valid_mask], return_counts=True)
-    #         num_superpoints = len(unique_ids)
-    #         total_points_assigned = valid_mask.sum().item()
-            
-    #         # print(f"Original VCCS Statistics:")
-    #         # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
-    #         # print(f"  Number of superpoints: {num_superpoints}")
-            
-    #         if num_superpoints > 0:
-    #             # print(f"  Min size: {counts.min().item()}")
-    #             # print(f"  Max size: {counts.max().item()}")
-    #             # print(f"  Mean size: {counts.float().mean().item():.2f}")
-                
-    #             # Visualize original superpoints
-    #             color_map = torch.rand(num_superpoints, 3)
-    #             id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
-                
-    #             point_colors_viz = torch.zeros_like(points_xyz_original)
-                
-    #             for i in range(num_original_points):
-    #                 sp_id = original_superpoint_ids[i].item()
-    #                 if sp_id != -1:
-    #                     color_idx = id_to_map_idx.get(sp_id, 0)
-    #                     point_colors_viz[i] = color_map[color_idx]
-                
-    #             # Save colored point cloud
-    #             pcd = o3d.geometry.PointCloud()
-    #             pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-    #             pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
-                
-    #             output_path = os.path.join(output_dir, f"original_vccs_batch{batch_idx}.ply")
-    #             o3d.io.write_point_cloud(output_path, pcd)
-    #             # print(f"Saved visualization to: {output_path}")
-        
-    #     # --- Generate Superpoints with Improved Method ---
-    #     # print("\n=== Running Improved VCCS Implementation ===")
-    #     t0 = time.time()
-    #     # Import the improved function
-    #     from embodiedqa.utils.superpoint_segmentation import improved_vccs_superpoints
-        
-    #     improved_superpoint_ids = improved_vccs_superpoints(
-    #         points_xyz_original.to(vccs_device),
-    #         point_colors_original.to(vccs_device),
-    #         points_normals_original.to(vccs_device),
-    #         voxel_size=vccs_voxel_size,
-    #         seed_spacing=vccs_seed_spacing,
-    #         search_radius=vccs_search_radius,
-    #         k_neighbors=vccs_k_neighbors,
-    #         weights=vccs_weights,
-    #         device=vccs_device
-    #     ).cpu()
-        
-    #     # print(f"Improved VCCS completed in {time.time() - t0:.2f}s")
-        
-    #     # --- Analyze Improved Superpoints ---
-    #     if improved_superpoint_ids is not None and (improved_superpoint_ids != -1).any():
-    #         valid_mask = (improved_superpoint_ids != -1)
-    #         unique_ids, counts = torch.unique(improved_superpoint_ids[valid_mask], return_counts=True)
-    #         num_superpoints = len(unique_ids)
-    #         total_points_assigned = valid_mask.sum().item()
-            
-    #         # print(f"Improved VCCS Statistics:")
-    #         # print(f"  Points assigned to superpoints: {total_points_assigned}/{num_original_points}")
-    #         # print(f"  Number of superpoints: {num_superpoints}")
-            
-    #         if num_superpoints > 0:
-    #             # print(f"  Min size: {counts.min().item()}")
-    #             # print(f"  Max size: {counts.max().item()}")
-    #             # print(f"  Mean size: {counts.float().mean().item():.2f}")
-                
-    #             # Visualize improved superpoints
-    #             color_map = torch.rand(num_superpoints, 3)
-    #             id_to_map_idx = {uid.item(): idx for idx, uid in enumerate(unique_ids)}
-                
-    #             point_colors_viz = torch.zeros_like(points_xyz_original)
-                
-    #             for i in range(num_original_points):
-    #                 sp_id = improved_superpoint_ids[i].item()
-    #                 if sp_id != -1:
-    #                     color_idx = id_to_map_idx.get(sp_id, 0)
-    #                     point_colors_viz[i] = color_map[color_idx]
-                
-    #             # Save colored point cloud
-    #             pcd = o3d.geometry.PointCloud()
-    #             pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-    #             pcd.colors = o3d.utility.Vector3dVector(point_colors_viz.numpy())
-                
-    #             output_path = os.path.join(output_dir, f"improved_vccs_batch{batch_idx}.ply")
-    #             o3d.io.write_point_cloud(output_path, pcd)
-    #             # print(f"Saved visualization to: {output_path}")
-        
-    #     # --- Create Difference Visualization ---
-    #     # if original_superpoint_ids is not None and improved_superpoint_ids is not None:
-    #     #     print("\n=== Creating Difference Visualization ===")
-            
-    #     #     # Red: Only in original, Green: Only in improved, Blue: In both
-    #     #     diff_colors = torch.zeros_like(points_xyz_original)
-            
-    #     #     original_valid = (original_superpoint_ids != -1)
-    #     #     improved_valid = (improved_superpoint_ids != -1)
-            
-    #     #     # Both assigned (blue)
-    #     #     both_mask = original_valid & improved_valid
-    #     #     diff_colors[both_mask] = torch.tensor([0.0, 0.0, 1.0])
-            
-    #     #     # Only original (red)
-    #     #     only_original = original_valid & ~improved_valid
-    #     #     diff_colors[only_original] = torch.tensor([1.0, 0.0, 0.0])
-            
-    #     #     # Only improved (green)
-    #     #     only_improved = ~original_valid & improved_valid
-    #     #     diff_colors[only_improved] = torch.tensor([0.0, 1.0, 0.0])
-            
-    #     #     # Save comparison
-    #     #     pcd = o3d.geometry.PointCloud()
-    #     #     pcd.points = o3d.utility.Vector3dVector(points_xyz_original.numpy())
-    #     #     pcd.colors = o3d.utility.Vector3dVector(diff_colors.numpy())
-            
-    #     #     output_path = os.path.join(output_dir, f"vccs_comparison_batch{batch_idx}.ply")
-    #     #     o3d.io.write_point_cloud(output_path, pcd)
-    #     #     print(f"Saved comparison visualization to: {output_path}")
-        
-    #     # Debug visualization complete - no output
-    #     pass
-        
-    #     # Exit for debugging purposes
-    #     import sys
-    #     sys.exit("Debug complete - terminating execution")
-        
+   
     
