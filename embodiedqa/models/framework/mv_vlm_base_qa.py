@@ -46,18 +46,6 @@ class PositionEmbeddingLearned(BaseModule):
         xyz = xyz.transpose(1, 2).contiguous()
         position_embedding = self.position_embedding_head(xyz)
         return position_embedding.transpose(1, 2).contiguous()
-    
-class SimpleProjection(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.LayerNorm(out_dim),
-            nn.ReLU()
-        )
-    
-    def forward(self, x):
-        return self.proj(x)    
 
 @MODELS.register_module()
 class MultiViewVLMBase3DQA(BaseModel):
@@ -108,7 +96,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
         self.use_2d = use_2d
-        self.D_fus = 1024 # Fusion dimension, can be adjusted 
+        self.D_fus = 768 # Fusion dimension, can be adjusted 
         
         if self.use_2d:
             Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
@@ -197,8 +185,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # PID Guided Attention
         self.pid = PIDGuidedAttention(self.D_fus)
-        # Compositional PID
-        # self.pid = CompositionalPID(self.D_fus)
         
         # Geometric Encoding
         self.geo_encoding = GeometricEncoding(self.D_fus)
@@ -420,15 +406,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 5. Compositional PID
         pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_global_features_for_att)
         feat_dict['Z_final'] = pid_output
-        # pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_dict['text_feats'], text_dict['text_token_mask'])
-        # feat_dict['Z_final'] = pid_output
-        # 5. Apply implicit geometric priors
-        # Z_geo_aware = self.geometric_priors(
-        #     features=Z_fused,                           # Your fused features [B, Np, D]
-        #     points_xyz=feat_dict['P_xyz'],             # 3D coordinates [B, Np, 3]
-        #     text_global=text_dict['text_global_token'] # Question context [B, D]
-        # )
-        # feat_dict['Z_final'] = Z_geo_aware
+
         
         
         return feat_dict

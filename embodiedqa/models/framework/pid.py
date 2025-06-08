@@ -1,5 +1,3 @@
-# File: embodiedqa/models/framework/pid.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,13 +5,19 @@ import torch.nn.functional as F
 
 class PIDGuidedAttention(nn.Module):
     """
-    Use PID theory to guide attention mechanisms without explicit decomposition.
-    This module identifies PID-inspired patterns in the fused features and
-    applies question-guided attention to emphasize relevant information.
+    Enhanced PID-guided attention with deeper routing and attention generation.
+    Uses PID theory to guide attention mechanisms without explicit decomposition.
     """
     
-    def __init__(self, fusion_dim=768, hidden_dim=256):
+    def __init__(self, fusion_dim=768, hidden_dim=384):
         super().__init__()
+        
+        # Store dimensions
+        self.fusion_dim = fusion_dim
+        self.hidden_dim = hidden_dim
+        
+        # Validate dimensions
+        assert hidden_dim % 4 == 0, f"hidden_dim ({hidden_dim}) must be divisible by 4"
         
         # Pattern detection networks for each PID component
         self.pattern_detectors = nn.ModuleDict({
@@ -34,34 +38,61 @@ class PIDGuidedAttention(nn.Module):
             'synergy_tpv': self._make_pattern_detector(fusion_dim, hidden_dim)
         })
         
-        # Question-guided routing network
+        # Enhanced question-guided routing network
         self.question_analyzer = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
         )
         
-        # Component importance predictor
+        # Enhanced component importance predictor (your improved version)
         self.component_router = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(64, 8),  # 8 PID components
+            nn.LayerNorm(hidden_dim // 2),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim // 4),
+            nn.Dropout(0.1),
+            # Output 8 routing weights for each PID component
+            nn.Linear(hidden_dim // 4, 8),  # 8 PID components
             nn.Softmax(dim=-1)
         )
         
-        # Attention weight generators for each component
+        # Enhanced attention weight generators for each component
         self.attention_generators = nn.ModuleDict({
             name: nn.Sequential(
-                nn.Linear(hidden_dim, 1),
+                # First compression layer
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.LayerNorm(hidden_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                
+                # Second compression layer  
+                nn.Linear(hidden_dim // 2, hidden_dim // 4),
+                nn.LayerNorm(hidden_dim // 4),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                
+                # Final attention weight generation
+                nn.Linear(hidden_dim // 4, 1),
                 nn.Sigmoid()
             ) for name in self.pattern_detectors.keys()
         })
         
-        # Feature modulation and aggregation
+        # Enhanced feature modulation and aggregation
         self.feature_modulator = nn.Sequential(
-            nn.Linear(fusion_dim * 8, fusion_dim * 2),
+            nn.Linear(fusion_dim * 8, fusion_dim * 4),
+            nn.LayerNorm(fusion_dim * 4),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(fusion_dim * 4, fusion_dim * 2),
             nn.LayerNorm(fusion_dim * 2),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -72,13 +103,30 @@ class PIDGuidedAttention(nn.Module):
         # Output projection with residual
         self.output_projection = nn.Linear(fusion_dim, fusion_dim)
         
+        # Initialize weights
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        """Initialize weights using Xavier/Kaiming initialization."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+        
     def _make_pattern_detector(self, input_dim, hidden_dim):
         """Create a pattern detection network."""
         return nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
         )
     
     def detect_redundancy(self, Z_TV, Z_PV, Z_PT):
@@ -115,7 +163,7 @@ class PIDGuidedAttention(nn.Module):
     
     def forward(self, Z_TV, Z_PV, Z_PT, Z_fused, text_global):
         """
-        Apply PID-guided attention to enhance features based on question.
+        Apply enhanced PID-guided attention to enhance features based on question.
         
         Args:
             Z_TV: Text-View features [B, N, D]
@@ -129,7 +177,7 @@ class PIDGuidedAttention(nn.Module):
         """
         B, N, D = Z_fused.shape
         
-        # Step 1: Analyze question to understand information needs
+        # Step 1: Enhanced question analysis
         question_context = self.question_analyzer(text_global)  # [B, hidden_dim]
         routing_weights = self.component_router(question_context)  # [B, 8]
         
@@ -150,12 +198,12 @@ class PIDGuidedAttention(nn.Module):
             **synergy_patterns
         }
         
-        # Step 3: Generate attention weights for each component
+        # Step 3: Generate enhanced attention weights for each component
         attention_weights = {}
         for name, pattern in all_patterns.items():
             attention_weights[name] = self.attention_generators[name](pattern)
         
-        # Step 4: Apply question-guided attention
+        # Step 4: Apply question-guided attention with routing
         modulated_features = []
         component_names = ['redundancy', 'unique_text', 'unique_point', 'unique_view',
                           'synergy_tp', 'synergy_tv', 'synergy_pv', 'synergy_tpv']
@@ -167,14 +215,37 @@ class PIDGuidedAttention(nn.Module):
             # Get attention weight
             att_weight = attention_weights[name]  # [B, N, 1]
             
-            # Apply both weights
+            # Apply both weights with enhanced combination
             component_feature = Z_fused * att_weight * route_weight
             modulated_features.append(component_feature)
         
-        # Step 5: Aggregate modulated features
+        # Step 5: Enhanced feature aggregation
         concatenated = torch.cat(modulated_features, dim=-1)  # [B, N, 8*D]
         aggregated = self.feature_modulator(concatenated)  # [B, N, D]
         
         # Step 6: Output with residual connection
         output = self.output_projection(aggregated)
         return output + Z_fused  # Residual connection preserves information
+    
+    def get_routing_statistics(self, text_global):
+        """
+        Utility function to analyze routing patterns for interpretability.
+        
+        Args:
+            text_global: Global question representation [B, D]
+            
+        Returns:
+            Dictionary with routing weights and component importance
+        """
+        question_context = self.question_analyzer(text_global)
+        routing_weights = self.component_router(question_context)
+        
+        component_names = ['redundancy', 'unique_text', 'unique_point', 'unique_view',
+                          'synergy_tp', 'synergy_tv', 'synergy_pv', 'synergy_tpv']
+        
+        return {
+            'routing_weights': routing_weights,
+            'component_names': component_names,
+            'dominant_component': component_names[routing_weights.argmax(dim=1).item()],
+            'entropy': -torch.sum(routing_weights * torch.log(routing_weights + 1e-8), dim=1)
+        }
