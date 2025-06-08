@@ -8,22 +8,15 @@ from typing import Tuple, Optional
 
 class AdaptiveTrimodalFusion(nn.Module):
     """
-    POWERFUL adaptive fusion designed to crush DSPNet while being 4x4090 friendly.
-    
-    Key improvements over simple version:
-    1. Deep cross-modal transformer (6 layers vs 1)
-    2. Larger hidden dimensions (1536 vs 768) 
-    3. More attention heads (12 vs 8)
-    4. Advanced SwiGLU activations
-    5. Gradient checkpointing for memory efficiency
-    6. Multi-scale fusion paths
+    Adaptive Trimodal Fustion Network to compute fused features from
+    Text-View (Z_TV), Point-View (Z_PV), and Point-Text (Z_PT) features.
     """
     
     def __init__(self, 
-                 fusion_dim: int = 768, 
-                 hidden_dim: int = 1536,        # 2x larger hidden dimension
-                 num_heads: int = 12,           # More attention heads
-                 num_layers: int = 4,           # Deep cross-modal processing  
+                 fusion_dim: int = 1024,  # Fusion dimension
+                 hidden_dim: int = 4096,        # Hidden dimension for FFN
+                 num_heads: int = 16,           
+                 num_layers: int = 4,          # Number of transformer layers,             
                  dropout: float = 0.1,
                  use_gradient_checkpointing: bool = True):
         super().__init__()
@@ -33,13 +26,12 @@ class AdaptiveTrimodalFusion(nn.Module):
         self.num_layers = num_layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
         
-        # POWER: Modality-specific embeddings
+        # Modality-specific embeddings
         self.tv_modality_embed = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)
         self.pv_modality_embed = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)  
         self.pt_modality_embed = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)
         
-        
-        # POWER: Deep cross-modal transformer stack
+        # Deep cross-modal transformer stack
         self.cross_modal_layers = nn.ModuleList([
             CrossModalTransformerLayer(
                 hidden_dim=fusion_dim,
@@ -49,7 +41,7 @@ class AdaptiveTrimodalFusion(nn.Module):
             ) for _ in range(num_layers)
         ])
         
-        # POWER: Hierarchical weight prediction with more capacity
+        # Hierarchical weight prediction with more capacity
         self.weight_predictor = nn.Sequential(
             nn.Linear(fusion_dim * 3, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -207,151 +199,151 @@ class CrossModalTransformerLayer(nn.Module):
         
         return output
 
-class GeometricAttentionLayer(nn.Module):
-    """
-    Geometric attention layer that incorporates spatial relationships.
-    """
+# class GeometricAttentionLayer(nn.Module):
+#     """
+#     Geometric attention layer that incorporates spatial relationships.
+#     """
     
-    def __init__(self, hidden_dim, num_heads):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
+#     def __init__(self, hidden_dim, num_heads):
+#         super().__init__()
+#         self.hidden_dim = hidden_dim
+#         self.num_heads = num_heads
         
-        # Multi-head attention
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            batch_first=True
-        )
+#         # Multi-head attention
+#         self.attention = nn.MultiheadAttention(
+#             embed_dim=hidden_dim,
+#             num_heads=num_heads,
+#             batch_first=True
+#         )
         
-        # Layer normalization
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
+#         # Layer normalization
+#         self.norm1 = nn.LayerNorm(hidden_dim)
+#         self.norm2 = nn.LayerNorm(hidden_dim)
         
-        # Feed forward network
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.SiLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim)
-        )
+#         # Feed forward network
+#         self.ffn = nn.Sequential(
+#             nn.Linear(hidden_dim, hidden_dim * 2),
+#             nn.SiLU(),
+#             nn.Linear(hidden_dim * 2, hidden_dim)
+#         )
         
-    def forward(self, features, spatial_encoding=None):
-        # Self-attention with residual connection
-        attended, _ = self.attention(features, features, features)
-        features = self.norm1(features + attended)
+#     def forward(self, features, spatial_encoding=None):
+#         # Self-attention with residual connection
+#         attended, _ = self.attention(features, features, features)
+#         features = self.norm1(features + attended)
         
-        # Feed forward with residual connection
-        ffn_out = self.ffn(features)
-        features = self.norm2(features + ffn_out)
+#         # Feed forward with residual connection
+#         ffn_out = self.ffn(features)
+#         features = self.norm2(features + ffn_out)
         
-        return features
+#         return features
 
 
-class ImplicitGeometricPriors(nn.Module):
-    """
-    SIMPLIFIED geometric priors that maintain good performance while being stable.
+# class ImplicitGeometricPriors(nn.Module):
+#     """
+#     SIMPLIFIED geometric priors that maintain good performance while being stable.
     
-    Key features:
-    1. Local geometric attention
-    2. 3D positional encodings
-    3. Multi-scale processing
-    4. Stable implementation without complex distance encoding
-    """
+#     Key features:
+#     1. Local geometric attention
+#     2. 3D positional encodings
+#     3. Multi-scale processing
+#     4. Stable implementation without complex distance encoding
+#     """
     
-    def __init__(self, 
-                 fusion_dim: int = 768, 
-                 hidden_dim: int = 1024,        # Larger hidden dimension
-                 num_heads: int = 8,           # More attention heads
-                 num_layers: int = 4,           # Deep geometric processing
-                 max_distance: float = 8.0,
-                 num_distance_bins: int = 64,   # Rich distance encoding
-                 use_gradient_checkpointing: bool = True):
-        super().__init__()
+#     def __init__(self, 
+#                  fusion_dim: int = 768, 
+#                  hidden_dim: int = 1024,        # Larger hidden dimension
+#                  num_heads: int = 8,           # More attention heads
+#                  num_layers: int = 4,           # Deep geometric processing
+#                  max_distance: float = 8.0,
+#                  num_distance_bins: int = 64,   # Rich distance encoding
+#                  use_gradient_checkpointing: bool = True):
+#         super().__init__()
         
-        self.fusion_dim = fusion_dim
-        self.hidden_dim = hidden_dim
-        self.max_distance = max_distance
-        self.use_gradient_checkpointing = use_gradient_checkpointing
+#         self.fusion_dim = fusion_dim
+#         self.hidden_dim = hidden_dim
+#         self.max_distance = max_distance
+#         self.use_gradient_checkpointing = use_gradient_checkpointing
         
-        # Simplified 3D positional encodings
-        self.pos_encodings = nn.Sequential(
-            nn.Linear(3, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.SiLU(),
-            nn.Linear(hidden_dim // 2, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
+#         # Simplified 3D positional encodings
+#         self.pos_encodings = nn.Sequential(
+#             nn.Linear(3, hidden_dim // 2),
+#             nn.LayerNorm(hidden_dim // 2),
+#             nn.SiLU(),
+#             nn.Linear(hidden_dim // 2, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
         
-        # Feature projection to ensure dimension compatibility
-        self.feature_proj = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.SiLU(),
-        )
+#         # Feature projection to ensure dimension compatibility
+#         self.feature_proj = nn.Sequential(
+#             nn.Linear(fusion_dim, fusion_dim),
+#             nn.LayerNorm(fusion_dim),
+#             nn.SiLU(),
+#         )
         
-        # Simplified geometric attention layers
-        self.geo_attention_layers = nn.ModuleList([
-            GeometricAttentionLayer(fusion_dim, num_heads) 
-            for _ in range(min(num_layers, 2))  # Limit to 2 layers for stability
-        ])
+#         # Simplified geometric attention layers
+#         self.geo_attention_layers = nn.ModuleList([
+#             GeometricAttentionLayer(fusion_dim, num_heads) 
+#             for _ in range(min(num_layers, 2))  # Limit to 2 layers for stability
+#         ])
         
-        # Multi-scale processors (simplified)
-        self.scale_processors = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
-                nn.LayerNorm(fusion_dim),
-                nn.SiLU(),
-            ) for _ in range(2)  # Only 2 scales
-        ])
+#         # Multi-scale processors (simplified)
+#         self.scale_processors = nn.ModuleList([
+#             nn.Sequential(
+#                 nn.Linear(fusion_dim, fusion_dim),
+#                 nn.LayerNorm(fusion_dim),
+#                 nn.SiLU(),
+#             ) for _ in range(2)  # Only 2 scales
+#         ])
         
-        # Final output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
+#         # Final output projection
+#         self.output_proj = nn.Sequential(
+#             nn.Linear(fusion_dim, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
         
-    def forward(self, features: torch.Tensor, points_xyz: torch.Tensor) -> torch.Tensor:
-        """
-        Apply simplified geometric priors to features.
+#     def forward(self, features: torch.Tensor, points_xyz: torch.Tensor) -> torch.Tensor:
+#         """
+#         Apply simplified geometric priors to features.
         
-        Args:
-            features: Input features [B, Np, D]
-            points_xyz: 3D coordinates [B, Np, 3]
+#         Args:
+#             features: Input features [B, Np, D]
+#             points_xyz: 3D coordinates [B, Np, 3]
             
-        Returns:
-            geo_features: Geometrically-aware features [B, Np, D]
-        """
-        B, Np, D = features.shape
+#         Returns:
+#             geo_features: Geometrically-aware features [B, Np, D]
+#         """
+#         B, Np, D = features.shape
         
-        # Project features for processing
-        processed_features = self.feature_proj(features)
+#         # Project features for processing
+#         processed_features = self.feature_proj(features)
         
-        # Add positional encodings
-        pos_encodings = self.pos_encodings(points_xyz)
-        enhanced_features = processed_features + pos_encodings
+#         # Add positional encodings
+#         pos_encodings = self.pos_encodings(points_xyz)
+#         enhanced_features = processed_features + pos_encodings
         
-        # Apply geometric attention layers
-        if self.use_gradient_checkpointing and self.training:
-            for layer in self.geo_attention_layers:
-                enhanced_features = torch.utils.checkpoint.checkpoint(
-                    layer, enhanced_features
-                )
-        else:
-            for layer in self.geo_attention_layers:
-                enhanced_features = layer(enhanced_features)
+#         # Apply geometric attention layers
+#         if self.use_gradient_checkpointing and self.training:
+#             for layer in self.geo_attention_layers:
+#                 enhanced_features = torch.utils.checkpoint.checkpoint(
+#                     layer, enhanced_features
+#                 )
+#         else:
+#             for layer in self.geo_attention_layers:
+#                 enhanced_features = layer(enhanced_features)
         
-        # Multi-scale processing
-        scale_outputs = []
-        for processor in self.scale_processors:
-            scale_output = processor(enhanced_features)
-            scale_outputs.append(scale_output)
+#         # Multi-scale processing
+#         scale_outputs = []
+#         for processor in self.scale_processors:
+#             scale_output = processor(enhanced_features)
+#             scale_outputs.append(scale_output)
         
-        # Combine scales
-        if scale_outputs:
-            multi_scale_features = sum(scale_outputs) / len(scale_outputs)
-            enhanced_features = enhanced_features + multi_scale_features
+#         # Combine scales
+#         if scale_outputs:
+#             multi_scale_features = sum(scale_outputs) / len(scale_outputs)
+#             enhanced_features = enhanced_features + multi_scale_features
         
-        # Final projection
-        geo_features = self.output_proj(enhanced_features)
+#         # Final projection
+#         geo_features = self.output_proj(enhanced_features)
         
-        return geo_features
+#         return geo_features

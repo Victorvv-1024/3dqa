@@ -199,3 +199,17 @@ class RecursiveComposer(nn.Module):
                 )
         
         return current
+
+class GeometricEncoding(nn.Module):
+    def __init__(self, fusion_dim):
+        super().__init__()
+        self.pos_encoder = nn.Sequential(
+            nn.Linear(3, fusion_dim // 2),
+            nn.ReLU(),
+            nn.Linear(fusion_dim // 2, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        
+    def forward(self, features, points_xyz):
+        pos_encoding = self.pos_encoder(points_xyz)
+        return features + 0.1 * pos_encoding  # Small weight to not dominate

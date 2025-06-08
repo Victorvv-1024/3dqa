@@ -24,7 +24,7 @@ from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 # from .pid_fusion_encoder import PIDFusionEncoder, OptimizedPIDFusionEncoder
 from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors
-from .compositional_pid import CompositionalPID
+from .compositional_pid import CompositionalPID, GeometricEncoding
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
 import traceback
@@ -108,11 +108,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
         self.use_2d = use_2d
-        self.D_fus = 768
+        self.D_fus = 1024 # Fusion dimension, can be adjusted 
         
         if self.use_2d:
+            Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
             self.backbone = MODELS.build(backbone)
-            
             #for TGMF
             # This projects Z_t to G_t
             self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
@@ -120,12 +120,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             # This projects U_i to G_i
             self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
                                             nn.LayerNorm(self.D_fus))
-            # for ADVP (we might need to COMMENT IT OUTß)
-            self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
-        else:
-            self.visual_feat_map = nn.Linear(self.backbone_lidar.fp_channels[-1][-1],self.D_fus)
 
-        self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
+        self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size, self.D_fus),
                                            nn.LayerNorm(self.D_fus)
                                            )
         
@@ -149,15 +145,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.voxel_size = voxel_size
         
         """ --- New arguments for our framework --- """
-        Dp = self.backbone_lidar.fp_channels[-1][-1] # output dimension of 3D backbone's final layer
-        # Simple Projections
-        self.project_3d = SimpleProjection(Dp, self.D_fus)
-        self.project_text = SimpleProjection(self.text_encoder.config.hidden_size, self.D_fus)
-        if self.use_2d:
-            Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
-            self.project_2d_raw = SimpleProjection(Di, self.D_fus)
-            self.project_2d_guided = SimpleProjection(Di, self.D_fus)
-        
         # DISTILLATION LOSS CONFIGURATION
         self.distillation_loss_cfg = distillation_loss_cfg
         self.use_distillation_loss = distillation_loss_cfg is not None
@@ -184,15 +171,15 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # Bi-Modal fusion
         self.pv_fusion = PointViewFusion(
-            point_dim=self.D_fus,  # 3D feature dim
-            view_dim=self.D_fus,    # 2D feature dim
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim
+            view_dim=self.backbone.out_channels[-1],    # 2D feature dim
             fusion_dim=self.D_fus,  # Output dim
             hidden_dim=512          # Reasonable hidden dimension
         )
         
         self.pt_fusion = PointTextFusion(
-            point_dim=self.D_fus,  # 3D feature dim
-            text_dim=self.D_fus,  # Text feature dim
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim
+            text_dim=self.text_encoder.config.hidden_size,  # Text feature dim
             fusion_dim=self.D_fus,  # Output dim
             hidden_dim=512          # Reasonable hidden dimension
         )
@@ -200,8 +187,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Tri-modal fusion
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=self.D_fus,
-            hidden_dim=self.D_fus*2,            
-            num_heads=6,               
+            hidden_dim=self.D_fus*4,            
+            num_heads=12,               
             num_layers=2,
             dropout=0.1,
             use_gradient_checkpointing=True
@@ -210,15 +197,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Compositional PID
         self.pid = CompositionalPID(self.D_fus)
         
-        # SIMPLIFIED: Use simplified geometric priors
-        # self.geometric_priors = EnhancedImplicitGeometricPriors(
-        #     fusion_dim=self.D_fus,  # 768
-        #     hidden_dim=self.D_fus,  # Keep same for stability
-        #     num_heads=8,       # Your existing value
-        #     num_layers=2,      # Keep your smart 2-layer limit
-        #     dropout=0.1,
-        #     use_gradient_checkpointing=True
-        # )
+        # Geometric Encoding
+        self.geo_encoding = GeometricEncoding(self.D_fus)
         
 
     @property
@@ -408,22 +388,23 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         F_2d_raw = self.project_2d_raw(raw_points_imgfeats)  # [B, Np, D_fus]
         
-        Z_TV = self.project_2d_guided(points_imgfeats)  # [B, Np, D_fus]
-        
+        Z_TV = points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
         # Store basic features
-        feat_dict['F_3d'] = F_3d
-        feat_dict['F_2d_raw'] = F_2d_raw
         feat_dict['Z_TV'] = Z_TV
         
-        # 2. Create Z_PV (Point-View fusion) with correct dimensions
-        Z_PV = self.point_view_fusion(F_3d, F_2d_raw, superpoint_ids=None)
+        # 2. Create Z_PV (Point-View fusion)
+        Z_PV = self.point_view_fusion(
+            feat_dict['fp_features'][-1].transpose(1,2).contiguous(),
+            raw_points_imgfeats, 
+            superpoint_ids=None)
         feat_dict['Z_PV'] = Z_PV
         
         # 3. Create Z_PT (Point-Text fusion) 
         Z_PT = self.point_text_fusion(
-            F_3d,
-            text_dict['text_feats'],
-            superpoint_ids=None,
+            feat_dict['fp_features'][-1].transpose(1,2).contiguous(),  # [B, Np, Dp]
+            text_dict['text_feats'], # [B, L, Dt]
+            Z_PV,  # [B, Np, D_fus]
+            Z_TV,  # [B, Np, D_fus]
             text_mask=text_dict['text_token_mask']
         )
         feat_dict['Z_PT'] = Z_PT
@@ -917,12 +898,12 @@ class MultiViewVLMBase3DQA(BaseModel):
     #         full_visual_attention_mask = full_point_mask,
     #         )
     #     fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
-    #     head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
-    #                             visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
-    #                             fusion_feat_language=fusion_output['lang_feats'], 
-    #                             language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
-    #                             fusion_feat_pooler=fusion_output.get('pooler_feat',None)
-    #                             )
+        # head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
+        #                         visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
+        #                         fusion_feat_language=fusion_output['lang_feats'], 
+        #                         language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
+        #                         fusion_feat_pooler=fusion_output.get('pooler_feat',None)
+        #                         )
         
     #     return head_inputs_dict
 

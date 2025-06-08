@@ -9,7 +9,24 @@ class PointViewFusion(nn.Module):
     """
     def __init__(self, point_dim, view_dim, fusion_dim, hidden_dim=512, reduction_ratio=8):
         super().__init__()
-        # Dimension alignment (assumed already aligned)
+        # Dimension alignment
+        self.point_dim = point_dim
+        self.view_dim = view_dim
+        self.fusion_dim = fusion_dim
+        self.hidden_dim = hidden_dim
+        self.reduction_ratio = reduction_ratio
+        self.point_proj = nn.Sequential(
+            nn.Linear(point_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim)
+        )
+        self.view_proj = nn.Sequential(
+            nn.Linear(view_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim)
+        )
         # Step 1: Channel attention (CRITICAL for raw features)
         self.channel_attention = nn.Sequential(
             nn.Linear(fusion_dim * 2, fusion_dim // reduction_ratio),
@@ -38,14 +55,17 @@ class PointViewFusion(nn.Module):
         
         
     def forward(self, point_features, view_features, superpoint_ids=None):     
+        # Projection to fusion dimension
+        P = self.point_proj(point_features)
+        V = self.view_proj(view_features)
         # Channel attention on concatenated features
-        concat_feat = torch.cat([point_features, view_features], dim=-1)  # [B, N, 2D]
+        concat_feat = torch.cat([P, V], dim=-1)  # [B, N, 2D]
         channel_weights = self.channel_attention(concat_feat)
         weighted_feat = concat_feat * channel_weights
         
         # Split back into point and view features
-        P_weighted, V_weighted = torch.split(weighted_feat, [point_features.shape[-1], view_features.shape[-1]], dim=-1)
-        
+        P_weighted, V_weighted = torch.split(weighted_feat, [P.shape[-1], V.shape[-1]], dim=-1)
+
         # Spatial cross-attention (points attend to views)
         P_attended, _ = self.spatial_attention(
             query=P_weighted, key=V_weighted, value=V_weighted
