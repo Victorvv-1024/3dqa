@@ -483,5 +483,4 @@ default_hooks = dict(
                    interval=1, max_keep_ckpts=3))
 
 find_unused_parameters = True
-auto_scale_lr = dict(enable=True, base_batch_size=8)  # Auto-scale for different GPU counts
 load_from = './work_dirs/scannet-det/scannet-votenet-12xb12/epoch_12.pth'

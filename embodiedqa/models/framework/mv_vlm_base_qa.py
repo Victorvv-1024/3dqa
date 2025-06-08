@@ -533,94 +533,44 @@ class MultiViewVLMBase3DQA(BaseModel):
     #     """
     #     text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
     #     feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-            
+
     #     points = batch_inputs_dict['points']
     #     batch_size = len(points)
     #     losses = {}
-    #     # TODO: We need to think about how to use the features we created from PID decomposition
-    #     # head_inputs_dict = self._forward_pid_fusion(feat_dict, text_dict)
-    #     # Add masks from original inputs
-    #     # point_mask = None #B,proposal_num
-    #     # head_inputs_dict['language_mask'] = text_dict['text_token_mask']
-        
-    #     # For the PID fusion approach, get the head inputs using the _forward_pid_fusion method
-    #     head_inputs = self._forward_pid_fusion(feat_dict, text_dict)
-        
-    #     # Check if head_inputs is a dictionary with specific keys for different heads
-    #     if isinstance(head_inputs, dict) and 'qa_head' in head_inputs and 'other_heads' in head_inputs:
-    #         # Get specific inputs for each head
-    #         qa_inputs_dict = head_inputs['qa_head']
-    #         other_inputs_dict = head_inputs['other_heads']
-            
-    #         # For QA head, use the duplicated inputs
-    #         qa_losses = self.qa_head.loss(**qa_inputs_dict,
-    #                                     ret_fusion_feat=True,
-    #                                     batch_data_samples=batch_data_samples)
-    #         losses.update(qa_losses)
-            
-    #         # For target_bbox_head, use the original inputs
-    #         if self.with_target_bbox_head:
-    #             # Use P_xyz from feat_dict as the points for the bounding box head
-    #             P_xyz = feat_dict['P_xyz']  # [B, Np, 3]
-                
-    #             ref_loc_losses = self.target_bbox_head.loss(**other_inputs_dict,
-    #                                                     points=points, 
-    #                                                     aggregated_points=P_xyz,
-    #                                                     batch_data_samples=batch_data_samples)
-    #             losses.update(ref_loc_losses)
-    #     else:
-    #         # Standard processing when no special handling is needed
-    #         qa_losses = self.qa_head.loss(**head_inputs,
-    #                                     ret_fusion_feat=True,
-    #                                     batch_data_samples=batch_data_samples)
-    #         losses.update(qa_losses)
-            
-    #         if self.with_target_bbox_head:
-    #             P_xyz = feat_dict['P_xyz']
-    #             ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
-    #                                                     points=points, 
-    #                                                     aggregated_points=P_xyz,
-    #                                                     batch_data_samples=batch_data_samples)
-    #             losses.update(ref_loc_losses)
-        
-    #     # For other heads that use fusion_feat from qa_losses
-    #     fusion_feat = qa_losses['fusion_feat']
 
-    #     # If the fusion_feat was duplicated, take only the first batch element
-    #     if 'duplicate_batch' in head_inputs.get('qa_head', {}) and head_inputs['qa_head']['duplicate_batch']:
-    #         fusion_feat = fusion_feat[:batch_size]
+    #     full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
+    #     full_point_pos = feat_dict['fp_xyz'][-1]
+    #     point_mask = None #B,proposal_num
 
-    #     if self.with_target_cls_head:
-    #         # Handle batch size 1 for BatchNorm in target_cls_head
-    #         if batch_size == 1 and self.training:
-    #             # Duplicate the fusion_feat for BatchNorm
-    #             duplicated_fusion_feat = torch.cat([fusion_feat, fusion_feat], dim=0)
-                
-    #             # CRITICAL: Also duplicate the batch_data_samples for label consistency
-    #             duplicated_samples = batch_data_samples + batch_data_samples
-                
-    #             ref_cls_loss = self.target_cls_head.loss(duplicated_fusion_feat, 
-    #                                                 batch_data_samples=duplicated_samples)
-    #         else:
-    #             ref_cls_loss = self.target_cls_head.loss(fusion_feat, 
+    #     fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+    #     point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
+    #     point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
+
+    #     head_inputs_dict = self.forward_transformer(point_feats=point_feats,
+    #                                                 point_pos=point_pos,
+    #                                                 point_mask=point_mask,
+    #                                                 text_dict=text_dict,
+    #                                                 full_point_feats=full_point_feats,
+    #                                                 full_point_pos=full_point_pos)
+    #     qa_losses = self.qa_head.loss(**head_inputs_dict,
+    #                                  ret_fusion_feat=True,
+    #                                  batch_data_samples=batch_data_samples)
+    #     losses.update(qa_losses)
+        
+    #     if self.with_target_bbox_head:
+    #         ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
+    #                                                 points=points, 
+    #                                                 aggregated_points=point_pos, 
     #                                                 batch_data_samples=batch_data_samples)
+    #         losses.update(ref_loc_losses)
+    #     if self.with_target_cls_head:
+    #         fusion_feat = qa_losses['fusion_feat']
+    #         ref_cls_loss = self.target_cls_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
     #         losses.update(ref_cls_loss)
-            
     #     if self.with_situation_predict_head:
-    #         situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
+    #         fusion_feat = qa_losses['fusion_feat']
+    #         situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
     #         losses.update(situation_predict_loss)  
-            
-    #     if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
-    #         # Apply uncertainty weighting to losses
-    #         losses = self.uncertainty_weighting(losses)
-            
-    #         # Log current task weights and uncertainties for monitoring
-    #         if self.training:  # Only log during training to avoid clutter
-    #             current_weights = self.uncertainty_weighting.get_task_weights()
-    #             current_uncertainties = self.uncertainty_weighting.get_uncertainties()
-    #             # Silent monitoring - weights and uncertainties tracked internally
-
-            
     #     losses = self.loss_collect(losses)
     #     return losses
     
@@ -940,96 +890,39 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         return head_inputs_dict
     
-    # REMOVE
-    # def _forward_pid_fusion(self, feat_dict, text_dict):
-    #     """
-    #     Process PID components through PIDFusionEncoder.
+    # def forward_transformer(self,
+    #                         point_feats: Tensor,
+    #                         point_pos: Tensor,
+    #                         point_mask:Tensor,
+    #                         text_dict: Dict,
+    #                         full_point_feats: Tensor = None,
+    #                         full_point_pos: Tensor = None,
+    #                         full_point_mask: Tensor = None
+    #                         ) -> Dict:
+    #     #feats: mapping and add pos embedding
+    #     point_feats = self.visual_feat_map(point_feats)
+    #     point_feats += self.pos_embedding(point_pos)
+    #     point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
         
-    #     Args:
-    #         feat_dict (dict): Dictionary containing PID components
-    #         text_dict (dict): Dictionary containing text features
-                
-    #     Returns:
-    #         dict: Dictionary containing fusion outputs for head inputs
-    #     """
-    #     pid_components = feat_dict['pid_components']
-    #     # print("=== PID Component Debug ===")
-    #     # for name, component in pid_components.items():
-    #     #     print(f"{name}: {component.shape}")
-    #     # print("===========================")
-    #     text_global = text_dict['text_global_token']  # [B, D_fusion]
-    #     text_feats = text_dict['text_feats']  # [B, Lt, D_fusion]
-    #     text_token_mask = text_dict['text_token_mask']  # [B, Lt]
+    #     full_point_feats = self.full_visual_feat_map(full_point_feats)
+    #     full_point_feats += self.full_pos_embedding(full_point_pos)
+    #     full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
         
-    #     # CRITICAL: Extract dimensions we need for reshaping later
-    #     batch_size = text_global.shape[0]
-    #     num_original_points = feat_dict['P_xyz'].shape[1]  # This should be 1024
-        
-    #     # Forward through PIDFusionEncoder
-    #     fusion_output = self.pid_fusion_encoder(
-    #         pid_components=pid_components,
-    #         text_global=text_global,
-    #         text_feats=text_feats,
-    #         text_mask=text_token_mask,
-    #     )
-        
-    #     # Get visual features from fusion output
-    #     visual_feats = fusion_output.get('visual_feats', None)  # [B, seq_len, D]
-        
-    #     # CRITICAL: Check the dimension of visual_feats and reshape as needed
-    #     if visual_feats is not None:
-    #         _, seq_len, feat_dim = visual_feats.shape
-            
-    #         # If sequence length doesn't match the number of original points
-    #         if seq_len != num_original_points:
-    #             # print(f"Reshaping visual_feats from {visual_feats.shape} to match num_original_points={num_original_points}")
-                
-    #             # Method 1: Slice the features to match the original size
-    #             # Take only the first num_original_points features
-    #             if seq_len > num_original_points:
-    #                 visual_feats = visual_feats[:, :num_original_points, :]
-                
-    #             # Method 2: If we need more features than available, we can repeat
-    #             elif seq_len < num_original_points:
-    #                 # Option A: Repeat features
-    #                 repeat_factor = (num_original_points + seq_len - 1) // seq_len  # Ceiling division
-    #                 visual_feats = visual_feats.repeat(1, repeat_factor, 1)[:, :num_original_points, :]
-                    
-    #                 # Option B: Alternatively, pad with zeros
-    #                 # padding = torch.zeros(batch_size, num_original_points - seq_len, feat_dim, device=visual_feats.device)
-    #                 # visual_feats = torch.cat([visual_feats, padding], dim=1)
-                
-    #             # print(f"Reshaped visual_feats: {visual_feats.shape}")
-        
-    #     # Get other outputs
-    #     lang_feats = fusion_output.get('lang_feats', None)      # [B, Lt, D]
-    #     pooler_feat = fusion_output.get('pooler_feat', None)    # [B, D]
-        
-    #     # Create head_inputs_dict
-    #     head_inputs_dict = {
-    #         'fusion_feat_visual': visual_feats,
-    #         'visual_mask': None,
-    #         'fusion_feat_language': lang_feats,
-    #         'language_mask': text_token_mask,
-    #         'fusion_feat_pooler': pooler_feat
-    #     }
-        
-    #     # Batch size handling for BatchNorm issue
-    #     if batch_size == 1 and self.training:
-    #         # For QA head, duplicate the batch to work around BatchNorm issue
-    #         qa_inputs_dict = {
-    #             'fusion_feat_visual': torch.cat([visual_feats, visual_feats], dim=0),
-    #             'visual_mask': None,
-    #             'fusion_feat_language': torch.cat([lang_feats, lang_feats], dim=0) if lang_feats is not None else None,
-    #             'language_mask': torch.cat([text_token_mask, text_token_mask], dim=0) if text_token_mask is not None else None,
-    #             'fusion_feat_pooler': torch.cat([pooler_feat, pooler_feat], dim=0) if pooler_feat is not None else None,
-    #             'duplicate_batch': True
-    #         }
-            
-    #         return {
-    #             'qa_head': qa_inputs_dict,
-    #             'other_heads': head_inputs_dict
-    #         }
+    #     fusion_encoder_inputs_dict = dict(
+    #         lang_feats = text_dict['text_feats'],
+    #         lang_attention_mask = text_dict['text_token_mask'],
+    #         visual_feats = point_feats,
+    #         visual_attention_mask = point_mask,
+    #         full_visual_feats = full_point_feats,
+    #         full_visual_attention_mask = full_point_mask,
+    #         )
+    #     fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
+    #     head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
+    #                             visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
+    #                             fusion_feat_language=fusion_output['lang_feats'], 
+    #                             language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
+    #                             fusion_feat_pooler=fusion_output.get('pooler_feat',None)
+    #                             )
         
     #     return head_inputs_dict
 
