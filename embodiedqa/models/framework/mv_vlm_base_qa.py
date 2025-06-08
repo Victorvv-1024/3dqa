@@ -22,7 +22,7 @@ import open3d as o3d
 import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
-# from .pid_fusion_encoder import PIDFusionEncoder, OptimizedPIDFusionEncoder
+from .pid import PIDGuidedAttention
 from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors
 from .compositional_pid import CompositionalPID, GeometricEncoding
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
@@ -194,8 +194,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             use_gradient_checkpointing=True
         )
         
+        
+        # PID Guided Attention
+        self.pid = PIDGuidedAttention(self.D_fus)
         # Compositional PID
-        self.pid = CompositionalPID(self.D_fus)
+        # self.pid = CompositionalPID(self.D_fus)
         
         # Geometric Encoding
         self.geo_encoding = GeometricEncoding(self.D_fus)
@@ -415,8 +418,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['fusion_weights'] = fusion_weights
         
         # 5. Compositional PID
-        pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_dict['text_feats'], text_dict['text_token_mask'])
+        pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_global_features_for_att)
         feat_dict['Z_final'] = pid_output
+        # pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_dict['text_feats'], text_dict['text_token_mask'])
+        # feat_dict['Z_final'] = pid_output
         # 5. Apply implicit geometric priors
         # Z_geo_aware = self.geometric_priors(
         #     features=Z_fused,                           # Your fused features [B, Np, D]
