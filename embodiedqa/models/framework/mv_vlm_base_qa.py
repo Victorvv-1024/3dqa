@@ -558,8 +558,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # ============ Step 3: Compute Losses ============
         losses = {}
-        
-
+        # QA loss
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                     ret_fusion_feat=True,
                                     batch_data_samples=batch_data_samples)
@@ -573,10 +572,16 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # Target bbox loss
         if self.with_target_bbox_head:
-            ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
-                                                    points=batch_inputs_dict['points'], 
-                                                    aggregated_points=point_pos, 
-                                                    batch_data_samples=batch_data_samples)
+            # Extract the coordinates that correspond to the features
+            proposal_coordinates = head_inputs_dict['sampled_coordinates']  # [B, K, 3]
+            
+            ref_loc_losses = self.target_bbox_head.loss(
+                **{k: v for k, v in head_inputs_dict.items() 
+                    if k not in ['fps_indices', 'sampled_coordinates']},  # Pass head inputs
+                points=batch_inputs_dict['points'],                      # Original raw points
+                aggregated_points=proposal_coordinates,                  # ALIGNED coordinates
+                batch_data_samples=batch_data_samples
+            )
             losses.update(ref_loc_losses)
         
         # Situation prediction loss
