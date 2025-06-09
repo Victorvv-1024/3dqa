@@ -178,25 +178,30 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Reasoning
         self.reason = FeatureRefinement(
             hidden_dim=self.D_fus,
-            max_visual_token=512,
+            max_visual_tokens=512,
         )
         
+    @property
+    def with_qa_head(self):
+        """Whether the detector has a qa head."""
+        return hasattr(self, 'qa_head') and self.qa_head is not None
 
     @property
     def with_backbone(self):
         """Whether the detector has a 2D backbone."""
         return hasattr(self, 'backbone') and self.backbone is not None
+    
     @property
     def with_target_bbox_head(self):
-        """Whether the detector has a 2D backbone."""
+        """Whether the detector has a target bbox head."""
         return hasattr(self, 'target_bbox_head') and self.target_bbox_head is not None
     @property
     def with_target_cls_head(self):
-        """Whether the detector has a 2D backbone."""
+        """Whether the detector has a target cls head."""
         return hasattr(self, 'target_cls_head') and self.target_cls_head is not None
     @property
     def with_situation_predict_head(self):
-        """Whether the detector has a 2D backbone."""
+        """Whether the detector has a situation predict head."""
         return hasattr(self, 'situation_predict_head') and self.situation_predict_head is not None
     
     def extract_feat(
@@ -540,69 +545,50 @@ class MultiViewVLMBase3DQA(BaseModel):
         Returns:
             dict: A dictionary of loss components.
         """
-        # ============ Step 1: Extract Features (unchanged) ============
+        # ============ Step 1: Extract Features ============
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
+        points = batch_inputs_dict['points']
+        full_point_feats = feat_dict['fp_features'][-1].transpose(1, 2).contiguous()  # B, Np, Dp
+        full_point_pos = feat_dict['fp_xyz'][-1]  # B, Np, 3
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), feat_dict['last_fp_indices']).transpose(1, 2)  # B, Np, 3
         
         # ============ Step 2: Enhanced Forward Fusion ============
         head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
         
-        # ============ Step 3: Compute Losses (unchanged) ============
+        # ============ Step 3: Compute Losses ============
         losses = {}
         
-        # Answer prediction loss
-        if self.with_answer_head:
-            ans_loss = self.answer_head.loss(
-                **head_inputs_dict,
-                batch_data_samples=batch_data_samples,
-                **kwargs
-            )
-            losses.update(ans_loss)
+
+        qa_losses = self.qa_head.loss(**head_inputs_dict,
+                                    ret_fusion_feat=True,
+                                    batch_data_samples=batch_data_samples)
+        losses.update(qa_losses)
         
         # Target classification loss  
         if self.with_target_cls_head:
-            target_cls_loss = self.target_cls_head.loss(
-                **head_inputs_dict,
-                batch_data_samples=batch_data_samples,
-                **kwargs
-            )
-            losses.update(target_cls_loss)
+            fusion_feat = qa_losses['fusion_feat']
+            ref_cls_loss = self.target_cls_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
+            losses.update(ref_cls_loss)
         
         # Target bbox loss
         if self.with_target_bbox_head:
-            target_bbox_loss = self.target_bbox_head.loss(
-                **head_inputs_dict,
-                batch_data_samples=batch_data_samples,
-                **kwargs
-            )
-            losses.update(target_bbox_loss)
+            ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
+                                                    points=batch_inputs_dict['points'], 
+                                                    aggregated_points=point_pos, 
+                                                    batch_data_samples=batch_data_samples)
+            losses.update(ref_loc_losses)
+        
+        # Situation prediction loss
+        if self.with_situation_predict_head:
+            fusion_feat = qa_losses['fusion_feat']
+            situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
+            losses.update(situation_predict_loss) 
+        
+        losses = self.loss_collect(losses)
         
         return losses
 
-    def _compute_fusion_regularization(self, head_inputs_dict):
-        """
-        Optional regularization loss to encourage diverse attention patterns.
-        """
-        if 'fusion_analysis' not in head_inputs_dict:
-            return torch.tensor(0.0, device=next(self.parameters()).device)
-        
-        analysis = head_inputs_dict['fusion_analysis']
-        
-        # Encourage diversity in scale usage
-        scale_weights = analysis['scale_weights']  # [B, num_scales]
-        scale_entropy = -(scale_weights * torch.log(scale_weights + 1e-8)).sum(dim=-1)
-        scale_diversity_loss = -scale_entropy.mean()  # Negative because we want high entropy
-        
-        # Encourage diversity in component usage  
-        component_weights = analysis['component_weights']  # [B, num_components]
-        component_entropy = -(component_weights * torch.log(component_weights + 1e-8)).sum(dim=-1)
-        component_diversity_loss = -component_entropy.mean()
-        
-        # Small regularization weight
-        reg_weight = 0.001
-        total_reg_loss = reg_weight * (scale_diversity_loss + component_diversity_loss)
-        
-        return total_reg_loss
         
     def loss_collect(self, losses_dict):
         """

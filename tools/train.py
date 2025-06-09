@@ -8,7 +8,7 @@ from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
 from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
-# import setproctitle
+import setproctitle
 # setproctitle.setproctitle("tc2/bin/python")
 
 
