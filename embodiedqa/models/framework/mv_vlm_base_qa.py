@@ -391,23 +391,19 @@ class MultiViewVLMBase3DQA(BaseModel):
         """
         # 1. Get basic features (ensure correct dimensions)
         points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 1024]
-        F_3d = self.project_3d(points_feat)  # [B, Np, D_fus]
-        
-        F_2d_raw = self.project_2d_raw(raw_points_imgfeats)  # [B, Np, D_fus]
-        
         Z_TV = points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
         # Store basic features
         feat_dict['Z_TV'] = Z_TV
         
         # 2. Create Z_PV (Point-View fusion)
-        Z_PV = self.point_view_fusion(
+        Z_PV = self.pv_fusion(
             feat_dict['fp_features'][-1].transpose(1,2).contiguous(),
             raw_points_imgfeats, 
             superpoint_ids=None)
         feat_dict['Z_PV'] = Z_PV
         
         # 3. Create Z_PT (Point-Text fusion) 
-        Z_PT = self.point_text_fusion(
+        Z_PT = self.pt_fusion(
             feat_dict['fp_features'][-1].transpose(1,2).contiguous(),  # [B, Np, Dp]
             text_dict['text_feats'], # [B, L, Dt]
             Z_PV,  # [B, Np, D_fus]
@@ -425,8 +421,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_global_features_for_att)
         feat_dict['Z_final'] = pid_output
 
-        
-        
         return feat_dict
     
     def extract_text_feat(

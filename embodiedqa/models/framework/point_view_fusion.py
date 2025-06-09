@@ -67,7 +67,7 @@ class PointViewFusion(nn.Module):
         P_weighted, V_weighted = torch.split(weighted_feat, [P.shape[-1], V.shape[-1]], dim=-1)
 
         # Spatial cross-attention (points attend to views)
-        P_attended, _ = self.spatial_attention(
+        P_attended, _ = self.spatial_cross_attention(
             query=P_weighted, key=V_weighted, value=V_weighted
         )
         
