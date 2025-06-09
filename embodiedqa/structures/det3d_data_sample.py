@@ -206,13 +206,6 @@ class Det3DDataSample(DetDataSample):
     def pred_pts_seg(self) -> None:
         del self._pred_pts_seg
 
-    def __getattr__(self, name):
-        """Handle dynamic attribute access for question and other metainfo fields."""
-        if name == 'question':
-            return self.metainfo.get('question', '')
-        # Fall back to normal attribute access
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-
 
 SampleList = List[Det3DDataSample]
 OptSampleList = Optional[SampleList]

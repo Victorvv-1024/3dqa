@@ -27,9 +27,6 @@ def to_tensor(
     Returns:
         torch.Tensor: the converted data.
     """
-    # ADD THIS CHECK AT THE BEGINNING:
-    # if data is None:
-    #     return None
 
     if isinstance(data, torch.Tensor):
         return data
@@ -53,7 +50,6 @@ class Pack3DDetInputs(BaseTransform):
     # to be compatible with depths in bevdepth
     ANSWERS_KEYS = ['gt_answer_labels']
     SITUATION_KEYS = ['situation_label']
-    QUESTION_KEYS = ['question']
     INSTANCEDATA_3D_KEYS = [
         'gt_bboxes_3d', 'gt_labels_3d', 'attr_labels', 'depths', 'centers_2d', 'target_objects_mask'
     ]
@@ -66,28 +62,7 @@ class Pack3DDetInputs(BaseTransform):
         'gt_seg_map', 'pts_instance_mask', 'pts_semantic_mask',
         'gt_semantic_seg'
     ]
-    
-    # REMOVE
-    # SUPERPOINT_KEYS = ['superpoint_3d']
 
-    # def __init__(
-    #     self,
-    #     keys: dict,
-    #     meta_keys: dict = (
-    #         'img_path', 'ori_shape', 'img_shape', 'lidar2img', 'depth2img',
-    #         'cam2img', 'pad_shape', 'depth_map_path', 'scale_factor', 'flip',
-    #         'pcd_horizontal_flip', 'pcd_vertical_flip', 'box_mode_3d',
-    #         'box_type_3d', 'img_norm_cfg', 'num_pts_feats', 'pcd_trans',
-    #         'sample_idx', 'pcd_scale_factor', 'pcd_rotation',
-    #         'pcd_rotation_angle', 'lidar_path', 'transformation_3d_flow',
-    #         'trans_mat', 'affine_aug', 'sweep_img_metas', 'ori_cam2img',
-    #         'cam2global', 'crop_offset', 'img_crop_offset', 'resize_img_shape',
-    #         'lidar2cam', 'ori_lidar2img', 'num_ref_frames', 'num_views',
-    #         'ego2global', 'fov_ori2aug', 'ego2cam', 'axis_align_matrix',
-    #         'text', 'tokens_positive', 'scan_id','text_graph_node',
-    #         'text_graph_edge','views_points','question','img_caption','answer_list')):
-    #     self.keys = keys
-    #     self.meta_keys = meta_keys
     def __init__(
         self,
         keys: dict,
@@ -201,7 +176,6 @@ class Pack3DDetInputs(BaseTransform):
                         np.ascontiguousarray(img.transpose(2, 0, 1)))
                 results['img'] = img
 
-        # Process all standard keys
         for key in [
                 'proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels',
                 'gt_bboxes_labels', 'attr_labels', 'pts_instance_mask',
@@ -214,7 +188,6 @@ class Pack3DDetInputs(BaseTransform):
                 results[key] = [to_tensor(res) for res in results[key]]
             else:
                 results[key] = to_tensor(results[key])
-                
         if 'gt_bboxes_3d' in results:
             # multi-sweep version
             if isinstance(results['gt_bboxes_3d'], list):
@@ -236,7 +209,7 @@ class Pack3DDetInputs(BaseTransform):
 
         data_sample = Det3DDataElement()
         gt_answer = InstanceData()
-        gt_situation = InstanceData()
+        gt_situation=InstanceData()
         gt_instances_3d = InstanceData()
         gt_instances = InstanceData()
         gt_pts_seg = PointData()
@@ -298,20 +271,6 @@ class Pack3DDetInputs(BaseTransform):
                     else:
                         data_sample.gt_occupancy_masks = to_tensor(
                             results['gt_occupancy_masks'])
-                # REMOVE
-                # # ADD THIS ELIF CONDITION HERE:
-                # elif key in self.SUPERPOINT_KEYS:
-                #     if results[key] is not None:
-                #         if key == 'superpoint_3d':
-                #             # print(f"[Pack3DDetInputs] Setting superpoint_3d: {results[key].shape}")
-                #             data_sample.superpoint_3d = to_tensor(results[key])
-                # NEW: Handle views_points
-                elif key == 'views_points':
-                    if results[key] is not None:
-                        # Store in metainfo instead of as direct attribute
-                        current_metainfo = data_sample.metainfo or {}
-                        current_metainfo['views_points'] = results[key]
-                        data_sample.set_metainfo(current_metainfo)
                 else:
                     raise NotImplementedError(f'Please modified '
                                               f'`Pack3DDetInputs` '

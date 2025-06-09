@@ -8,6 +8,7 @@ from torch import Tensor
 import numpy as np
 import time
 from copy import deepcopy
+import matplotlib.pyplot as plt
 from mmengine.model import BaseModel,BaseModule
 from mmengine.structures import InstanceData
 from mmcv.ops import furthest_point_sample,gather_points
@@ -23,8 +24,8 @@ import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .pid import PIDGuidedAttention
-from .adaptive_fusion import AdaptiveTrimodalFusion, ImplicitGeometricPriors
-from .compositional_pid import CompositionalPID, GeometricEncoding
+from .adaptive_fusion import AdaptiveTrimodalFusion
+from embodiedqa.models.layers.fusion_layers import CrossModalReasoning, MultiScalePIDFusion, QuestionAwarePooling
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
 import traceback
@@ -73,7 +74,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                  backbone: ConfigType,
                  backbone_text: ConfigType,
                  backbone_lidar: ConfigType,
-                 backbone_fusion: ConfigType,
+                #  backbone_fusion: ConfigType,
                  qa_head: ConfigType,
                  target_bbox_head: ConfigType = None,
                  target_cls_head: ConfigType = None,
@@ -86,9 +87,6 @@ class MultiViewVLMBase3DQA(BaseModel):
                  test_cfg: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
                  use_2d: bool = True,
-                 # --- New arguments for GGD ---
-                 superpoint_cfg: ConfigType = None,
-                 distillation_loss_cfg: ConfigType = None,
                  init_cfg: OptConfigType = None):
         super().__init__(data_preprocessor=data_preprocessor,
                          init_cfg=init_cfg)
@@ -99,7 +97,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.D_fus = 768 # Fusion dimension, can be adjusted 
         
         if self.use_2d:
-            Di = self.backbone.out_channels[-1] # Output dim of 2D backbone
             self.backbone = MODELS.build(backbone)
             #for TGMF
             # This projects Z_t to G_t
@@ -134,27 +131,27 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         """ --- New arguments for our framework --- """
         # DISTILLATION LOSS CONFIGURATION
-        self.distillation_loss_cfg = distillation_loss_cfg
-        self.use_distillation_loss = distillation_loss_cfg is not None
+        # self.distillation_loss_cfg = distillation_loss_cfg
+        # self.use_distillation_loss = distillation_loss_cfg is not None
 
-        if self.use_distillation_loss:
-            # Prefer new config with 'type' key for MODELS.build()
-            if isinstance(distillation_loss_cfg, dict) and 'type' in distillation_loss_cfg:
-                self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
-                print(f"Distillation loss enabled: {distillation_loss_cfg['type']}")
-            else:
-                # Fallback: simple MSE loss for backward compatibility
-                loss_type = distillation_loss_cfg.get('loss_type', 'mse') if distillation_loss_cfg else 'mse'
-                loss_weight = distillation_loss_cfg.get('loss_weight', 0.2) if distillation_loss_cfg else 0.2
-                if loss_type == 'mse':
-                    self.distillation_loss_calculator = nn.MSELoss()
-                    self.distillation_loss_weight = loss_weight
-                    print(f"Simple MSE distillation loss enabled with weight {loss_weight}")
-                else:
-                    raise ValueError(f"Unsupported loss_type: {loss_type}")
-        else:
-            self.distillation_loss_calculator = None
-            print("Distillation loss disabled")
+        # if self.use_distillation_loss:
+        #     # Prefer new config with 'type' key for MODELS.build()
+        #     if isinstance(distillation_loss_cfg, dict) and 'type' in distillation_loss_cfg:
+        #         self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
+        #         print(f"Distillation loss enabled: {distillation_loss_cfg['type']}")
+        #     else:
+        #         # Fallback: simple MSE loss for backward compatibility
+        #         loss_type = distillation_loss_cfg.get('loss_type', 'mse') if distillation_loss_cfg else 'mse'
+        #         loss_weight = distillation_loss_cfg.get('loss_weight', 0.2) if distillation_loss_cfg else 0.2
+        #         if loss_type == 'mse':
+        #             self.distillation_loss_calculator = nn.MSELoss()
+        #             self.distillation_loss_weight = loss_weight
+        #             print(f"Simple MSE distillation loss enabled with weight {loss_weight}")
+        #         else:
+        #             raise ValueError(f"Unsupported loss_type: {loss_type}")
+        # else:
+        #     self.distillation_loss_calculator = None
+        #     print("Distillation loss disabled")
         
         
         # Bi-Modal fusion
@@ -186,8 +183,29 @@ class MultiViewVLMBase3DQA(BaseModel):
         # PID Guided Attention
         self.pid = PIDGuidedAttention(self.D_fus)
         
-        # Geometric Encoding
-        self.geo_encoding = GeometricEncoding(self.D_fus)
+        # Cross-modal reasoning
+        self.cross_modal_reasoning = CrossModalReasoning(
+            hidden_dim=self.D_fus,
+            num_reasoning_layers=3,
+            num_attention_heads=12,
+            dropout=0.1,
+            max_sparse_points=512,
+            use_positional_encoding=True
+        )
+        
+        # Multi-scale PID fusion module
+        self.multi_scale_fusion = MultiScalePIDFusion(
+            fusion_dim=self.D_fus,
+            num_scales=3,
+            num_components=4
+        )
+        
+        # Enhanced pooling module
+        self.enhanced_pooling = QuestionAwarePooling(
+            fusion_dim=self.D_fus,
+            pooling_type='multi_interaction',
+            num_attention_heads=8
+        )
         
 
     @property
@@ -540,103 +558,93 @@ class MultiViewVLMBase3DQA(BaseModel):
     
     
     def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        """Updated loss computation with proper distillation loss handling."""
-        
+        """Calculate losses from a batch of inputs dict and data samples.
+
+        Args:
+            batch_inputs_dict (dict): The model input dict which include
+                'points', 'img' keys.
+                    - points (list[torch.Tensor]): Point cloud of each sample.
+                    - imgs (torch.Tensor, optional): Image of each sample.
+
+            batch_data_samples (List[:obj:`Det3DDataSample`]): The Data
+                Samples. It usually includes information such as
+                `gt_instance_3d`, `gt_panoptic_seg_3d` and `gt_sem_seg_3d`.
+
+        Returns:
+            dict: A dictionary of loss components.
+        """
+        # ============ Step 1: Extract Features (unchanged) ============
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-        feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
+        feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
         
-        points = batch_inputs_dict['points']
-        batch_size = len(points)
+        # ============ Step 2: Enhanced Forward Fusion ============
+        head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
+        
+        # OPTIONAL: Store for analysis (can be disabled in production)
+        if getattr(self, 'enable_fusion_analysis', False):
+            self._last_head_inputs_dict = head_inputs_dict
+        
+        # ============ Step 3: Compute Losses (unchanged) ============
         losses = {}
         
-        # DISTILLATION LOSS (now properly handled)
-        if self.training and self.use_distillation_loss and self.distillation_loss_calculator is not None:
-            F_3d = feat_dict['F_3d']      # [B, Np, D]
-            F_2d_raw = feat_dict['F_2d_raw']  # [B, Np, D]
-            
-            # Check if we have a valid_mask (optional)
-            valid_mask = feat_dict.get('F_2d_valid_mask', None)  # [B, Np]
-            
-            # Call the distillation loss with proper arguments
-            if hasattr(self.distillation_loss_calculator, 'forward'):
-                # For SimpleDistillationLoss or AdaptiveDistillationLoss
-                if valid_mask is not None:
-                    loss_distill = self.distillation_loss_calculator(
-                        features_3d=F_3d,
-                        features_2d=F_2d_raw,
-                        valid_mask=valid_mask
-                    )
-                else:
-                    loss_distill = self.distillation_loss_calculator(
-                        features_3d=F_3d,
-                        features_2d=F_2d_raw
-                    )
-            else:
-                # For GeometryGuidedDistillationLoss (if using)
-                # This requires superpoint processing
-                superpoint_ids_batched = feat_dict.get('superpoint_ids_batched')
-                if superpoint_ids_batched is not None:
-                    B, Np, D_fus = F_3d.shape
-                    F_3d_flat = F_3d.reshape(-1, D_fus)
-                    F_2d_raw_flat = F_2d_raw.reshape(-1, D_fus)
-                    superpoint_ids_flat = superpoint_ids_batched.reshape(-1)
-                    batch_idx_flat = torch.arange(B, device=F_3d.device).unsqueeze(1).expand(-1, Np).reshape(-1)
-                    
-                    loss_distill = self.distillation_loss_calculator(
-                        F3D=F_3d_flat,
-                        Fraw2D=F_2d_raw_flat,
-                        superpoint_ids=superpoint_ids_flat,
-                        batch_idx=batch_idx_flat
-                    )
-                else:
-                    # Skip if no superpoints available
-                    loss_distill = torch.tensor(0.0, device=F_3d.device)
-            
-            losses['loss_distill'] = loss_distill
+        # Answer prediction loss
+        if self.with_answer_head:
+            ans_loss = self.answer_head.loss(
+                **head_inputs_dict,
+                batch_data_samples=batch_data_samples,
+                **kwargs
+            )
+            losses.update(ans_loss)
         
-        # Continue with standard loss computation
-        head_inputs = self._forward_simplified_fusion(feat_dict, text_dict)
-        
-        # QA Head
-        qa_losses = self.qa_head.loss(**head_inputs,
-                                    ret_fusion_feat=True,
-                                    batch_data_samples=batch_data_samples)
-        losses.update(qa_losses)
-        
-        # Other heads (bbox, cls, etc.)
-        if self.with_target_bbox_head:
-            P_xyz = feat_dict['P_xyz']
-            ref_loc_losses = self.target_bbox_head.loss(**head_inputs,
-                                                    points=points,
-                                                    aggregated_points=P_xyz,
-                                                    batch_data_samples=batch_data_samples)
-            losses.update(ref_loc_losses)
-        
-        # Continue with other heads...
-        fusion_feat = qa_losses['fusion_feat']
-        
+        # Target classification loss  
         if self.with_target_cls_head:
-            if batch_size == 1 and self.training:
-                duplicated_fusion_feat = torch.cat([fusion_feat, fusion_feat], dim=0)
-                duplicated_samples = batch_data_samples + batch_data_samples
-                ref_cls_loss = self.target_cls_head.loss(duplicated_fusion_feat,
-                                                    batch_data_samples=duplicated_samples)
-            else:
-                ref_cls_loss = self.target_cls_head.loss(fusion_feat,
-                                                    batch_data_samples=batch_data_samples)
-            losses.update(ref_cls_loss)
+            target_cls_loss = self.target_cls_head.loss(
+                **head_inputs_dict,
+                batch_data_samples=batch_data_samples,
+                **kwargs
+            )
+            losses.update(target_cls_loss)
         
-        if self.with_situation_predict_head:
-            situation_predict_loss = self.situation_predict_head.loss(fusion_feat,
-                                                                    batch_data_samples=batch_data_samples)
-            losses.update(situation_predict_loss)
+        # Target bbox loss
+        if self.with_target_bbox_head:
+            target_bbox_loss = self.target_bbox_head.loss(
+                **head_inputs_dict,
+                batch_data_samples=batch_data_samples,
+                **kwargs
+            )
+            losses.update(target_bbox_loss)
         
-        # Apply uncertainty weighting if available
-        if hasattr(self, 'uncertainty_weighting') and self.uncertainty_weighting is not None:
-            losses = self.uncertainty_weighting(losses)
+        # OPTIONAL: Add fusion regularization loss
+        if getattr(self, 'use_fusion_regularization', False):
+            fusion_reg_loss = self._compute_fusion_regularization(head_inputs_dict)
+            losses.update({'fusion_reg_loss': fusion_reg_loss})
         
-        losses = self.loss_collect(losses)
         return losses
+
+    def _compute_fusion_regularization(self, head_inputs_dict):
+        """
+        Optional regularization loss to encourage diverse attention patterns.
+        """
+        if 'fusion_analysis' not in head_inputs_dict:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        
+        analysis = head_inputs_dict['fusion_analysis']
+        
+        # Encourage diversity in scale usage
+        scale_weights = analysis['scale_weights']  # [B, num_scales]
+        scale_entropy = -(scale_weights * torch.log(scale_weights + 1e-8)).sum(dim=-1)
+        scale_diversity_loss = -scale_entropy.mean()  # Negative because we want high entropy
+        
+        # Encourage diversity in component usage  
+        component_weights = analysis['component_weights']  # [B, num_components]
+        component_entropy = -(component_weights * torch.log(component_weights + 1e-8)).sum(dim=-1)
+        component_diversity_loss = -component_entropy.mean()
+        
+        # Small regularization weight
+        reg_weight = 0.001
+        total_reg_loss = reg_weight * (scale_diversity_loss + component_diversity_loss)
+        
+        return total_reg_loss
         
     def loss_collect(self, losses_dict):
         """
@@ -694,8 +702,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         return batch_data_samples
         
-    
-    
     def forward(self,
                 inputs: Union[dict, List[dict]],
                 data_samples: Optional[List] = None,
@@ -815,44 +821,180 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
     
-    
-    def _forward_simplified_fusion(self, feat_dict, text_dict):
-        """Simplified fusion processing for head inputs."""
+    def forward_reasoning(self, feat_dict, text_dict):
+        """
+        Enhanced forward reasoning that orchestrates the separate modules.
+        """
+        # ============ Step 1: Extract Features ============
+        Z_final = feat_dict['Z_final']   # [B, Np, D] - Your PID-enhanced features!
+        Z_fused = feat_dict['Z_fused']   # [B, Np, D]
+        Z_TV = feat_dict['Z_TV']         # [B, Np, D] 
+        Z_PV = feat_dict['Z_PV']         # [B, Np, D]
+        Z_PT = feat_dict['Z_PT']         # [B, Np, D]
         
-        # Use the final multi-scale features
-        visual_feats = feat_dict['Z_final']  # [B, Np, D]
-        text_feats = text_dict['text_feats']  # [B, Lt, D]
-        text_global = text_dict['text_global_token']  # [B, D]
-        text_token_mask = text_dict['text_token_mask']  # [B, Lt]
+        points_xyz = feat_dict['P_xyz']  # [B, Np, 3]
         
-        # Simple fusion for pooler feature
-        global_visual = visual_feats.mean(dim=1)  # [B, D]
-        pooler_feat_concat = torch.cat([global_visual, text_global], dim=-1)  # [B, 2*D]
+        text_feats = text_dict['text_feats']        # [B, Lt, D]
+        text_global = text_dict['text_global_token'] # [B, D]
+        text_mask = text_dict['text_token_mask']     # [B, Lt]
         
-        # FIXED: Use pre-defined projection layer (already on correct device)
-        pooler_feat = self.pooler_projection(pooler_feat_concat)  # [B, D]
+        # ============ Step 2: Cross-Modal Reasoning ============
+        enhanced_visual, enhanced_text, reasoning_info = self.cross_modal_reasoning(
+            dense_visual_feats=Z_final,
+            text_feats=text_feats,
+            text_mask=text_mask,
+            points_xyz=points_xyz
+        )
         
+        # ============ Step 3: Multi-Scale PID Fusion ============
+        fusion_output = self.multi_scale_fusion(
+            enhanced_visual=enhanced_visual,
+            Z_TV=Z_TV,
+            Z_PV=Z_PV, 
+            Z_PT=Z_PT,
+            Z_fused=Z_fused,
+            dense_visual=Z_final,
+            text_global=text_global,
+            sampled_indices=reasoning_info['sampled_indices']
+        )
+        
+        final_visual_feats = fusion_output['fused_features']  # [B, K, D]
+        
+        # ============ Step 4: Enhanced Pooling ============
+        pooling_output = self.enhanced_pooling(
+            visual_features=final_visual_feats,
+            text_global=text_global
+        )
+        
+        pooler_feat = pooling_output['pooler_feat']  # [B, D]
+        
+        # ============ Step 5: Prepare Head Inputs ============
         head_inputs_dict = {
-            'fusion_feat_visual': visual_feats,
+            'fusion_feat_visual': final_visual_feats,     # Enhanced visual [B, K, D]
             'visual_mask': None,
-            'fusion_feat_language': text_feats,
-            'language_mask': text_token_mask,
-            'fusion_feat_pooler': pooler_feat
+            'fusion_feat_language': enhanced_text,        # Enhanced text [B, Lt, D]
+            'language_mask': text_mask,
+            'fusion_feat_pooler': pooler_feat,           # Rich pooler [B, D]
+            
+            # Additional analysis information
+            'reasoning_info': reasoning_info,
+            'fusion_analysis': {
+                'scale_weights': fusion_output['scale_weights'],
+                'component_weights': fusion_output['component_weights'],
+                'attention_weights': pooling_output['attention_weights'],
+                'multi_scale_features': fusion_output['multi_scale_features']
+            }
         }
         
-        # Handle batch size 1 for BatchNorm if needed
-        batch_size = visual_feats.shape[0]
-        if batch_size == 1 and self.training:
-            head_inputs_dict = {
-                'fusion_feat_visual': torch.cat([visual_feats, visual_feats], dim=0),
-                'visual_mask': None,
-                'fusion_feat_language': torch.cat([text_feats, text_feats], dim=0) if text_feats is not None else None,
-                'language_mask': torch.cat([text_token_mask, text_token_mask], dim=0) if text_token_mask is not None else None,
-                'fusion_feat_pooler': torch.cat([pooler_feat, pooler_feat], dim=0) if pooler_feat is not None else None,
-                'duplicate_batch': True
-            }
+        # ============ Step 6: Handle BatchNorm Edge Case ============
+        if final_visual_feats.shape[0] == 1 and self.training:
+            head_inputs_dict = self._duplicate_batch_for_batchnorm(head_inputs_dict)
         
         return head_inputs_dict
+    
+    def _duplicate_batch_for_batchnorm(self, head_inputs_dict):
+        """Handle batch size 1 for BatchNorm layers - kept in framework."""
+        duplicated = {}
+        for key, value in head_inputs_dict.items():
+            if isinstance(value, torch.Tensor):
+                duplicated[key] = torch.cat([value, value], dim=0)
+            elif isinstance(value, dict):
+                duplicated[key] = {
+                    k: torch.cat([v, v], dim=0) if isinstance(v, torch.Tensor) else v 
+                    for k, v in value.items()
+                }
+            else:
+                duplicated[key] = value
+        duplicated['duplicate_batch'] = True
+        return duplicated
+    
+    def get_fusion_analysis(self, head_inputs_dict):
+        """
+        Framework-level analysis method for interpretability.
+        Kept in framework as it's specific to your research pipeline.
+        """
+        if 'fusion_analysis' not in head_inputs_dict:
+            return {}
+            
+        analysis = head_inputs_dict['fusion_analysis']
+        reasoning_info = head_inputs_dict.get('reasoning_info', {})
+        
+        stats = {
+            # Scale analysis
+            'dominant_scale': analysis['scale_weights'].argmax(dim=1),
+            'scale_entropy': -(analysis['scale_weights'] * 
+                             torch.log(analysis['scale_weights'] + 1e-8)).sum(dim=1),
+            
+            # Component analysis  
+            'dominant_component': analysis['component_weights'].argmax(dim=1),
+            'component_entropy': -(analysis['component_weights'] * 
+                                 torch.log(analysis['component_weights'] + 1e-8)).sum(dim=1),
+            
+            # Attention analysis
+            'attention_concentration': (analysis['attention_weights'].max(dim=-1)[0] / 
+                                      analysis['attention_weights'].mean(dim=-1)).mean(),
+            
+            # Reasoning analysis
+            'sparse_ratio': reasoning_info.get('sparse_ratio', 0.0),
+            'reasoning_layers': reasoning_info.get('reasoning_layers', 0)
+        }
+        
+        return stats
+    
+    def visualize_fusion_patterns(self, head_inputs_dict, save_path=None):
+        """
+        Framework-level visualization for your research analysis.
+        Kept in framework as it's research-specific.
+        """
+        if 'fusion_analysis' not in head_inputs_dict:
+            print("No fusion analysis data available")
+            return
+            
+        analysis = head_inputs_dict['fusion_analysis']
+        
+        # Create visualization
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # Scale weights distribution
+        scale_weights = analysis['scale_weights'].cpu().numpy()
+        axes[0, 0].bar(['Detailed', 'PID-Guided', 'Global'], scale_weights.mean(axis=0))
+        axes[0, 0].set_title('Average Scale Preferences')
+        axes[0, 0].set_ylabel('Weight')
+        
+        # Component weights distribution
+        component_weights = analysis['component_weights'].cpu().numpy()
+        component_names = ['Text-View', 'Point-View', 'Point-Text', 'Fused']
+        axes[0, 1].bar(component_names, component_weights.mean(axis=0))
+        axes[0, 1].set_title('Average Component Preferences') 
+        axes[0, 1].set_ylabel('Weight')
+        axes[0, 1].tick_params(axis='x', rotation=45)
+        
+        # Attention pattern heatmap
+        attention_weights = analysis['attention_weights'].cpu().numpy()
+        if attention_weights.shape[0] > 0:
+            axes[1, 0].imshow(attention_weights[0], aspect='auto', cmap='viridis')
+            axes[1, 0].set_title('Visual Attention Pattern (First Sample)')
+            axes[1, 0].set_xlabel('Visual Points')
+            axes[1, 0].set_ylabel('Attention Head')
+        
+        # Scale vs Component correlation
+        axes[1, 1].scatter(scale_weights[:, 0], component_weights[:, 0], alpha=0.6, label='Scale1-TV')
+        axes[1, 1].scatter(scale_weights[:, 1], component_weights[:, 1], alpha=0.6, label='Scale2-PV') 
+        axes[1, 1].scatter(scale_weights[:, 2], component_weights[:, 2], alpha=0.6, label='Scale3-PT')
+        axes[1, 1].set_xlabel('Scale Weight')
+        axes[1, 1].set_ylabel('Component Weight')
+        axes[1, 1].set_title('Scale-Component Correlation')
+        axes[1, 1].legend()
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Fusion pattern visualization saved to {save_path}")
+        else:
+            plt.show()
+        
+        plt.close()
     
     # def forward_transformer(self,
     #                         point_feats: Tensor,
