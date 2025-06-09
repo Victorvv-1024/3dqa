@@ -44,69 +44,38 @@ class QAHead(BaseModule):
             nn.Linear(hidden_channels, num_classes),
         )
         self.cls_loss = getattr(nn, cls_loss['type'])(**cls_loss['params'])
-    # def loss(self, fusion_feat_visual,visual_mask, fusion_feat_language, language_mask, batch_data_samples, fusion_feat_pooler, ret_fusion_feat=False, **kwargs):
-    #     """
-    #     Args:
-    #         fusion_feat_visual (Tensor): The fusion feature visual Tensor.
-    #         visual_mask (Tensor): The visual mask Tensor.
-    #         fusion_feat_language (Tensor): The fusion feature language Tensor.
-    #         language_mask (Tensor): The language mask Tensor.
-    #         batch_data_samples (List[DataSample]): The batch of DataSamples.
-    #         fusion_feat_pooler (Tensor): The fusion feature pooler Tensor.
-    #         ret_fusion_feat (bool, optional): Whether to return the fusion feature. Defaults to False.
-
-    #     Returns:
-    #         Dict[str, Tensor]: The loss dict containing the qa cls loss, and optionally the fusion feature.
-    #     """
-    #     batch_gt_answer_labels = [
-    #         data_samples.gt_answer.answer_labels
-    #         for data_samples in batch_data_samples
-    #     ]
-    #     batch_gt_answer_labels = torch.stack(batch_gt_answer_labels).float()
-    #     logits,fusion_feat = self.forward(fusion_feat_visual,visual_mask, fusion_feat_language, language_mask, fusion_feat_pooler, batch_data_samples)
         
-    #     # qa_cls_loss = self.cls_loss(logits, batch_gt_answer_labels)/batch_gt_answer_labels.shape[0]
-        
-    #     # pred_score_log = F.log_softmax(logits,dim=1)
-    #     # batch_gt_answer_labels = batch_gt_answer_labels/batch_gt_answer_labels.sum(1,keepdim=True).clamp(min=1)#B,C
-    #     # qa_cls_loss = -(batch_gt_answer_labels*pred_score_log).sum()/logits.shape[0]
-    #     qa_cls_loss = self.group_cross_entropy_loss(logits,batch_gt_answer_labels)
-        
-    #     loss = dict(qa_cls_loss=qa_cls_loss)
-    #     if ret_fusion_feat:
-    #         loss['fusion_feat']=fusion_feat
-    #     return loss
-    def loss(self, fusion_feat_visual, visual_mask, fusion_feat_language, language_mask, 
-            batch_data_samples, fusion_feat_pooler=None, ret_fusion_feat=False, duplicate_batch=False, **kwargs):
+    def loss(self, fusion_feat_visual,visual_mask, fusion_feat_language, language_mask, batch_data_samples, fusion_feat_pooler, ret_fusion_feat=False, **kwargs):
         """
-        Calculate loss with duplicated batch handling.
+        Args:
+            fusion_feat_visual (Tensor): The fusion feature visual Tensor.
+            visual_mask (Tensor): The visual mask Tensor.
+            fusion_feat_language (Tensor): The fusion feature language Tensor.
+            language_mask (Tensor): The language mask Tensor.
+            batch_data_samples (List[DataSample]): The batch of DataSamples.
+            fusion_feat_pooler (Tensor): The fusion feature pooler Tensor.
+            ret_fusion_feat (bool, optional): Whether to return the fusion feature. Defaults to False.
+
+        Returns:
+            Dict[str, Tensor]: The loss dict containing the qa cls loss, and optionally the fusion feature.
         """
         batch_gt_answer_labels = [
             data_samples.gt_answer.answer_labels
             for data_samples in batch_data_samples
         ]
         batch_gt_answer_labels = torch.stack(batch_gt_answer_labels).float()
+        logits,fusion_feat = self.forward(fusion_feat_visual,visual_mask, fusion_feat_language, language_mask, fusion_feat_pooler, batch_data_samples)
         
-        # If batch was duplicated, duplicate the ground truth too
-        if duplicate_batch:
-            batch_gt_answer_labels = torch.cat([batch_gt_answer_labels, batch_gt_answer_labels], dim=0)
+        # qa_cls_loss = self.cls_loss(logits, batch_gt_answer_labels)/batch_gt_answer_labels.shape[0]
         
-        logits, fusion_feat = self.forward(fusion_feat_visual, visual_mask, fusion_feat_language, 
-                                        language_mask, fusion_feat_pooler, batch_data_samples)
-        
-        # If batch was duplicated, only use the first half for loss calculation
-        if duplicate_batch:
-            orig_batch_size = batch_gt_answer_labels.shape[0] // 2
-            # Keep the full batch for forward pass (for BatchNorm to work), but only use first half for loss
-            qa_cls_loss = self.group_cross_entropy_loss(logits[:orig_batch_size], batch_gt_answer_labels[:orig_batch_size])
-            # Keep the full batch in fusion_feat if ret_fusion_feat is True
-        else:
-            qa_cls_loss = self.group_cross_entropy_loss(logits, batch_gt_answer_labels)
+        # pred_score_log = F.log_softmax(logits,dim=1)
+        # batch_gt_answer_labels = batch_gt_answer_labels/batch_gt_answer_labels.sum(1,keepdim=True).clamp(min=1)#B,C
+        # qa_cls_loss = -(batch_gt_answer_labels*pred_score_log).sum()/logits.shape[0]
+        qa_cls_loss = self.group_cross_entropy_loss(logits,batch_gt_answer_labels)
         
         loss = dict(qa_cls_loss=qa_cls_loss)
         if ret_fusion_feat:
-            loss['fusion_feat'] = fusion_feat  # Return the whole batch (duplicated or not)
-            loss['duplicate_batch'] = duplicate_batch  # Pass this flag along
+            loss['fusion_feat']=fusion_feat
         return loss
 
     def group_cross_entropy_loss(self, logits, gt_answer_labels):
