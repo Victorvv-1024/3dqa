@@ -117,8 +117,7 @@ model = dict(
                    ),
     # model training and testing settings
     train_cfg=dict(
-        pos_distance_thr=0.3, neg_distance_thr=0.6, sample_mode='seed',
-        use_amp=True, use_gradient_checkpointing=True),
+        pos_distance_thr=0.3, neg_distance_thr=0.6, sample_mode='seed'),
     test_cfg=dict(
         sample_mode='seed',
         nms_thr=0.25,

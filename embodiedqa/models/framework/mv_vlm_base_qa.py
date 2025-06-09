@@ -23,9 +23,9 @@ import open3d as o3d
 import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
-from .pid import PIDGuidedAttention
+from .pid import PIDGuidedEnhancement
 from .adaptive_fusion import AdaptiveTrimodalFusion
-from embodiedqa.models.layers.fusion_layers import CrossModalReasoning, MultiScalePIDFusion, QuestionAwarePooling
+from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 
 import traceback
@@ -156,55 +156,29 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # Bi-Modal fusion
         self.pv_fusion = PointViewFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim
-            view_dim=self.backbone.out_channels[-1],    # 2D feature dim
-            fusion_dim=self.D_fus,  # Output dim
-            hidden_dim=512          # Reasonable hidden dimension
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim = 256
+            view_dim=self.backbone.out_channels[-1],    # 2D feature dim = 1024
+            fusion_dim=self.D_fus,  # Output dim = 768
         )
         
         self.pt_fusion = PointTextFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim
-            text_dim=self.text_encoder.config.hidden_size,  # Text feature dim
-            fusion_dim=self.D_fus,  # Output dim
-            hidden_dim=512          # Reasonable hidden dimension
+            view_dim=self.backbone.out_channels[-1],  # 2D feature dim = 1024
+            fusion_dim=self.D_fus,
         )
         
         # Tri-modal fusion
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=self.D_fus,
-            hidden_dim=self.D_fus*4,            
-            num_heads=12,               
-            num_layers=2,
-            dropout=0.1,
-            use_gradient_checkpointing=True
         )
         
         
         # PID Guided Attention
-        self.pid = PIDGuidedAttention(self.D_fus)
+        self.pid = PIDGuidedEnhancement(self.D_fus)
         
-        # Cross-modal reasoning
-        self.cross_modal_reasoning = CrossModalReasoning(
+        # Reasoning
+        self.reason = FeatureRefinement(
             hidden_dim=self.D_fus,
-            num_reasoning_layers=3,
-            num_attention_heads=12,
-            dropout=0.1,
-            max_sparse_points=512,
-            use_positional_encoding=True
-        )
-        
-        # Multi-scale PID fusion module
-        self.multi_scale_fusion = MultiScalePIDFusion(
-            fusion_dim=self.D_fus,
-            num_scales=3,
-            num_components=4
-        )
-        
-        # Enhanced pooling module
-        self.enhanced_pooling = QuestionAwarePooling(
-            fusion_dim=self.D_fus,
-            pooling_type='multi_interaction',
-            num_attention_heads=8
+            max_visual_token=512,
         )
         
 
@@ -389,26 +363,25 @@ class MultiViewVLMBase3DQA(BaseModel):
         """ 
         Our code starts here 
         """
-        # 1. Get basic features (ensure correct dimensions)
-        points_feat = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 1024]
+        # 1. Get basic features
+        raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
+        raw_view_feats = raw_points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
         Z_TV = points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
         # Store basic features
         feat_dict['Z_TV'] = Z_TV
         
         # 2. Create Z_PV (Point-View fusion)
         Z_PV = self.pv_fusion(
-            feat_dict['fp_features'][-1].transpose(1,2).contiguous(),
-            raw_points_imgfeats, 
+            raw_point_feats,
+            raw_view_feats, 
             superpoint_ids=None)
         feat_dict['Z_PV'] = Z_PV
         
         # 3. Create Z_PT (Point-Text fusion) 
         Z_PT = self.pt_fusion(
-            feat_dict['fp_features'][-1].transpose(1,2).contiguous(),  # [B, Np, Dp]
-            text_dict['text_feats'], # [B, L, Dt]
-            Z_PV,  # [B, Np, D_fus]
-            Z_TV,  # [B, Np, D_fus]
-            text_mask=text_dict['text_token_mask']
+            Z_PV,
+            Z_TV,
+            text_global_features_for_att
         )
         feat_dict['Z_PT'] = Z_PT
         
@@ -574,10 +547,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         # ============ Step 2: Enhanced Forward Fusion ============
         head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
         
-        # OPTIONAL: Store for analysis (can be disabled in production)
-        if getattr(self, 'enable_fusion_analysis', False):
-            self._last_head_inputs_dict = head_inputs_dict
-        
         # ============ Step 3: Compute Losses (unchanged) ============
         losses = {}
         
@@ -607,11 +576,6 @@ class MultiViewVLMBase3DQA(BaseModel):
                 **kwargs
             )
             losses.update(target_bbox_loss)
-        
-        # OPTIONAL: Add fusion regularization loss
-        if getattr(self, 'use_fusion_regularization', False):
-            fusion_reg_loss = self._compute_fusion_regularization(head_inputs_dict)
-            losses.update({'fusion_reg_loss': fusion_reg_loss})
         
         return losses
 
@@ -816,179 +780,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         return data_samples
     
     def forward_reasoning(self, feat_dict, text_dict):
-        """
-        Enhanced forward reasoning that orchestrates the separate modules.
-        """
-        # ============ Step 1: Extract Features ============
-        Z_final = feat_dict['Z_final']   # [B, Np, D] - Your PID-enhanced features!
-        Z_fused = feat_dict['Z_fused']   # [B, Np, D]
-        Z_TV = feat_dict['Z_TV']         # [B, Np, D] 
-        Z_PV = feat_dict['Z_PV']         # [B, Np, D]
-        Z_PT = feat_dict['Z_PT']         # [B, Np, D]
-        
-        points_xyz = feat_dict['P_xyz']  # [B, Np, 3]
-        
-        text_feats = text_dict['text_feats']        # [B, Lt, D]
-        text_global = text_dict['text_global_token'] # [B, D]
-        text_mask = text_dict['text_token_mask']     # [B, Lt]
-        
-        # ============ Step 2: Cross-Modal Reasoning ============
-        enhanced_visual, enhanced_text, reasoning_info = self.cross_modal_reasoning(
-            dense_visual_feats=Z_final,
-            text_feats=text_feats,
-            text_mask=text_mask,
-            points_xyz=points_xyz
-        )
-        
-        # ============ Step 3: Multi-Scale PID Fusion ============
-        fusion_output = self.multi_scale_fusion(
-            enhanced_visual=enhanced_visual,
-            Z_TV=Z_TV,
-            Z_PV=Z_PV, 
-            Z_PT=Z_PT,
-            Z_fused=Z_fused,
-            dense_visual=Z_final,
-            text_global=text_global,
-            sampled_indices=reasoning_info['sampled_indices']
-        )
-        
-        final_visual_feats = fusion_output['fused_features']  # [B, K, D]
-        
-        # ============ Step 4: Enhanced Pooling ============
-        pooling_output = self.enhanced_pooling(
-            visual_features=final_visual_feats,
-            text_global=text_global
-        )
-        
-        pooler_feat = pooling_output['pooler_feat']  # [B, D]
-        
-        # ============ Step 5: Prepare Head Inputs ============
-        head_inputs_dict = {
-            'fusion_feat_visual': final_visual_feats,     # Enhanced visual [B, K, D]
-            'visual_mask': None,
-            'fusion_feat_language': enhanced_text,        # Enhanced text [B, Lt, D]
-            'language_mask': text_mask,
-            'fusion_feat_pooler': pooler_feat,           # Rich pooler [B, D]
-            
-            # Additional analysis information
-            'reasoning_info': reasoning_info,
-            'fusion_analysis': {
-                'scale_weights': fusion_output['scale_weights'],
-                'component_weights': fusion_output['component_weights'],
-                'attention_weights': pooling_output['attention_weights'],
-                'multi_scale_features': fusion_output['multi_scale_features']
-            }
-        }
-        
-        # ============ Step 6: Handle BatchNorm Edge Case ============
-        if final_visual_feats.shape[0] == 1 and self.training:
-            head_inputs_dict = self._duplicate_batch_for_batchnorm(head_inputs_dict)
-        
-        return head_inputs_dict
+        return self.reason(feat_dict, text_dict)
     
-    def _duplicate_batch_for_batchnorm(self, head_inputs_dict):
-        """Handle batch size 1 for BatchNorm layers - kept in framework."""
-        duplicated = {}
-        for key, value in head_inputs_dict.items():
-            if isinstance(value, torch.Tensor):
-                duplicated[key] = torch.cat([value, value], dim=0)
-            elif isinstance(value, dict):
-                duplicated[key] = {
-                    k: torch.cat([v, v], dim=0) if isinstance(v, torch.Tensor) else v 
-                    for k, v in value.items()
-                }
-            else:
-                duplicated[key] = value
-        duplicated['duplicate_batch'] = True
-        return duplicated
-    
-    def get_fusion_analysis(self, head_inputs_dict):
-        """
-        Framework-level analysis method for interpretability.
-        Kept in framework as it's specific to your research pipeline.
-        """
-        if 'fusion_analysis' not in head_inputs_dict:
-            return {}
-            
-        analysis = head_inputs_dict['fusion_analysis']
-        reasoning_info = head_inputs_dict.get('reasoning_info', {})
-        
-        stats = {
-            # Scale analysis
-            'dominant_scale': analysis['scale_weights'].argmax(dim=1),
-            'scale_entropy': -(analysis['scale_weights'] * 
-                             torch.log(analysis['scale_weights'] + 1e-8)).sum(dim=1),
-            
-            # Component analysis  
-            'dominant_component': analysis['component_weights'].argmax(dim=1),
-            'component_entropy': -(analysis['component_weights'] * 
-                                 torch.log(analysis['component_weights'] + 1e-8)).sum(dim=1),
-            
-            # Attention analysis
-            'attention_concentration': (analysis['attention_weights'].max(dim=-1)[0] / 
-                                      analysis['attention_weights'].mean(dim=-1)).mean(),
-            
-            # Reasoning analysis
-            'sparse_ratio': reasoning_info.get('sparse_ratio', 0.0),
-            'reasoning_layers': reasoning_info.get('reasoning_layers', 0)
-        }
-        
-        return stats
-    
-    def visualize_fusion_patterns(self, head_inputs_dict, save_path=None):
-        """
-        Framework-level visualization for your research analysis.
-        Kept in framework as it's research-specific.
-        """
-        if 'fusion_analysis' not in head_inputs_dict:
-            print("No fusion analysis data available")
-            return
-            
-        analysis = head_inputs_dict['fusion_analysis']
-        
-        # Create visualization
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        
-        # Scale weights distribution
-        scale_weights = analysis['scale_weights'].cpu().numpy()
-        axes[0, 0].bar(['Detailed', 'PID-Guided', 'Global'], scale_weights.mean(axis=0))
-        axes[0, 0].set_title('Average Scale Preferences')
-        axes[0, 0].set_ylabel('Weight')
-        
-        # Component weights distribution
-        component_weights = analysis['component_weights'].cpu().numpy()
-        component_names = ['Text-View', 'Point-View', 'Point-Text', 'Fused']
-        axes[0, 1].bar(component_names, component_weights.mean(axis=0))
-        axes[0, 1].set_title('Average Component Preferences') 
-        axes[0, 1].set_ylabel('Weight')
-        axes[0, 1].tick_params(axis='x', rotation=45)
-        
-        # Attention pattern heatmap
-        attention_weights = analysis['attention_weights'].cpu().numpy()
-        if attention_weights.shape[0] > 0:
-            axes[1, 0].imshow(attention_weights[0], aspect='auto', cmap='viridis')
-            axes[1, 0].set_title('Visual Attention Pattern (First Sample)')
-            axes[1, 0].set_xlabel('Visual Points')
-            axes[1, 0].set_ylabel('Attention Head')
-        
-        # Scale vs Component correlation
-        axes[1, 1].scatter(scale_weights[:, 0], component_weights[:, 0], alpha=0.6, label='Scale1-TV')
-        axes[1, 1].scatter(scale_weights[:, 1], component_weights[:, 1], alpha=0.6, label='Scale2-PV') 
-        axes[1, 1].scatter(scale_weights[:, 2], component_weights[:, 2], alpha=0.6, label='Scale3-PT')
-        axes[1, 1].set_xlabel('Scale Weight')
-        axes[1, 1].set_ylabel('Component Weight')
-        axes[1, 1].set_title('Scale-Component Correlation')
-        axes[1, 1].legend()
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Fusion pattern visualization saved to {save_path}")
-        else:
-            plt.show()
-        
-        plt.close()
     
     # def forward_transformer(self,
     #                         point_feats: Tensor,

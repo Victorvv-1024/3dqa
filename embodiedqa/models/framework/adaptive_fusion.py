@@ -1,349 +1,223 @@
-# embodiedqa/models/framework/adaptive_fusion.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 class AdaptiveTrimodalFusion(nn.Module):
     """
-    Adaptive Trimodal Fustion Network to compute fused features from
-    Text-View (Z_TV), Point-View (Z_PV), and Point-Text (Z_PT) features.
+    Adaptive Trimodal Fusion for combining Z_TV, Z_PV, Z_PT.
+
+    Information-Theoretic Foundation:
+    Instead of treating Z_TV, Z_PV, Z_PT as independent modalities,
+    we treat them as PID components that should be combined based on:
+    1. Question-specific information needs
+    2. PID decomposition principles  
+    3. Hierarchical information integration
+    
+    Design Philosophy:
+    - Z_TV, Z_PV, Z_PT contain different types of bi-modal synergies
+    - Different questions need different combinations of these synergies
+    - Use lightweight, interpretable fusion rather than complex transformers
+    - Maintain information-theoretic interpretability
     """
     
-    def __init__(self, 
-                 fusion_dim: int = 1024,  # Fusion dimension
-                 hidden_dim: int = 4096,        # Hidden dimension for FFN
-                 num_heads: int = 16,           
-                 num_layers: int = 4,          # Number of transformer layers,             
-                 dropout: float = 0.1,
-                 use_gradient_checkpointing: bool = True):
+    def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1, 
+                 tv_input_dim=1024, pv_input_dim=768, pt_input_dim=768):
         super().__init__()
         
         self.fusion_dim = fusion_dim
         self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.use_gradient_checkpointing = use_gradient_checkpointing
         
-        # Modality-specific embeddings
-        self.tv_modality_embed = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)
-        self.pv_modality_embed = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)  
-        self.pt_modality_embed = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)
+        # ==================== DIMENSION ALIGNMENT ====================
+        # Handle different input dimensions for each component
+        self.tv_alignment = nn.Linear(tv_input_dim, fusion_dim)  # 1024 → 768
+        self.pv_alignment = nn.Linear(pv_input_dim, fusion_dim)  # 768 → 768 (identity)
+        self.pt_alignment = nn.Linear(pt_input_dim, fusion_dim)  # 768 → 768 (identity)
         
-        # Deep cross-modal transformer stack
-        self.cross_modal_layers = nn.ModuleList([
-            CrossModalTransformerLayer(
-                hidden_dim=fusion_dim,
-                num_heads=num_heads,
-                ffn_dim=hidden_dim,
-                dropout=dropout
-            ) for _ in range(num_layers)
-        ])
+        # ==================== PID COMPONENT WEIGHTING ====================
+        # Learn how to weight different PID components based on question context
+        # This is the KEY innovation: question-adaptive PID component selection
         
-        # Hierarchical weight prediction with more capacity
-        self.weight_predictor = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
+        # Global context extraction from each component
+        self.global_context_proj = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),  # Concatenated global contexts
             nn.LayerNorm(hidden_dim),
-            nn.SiLU(),  # SwiGLU activation
-            nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Question-guided component importance predictor
+        # This learns which PID components are important for different question types
+        self.component_importance_predictor = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.LayerNorm(hidden_dim // 2),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 3),
+            nn.Linear(hidden_dim // 2, 3),  # 3 weights for Z_TV, Z_PV, Z_PT
             nn.Softmax(dim=-1)
         )
         
-        # POWER: Learnable temperature for fusion
-        self.fusion_temperature = nn.Parameter(torch.ones(1))
+        # ==================== SYNERGY INTEGRATION ====================
+        # Learn how different PID components interact (beyond simple weighting)
+        # Captures higher-order PID interactions: I(TV,PV,PT; Y)
         
+        self.synergy_detector = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
         
-    def forward(self, Z_TV: torch.Tensor, Z_PV: torch.Tensor, Z_PT: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        POWERFUL forward pass designed to beat DSPNet.
+        # ==================== ATTENTION-BASED INTEGRATION ====================
+        # Lightweight attention to capture spatial relationships between components
+        # Much simpler than full transformer - just single attention layer
         
-        Args:
-            Z_TV: Text-View features [B, Np, D]
-            Z_PV: Point-View features [B, Np, D]  
-            Z_PT: Point-Text features [B, Np, D]
-            
-        Returns:
-            Z_fused: fused features [B, Np, D]
-            fusion_weights: Dynamic fusion weights [B, 3]
-        """
-        B, Np, D = Z_TV.shape
-        
-        # Add modality embeddings for better discrimination
-        Z_TV_embed = Z_TV + self.tv_modality_embed
-        Z_PV_embed = Z_PV + self.pv_modality_embed
-        Z_PT_embed = Z_PT + self.pt_modality_embed
-
-        
-        # Stack for cross-modal processing
-        modality_features = [Z_TV_embed, Z_PV_embed, Z_PT_embed]
-        
-        # Deep cross-modal transformer processing with gradient checkpointing
-        if self.use_gradient_checkpointing and self.training:
-            for layer in self.cross_modal_layers:
-                modality_features = torch.utils.checkpoint.checkpoint(
-                    self._apply_cross_modal_layer, layer, modality_features
-                )
-        else:
-            for layer in self.cross_modal_layers:
-                modality_features = self._apply_cross_modal_layer(layer, modality_features)
-        
-        Z_TV_cross, Z_PV_cross, Z_PT_cross = modality_features
-        
-        # Compute dynamic fusion weights with temperature scaling
-        global_context = torch.cat([
-            Z_TV_cross.mean(dim=1),  # [B, D]
-            Z_PV_cross.mean(dim=1),  # [B, D]
-            Z_PT_cross.mean(dim=1)   # [B, D]
-        ], dim=-1)  # [B, 3*D]
-        
-        dynamic_weights = self.weight_predictor(global_context)  # [B, 3]
-        dynamic_weights = dynamic_weights / self.fusion_temperature  # Temperature scaling
-        
-        # Apply dynamic weighting
-        w_tv = dynamic_weights[:, 0:1].unsqueeze(1)  # [B, 1, 1]
-        w_pv = dynamic_weights[:, 1:2].unsqueeze(1)  # [B, 1, 1]
-        w_pt = dynamic_weights[:, 2:3].unsqueeze(1)  # [B, 1, 1]
-        
-        # Weighted fusion with multi-scale enhancement
-        weighted_fusion = w_tv * Z_TV_cross + w_pv * Z_PV_cross + w_pt * Z_PT_cross
-        
-        Z_output = weighted_fusion
-
-        return Z_output, dynamic_weights
-    
-    def _apply_cross_modal_layer(self, layer, modality_features):
-        """Apply cross-modal transformer layer to all modalities."""
-        return [layer(feat, modality_features) for feat in modality_features]
-
-
-class CrossModalTransformerLayer(nn.Module):
-    """
-    cross-modal transformer layer for deep modality interaction.
-    
-    Features:
-    - Cross-attention between all modality pairs
-    - SwiGLU activation
-    - Pre-norm architecture for stability
-    - Residual connections everywhere
-    """
-    
-    def __init__(self, hidden_dim, num_heads, ffn_dim, dropout=0.1):
-        super().__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        
-        # Pre-normalization for stability
-        self.pre_attn_norm = nn.LayerNorm(hidden_dim)
-        self.pre_ffn_norm = nn.LayerNorm(hidden_dim)
-        
-        # Cross-modal attention
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
+        self.component_attention = nn.MultiheadAttention(
+            embed_dim=fusion_dim,
+            num_heads=8,
             dropout=dropout,
             batch_first=True
         )
         
-        # SwiGLU FFN (like LLaMA)
-        self.ffn_gate = nn.Linear(hidden_dim, ffn_dim, bias=False)
-        self.ffn_up = nn.Linear(hidden_dim, ffn_dim, bias=False)
-        self.ffn_down = nn.Linear(ffn_dim, hidden_dim, bias=False)
-        self.ffn_dropout = nn.Dropout(dropout)
+        # ==================== FINAL FUSION ====================
+        # Combine weighted components, synergistic interactions, and attention outputs
         
-    def forward(self, query_features, all_modality_features):
-        """
-        Apply cross-modal attention.
-        
-        Args:
-            query_features: Features of current modality [B, Np, D]
-            all_modality_features: List of all modality features
-        """
-        B, Np, D = query_features.shape
-        
-        # Cross-modal attention with all other modalities
-        # Stack all modalities as key/value
-        all_features = torch.stack(all_modality_features, dim=2)  # [B, Np, 3, D]
-        all_features_flat = all_features.view(B * Np, 3, D)
-        query_flat = query_features.view(B * Np, 1, D)
-        
-        # Pre-norm
-        query_norm = self.pre_attn_norm(query_flat)
-        key_value_norm = self.pre_attn_norm(all_features_flat)
-        
-        # Cross-attention
-        attn_out, _ = self.cross_attention(
-            query_norm, key_value_norm, key_value_norm
+        self.final_fusion = nn.Sequential(
+            nn.Linear(fusion_dim * 3, fusion_dim),  # weighted + synergy + attended
+            nn.LayerNorm(fusion_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         
-        # Residual connection
-        query_flat = query_flat + attn_out
-        query_features = query_flat.view(B, Np, D)
+        # ==================== RESIDUAL CONNECTION ====================
+        # Preserve original information while adding synergistic enhancements
+        self.residual_weight = nn.Parameter(torch.tensor(0.5))  # Learnable residual weight
         
-        # SwiGLU FFN with residual
-        ffn_input = self.pre_ffn_norm(query_features)
-        gate = F.silu(self.ffn_gate(ffn_input))  # SiLU activation
-        up = self.ffn_up(ffn_input)
-        ffn_hidden = gate * up  # Gating
-        ffn_hidden = self.ffn_dropout(ffn_hidden)
-        ffn_out = self.ffn_down(ffn_hidden)
+    def forward(self, Z_TV: torch.Tensor, Z_PV: torch.Tensor, Z_PT: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass implementing PID-aligned trimodal fusion.
         
-        # Residual connection
-        output = query_features + ffn_out
-        
-        return output
-
-# class GeometricAttentionLayer(nn.Module):
-#     """
-#     Geometric attention layer that incorporates spatial relationships.
-#     """
-    
-#     def __init__(self, hidden_dim, num_heads):
-#         super().__init__()
-#         self.hidden_dim = hidden_dim
-#         self.num_heads = num_heads
-        
-#         # Multi-head attention
-#         self.attention = nn.MultiheadAttention(
-#             embed_dim=hidden_dim,
-#             num_heads=num_heads,
-#             batch_first=True
-#         )
-        
-#         # Layer normalization
-#         self.norm1 = nn.LayerNorm(hidden_dim)
-#         self.norm2 = nn.LayerNorm(hidden_dim)
-        
-#         # Feed forward network
-#         self.ffn = nn.Sequential(
-#             nn.Linear(hidden_dim, hidden_dim * 2),
-#             nn.SiLU(),
-#             nn.Linear(hidden_dim * 2, hidden_dim)
-#         )
-        
-#     def forward(self, features, spatial_encoding=None):
-#         # Self-attention with residual connection
-#         attended, _ = self.attention(features, features, features)
-#         features = self.norm1(features + attended)
-        
-#         # Feed forward with residual connection
-#         ffn_out = self.ffn(features)
-#         features = self.norm2(features + ffn_out)
-        
-#         return features
-
-
-# class ImplicitGeometricPriors(nn.Module):
-#     """
-#     SIMPLIFIED geometric priors that maintain good performance while being stable.
-    
-#     Key features:
-#     1. Local geometric attention
-#     2. 3D positional encodings
-#     3. Multi-scale processing
-#     4. Stable implementation without complex distance encoding
-#     """
-    
-#     def __init__(self, 
-#                  fusion_dim: int = 768, 
-#                  hidden_dim: int = 1024,        # Larger hidden dimension
-#                  num_heads: int = 8,           # More attention heads
-#                  num_layers: int = 4,           # Deep geometric processing
-#                  max_distance: float = 8.0,
-#                  num_distance_bins: int = 64,   # Rich distance encoding
-#                  use_gradient_checkpointing: bool = True):
-#         super().__init__()
-        
-#         self.fusion_dim = fusion_dim
-#         self.hidden_dim = hidden_dim
-#         self.max_distance = max_distance
-#         self.use_gradient_checkpointing = use_gradient_checkpointing
-        
-#         # Simplified 3D positional encodings
-#         self.pos_encodings = nn.Sequential(
-#             nn.Linear(3, hidden_dim // 2),
-#             nn.LayerNorm(hidden_dim // 2),
-#             nn.SiLU(),
-#             nn.Linear(hidden_dim // 2, fusion_dim),
-#             nn.LayerNorm(fusion_dim)
-#         )
-        
-#         # Feature projection to ensure dimension compatibility
-#         self.feature_proj = nn.Sequential(
-#             nn.Linear(fusion_dim, fusion_dim),
-#             nn.LayerNorm(fusion_dim),
-#             nn.SiLU(),
-#         )
-        
-#         # Simplified geometric attention layers
-#         self.geo_attention_layers = nn.ModuleList([
-#             GeometricAttentionLayer(fusion_dim, num_heads) 
-#             for _ in range(min(num_layers, 2))  # Limit to 2 layers for stability
-#         ])
-        
-#         # Multi-scale processors (simplified)
-#         self.scale_processors = nn.ModuleList([
-#             nn.Sequential(
-#                 nn.Linear(fusion_dim, fusion_dim),
-#                 nn.LayerNorm(fusion_dim),
-#                 nn.SiLU(),
-#             ) for _ in range(2)  # Only 2 scales
-#         ])
-        
-#         # Final output projection
-#         self.output_proj = nn.Sequential(
-#             nn.Linear(fusion_dim, fusion_dim),
-#             nn.LayerNorm(fusion_dim)
-#         )
-        
-#     def forward(self, features: torch.Tensor, points_xyz: torch.Tensor) -> torch.Tensor:
-#         """
-#         Apply simplified geometric priors to features.
-        
-#         Args:
-#             features: Input features [B, Np, D]
-#             points_xyz: 3D coordinates [B, Np, 3]
+        Args:
+            Z_TV: [B, Np, D] - Text-View bi-modal features
+            Z_PV: [B, Np, D] - Point-View bi-modal features  
+            Z_PT: [B, Np, D] - Point-Text bi-modal features
             
-#         Returns:
-#             geo_features: Geometrically-aware features [B, Np, D]
-#         """
-#         B, Np, D = features.shape
+        Returns:
+            Z_fused: [B, Np, D] - Fused trimodal features
+            fusion_weights: [B, 3] - Component importance weights
+            
+        Information Flow:
+            Bi-modal PID components → Dimension alignment → Global context analysis
+            → Question-adaptive weighting → Synergy detection → Attention integration
+            → Final fusion with residual connection
+        """
+        B, Np, D = Z_TV.shape
         
-#         # Project features for processing
-#         processed_features = self.feature_proj(features)
+        # ==================== DIMENSION ALIGNMENT ====================
+        # Ensure all components have consistent dimensions
+        Z_TV_aligned = self.tv_alignment(Z_TV)  # [B, Np, fusion_dim]
+        Z_PV_aligned = self.pv_alignment(Z_PV)  # [B, Np, fusion_dim]  
+        Z_PT_aligned = self.pt_alignment(Z_PT)  # [B, Np, fusion_dim]
         
-#         # Add positional encodings
-#         pos_encodings = self.pos_encodings(points_xyz)
-#         enhanced_features = processed_features + pos_encodings
+        # ==================== GLOBAL CONTEXT EXTRACTION ====================
+        # Extract global context from each PID component for weight prediction
+        # This captures the overall "information content" of each component
         
-#         # Apply geometric attention layers
-#         if self.use_gradient_checkpointing and self.training:
-#             for layer in self.geo_attention_layers:
-#                 enhanced_features = torch.utils.checkpoint.checkpoint(
-#                     layer, enhanced_features
-#                 )
-#         else:
-#             for layer in self.geo_attention_layers:
-#                 enhanced_features = layer(enhanced_features)
+        global_tv = Z_TV_aligned.mean(dim=1)  # [B, fusion_dim]
+        global_pv = Z_PV_aligned.mean(dim=1)  # [B, fusion_dim]
+        global_pt = Z_PT_aligned.mean(dim=1)  # [B, fusion_dim]
         
-#         # Multi-scale processing
-#         scale_outputs = []
-#         for processor in self.scale_processors:
-#             scale_output = processor(enhanced_features)
-#             scale_outputs.append(scale_output)
+        # Concatenate global contexts
+        global_context = torch.cat([global_tv, global_pv, global_pt], dim=-1)  # [B, fusion_dim*3]
         
-#         # Combine scales
-#         if scale_outputs:
-#             multi_scale_features = sum(scale_outputs) / len(scale_outputs)
-#             enhanced_features = enhanced_features + multi_scale_features
+        # Project to hidden space for weight prediction
+        context_features = self.global_context_proj(global_context)  # [B, hidden_dim]
         
-#         # Final projection
-#         geo_features = self.output_proj(enhanced_features)
+        # ==================== QUESTION-ADAPTIVE COMPONENT WEIGHTING ====================
+        # Predict importance weights for each PID component
+        # This is where "different questions need different PID components" is implemented
         
-#         return geo_features
+        component_weights = self.component_importance_predictor(context_features)  # [B, 3]
+        w_tv, w_pv, w_pt = component_weights[:, 0:1], component_weights[:, 1:2], component_weights[:, 2:3]
+        
+        # Apply weights (broadcast to point level)
+        w_tv_expanded = w_tv.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1]
+        w_pv_expanded = w_pv.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1] 
+        w_pt_expanded = w_pt.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1]
+        
+        # Weighted combination of PID components
+        weighted_combination = (
+            w_tv_expanded * Z_TV_aligned + 
+            w_pv_expanded * Z_PV_aligned + 
+            w_pt_expanded * Z_PT_aligned
+        )  # [B, Np, fusion_dim]
+        
+        # ==================== SYNERGY DETECTION ====================
+        # Detect higher-order synergistic interactions between PID components
+        # This captures I(TV,PV,PT; Y) - information that emerges from all three together
+        
+        concatenated_components = torch.cat([
+            Z_TV_aligned, Z_PV_aligned, Z_PT_aligned
+        ], dim=-1)  # [B, Np, fusion_dim*3]
+        
+        synergistic_features = self.synergy_detector(concatenated_components)  # [B, Np, fusion_dim]
+        
+        # ==================== ATTENTION-BASED INTEGRATION ====================
+        # Use attention to capture spatial relationships between different PID components
+        # Query: weighted combination, Key/Value: synergistic features
+        
+        attended_features, attention_weights = self.component_attention(
+            query=weighted_combination,     # What we're looking for (weighted components)
+            key=synergistic_features,      # Where to look (synergistic patterns)
+            value=synergistic_features     # What to extract (synergistic content)
+        )  # [B, Np, fusion_dim]
+        
+        # ==================== FINAL FUSION ====================
+        # Combine all sources of information:
+        # 1. Weighted PID components (question-adaptive combination)
+        # 2. Synergistic features (higher-order interactions)
+        # 3. Attended features (spatially-aware integration)
+        
+        fusion_input = torch.cat([
+            weighted_combination,   # Question-adaptive PID weighting
+            synergistic_features,   # Higher-order synergies
+            attended_features      # Spatially-aware integration
+        ], dim=-1)  # [B, Np, fusion_dim*3]
+        
+        fused_features = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
+        
+        # ==================== RESIDUAL CONNECTION ====================
+        # Preserve original information while adding enhancements
+        # Use learnable residual weight to balance original vs enhanced information
+        
+        Z_fused = (
+            self.residual_weight * weighted_combination + 
+            (1 - self.residual_weight) * fused_features
+        )  # [B, Np, fusion_dim]
+        
+        return Z_fused, component_weights
+    
+    def get_component_importance(self, Z_TV: torch.Tensor, Z_PV: torch.Tensor, Z_PT: torch.Tensor) -> torch.Tensor:
+        """
+        Utility function to get component importance weights without full forward pass.
+        Useful for analysis and interpretability.
+        
+        Returns:
+            component_weights: [B, 3] - Importance weights for [TV, PV, PT]
+        """
+        # Extract global contexts
+        global_tv = Z_TV.mean(dim=1)
+        global_pv = Z_PV.mean(dim=1)
+        global_pt = Z_PT.mean(dim=1)
+        
+        # Get context features and predict weights
+        global_context = torch.cat([global_tv, global_pv, global_pt], dim=-1)
+        context_features = self.global_context_proj(global_context)
+        component_weights = self.component_importance_predictor(context_features)
+        
+        return component_weights

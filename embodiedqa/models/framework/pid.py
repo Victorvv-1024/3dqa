@@ -3,249 +3,231 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class PIDGuidedAttention(nn.Module):
+class PIDGuidedEnhancement(nn.Module):
     """
-    Enhanced PID-guided attention with deeper routing and attention generation.
-    Uses PID theory to guide attention mechanisms without explicit decomposition.
+    PID-guided enhancement.
+    
+    Key Insight: Your bi-modal and tri-modal fusion already implements PID theory.
+    This module should ENHANCE rather than RE-DECOMPOSE.
+    
+    Design Philosophy:
+    1. Z_TV, Z_PV, Z_PT already contain PID components (bi-modal synergies)
+    2. Z_fused already combines these PID components intelligently 
+    3. This module enhances Z_fused based on question-specific PID patterns
+    4. NO explicit decomposition - soft attention enhancement only
     """
     
-    def __init__(self, fusion_dim=768, hidden_dim=384):
+    def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1):
         super().__init__()
         
-        # Store dimensions
         self.fusion_dim = fusion_dim
         self.hidden_dim = hidden_dim
         
-        # Validate dimensions
-        assert hidden_dim % 4 == 0, f"hidden_dim ({hidden_dim}) must be divisible by 4"
+        # ==================== DIMENSION ALIGNMENT ====================
+        # Handle dimension mismatches (Z_TV might be 1024D)
+        self.tv_dim_align = None  # Will be set dynamically
+        self.pv_dim_align = None
+        self.pt_dim_align = None
+        self._alignment_initialized = False
         
-        # Pattern detection networks for each PID component
-        self.pattern_detectors = nn.ModuleDict({
-            # Redundancy: Information shared across all modalities
-            'redundancy': self._make_pattern_detector(fusion_dim * 3, hidden_dim),
-            
-            # Uniqueness: Information specific to each modality
-            'unique_text': self._make_pattern_detector(fusion_dim, hidden_dim),
-            'unique_point': self._make_pattern_detector(fusion_dim, hidden_dim),
-            'unique_view': self._make_pattern_detector(fusion_dim, hidden_dim),
-            
-            # Pairwise synergies: Emergent from pairs
-            'synergy_tp': self._make_pattern_detector(fusion_dim, hidden_dim),
-            'synergy_tv': self._make_pattern_detector(fusion_dim, hidden_dim),
-            'synergy_pv': self._make_pattern_detector(fusion_dim, hidden_dim),
-            
-            # Triple synergy: Emergent from all three
-            'synergy_tpv': self._make_pattern_detector(fusion_dim, hidden_dim)
-        })
+        # ==================== QUESTION-GUIDED PID PATTERN DETECTION ====================
+        # Instead of explicit decomposition, detect PID-inspired attention patterns
         
-        # Enhanced question-guided routing network
+        # Question analyzer - determines what kind of information is needed
         self.question_analyzer = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.LayerNorm(hidden_dim)
         )
         
-        # Enhanced component importance predictor (your improved version)
-        self.component_router = nn.Sequential(
+        # PID-inspired pattern detectors (much simpler than current approach)
+        # These detect WHERE to look for different types of information
+        self.pattern_detectors = nn.ModuleDict({
+            # Where is redundant (shared) information most prominent?
+            'redundancy_detector': nn.Sequential(
+                nn.Linear(fusion_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+                nn.Sigmoid()
+            ),
+            
+            # Where is unique information from each modality most prominent?
+            'uniqueness_detector': nn.Sequential(
+                nn.Linear(fusion_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+                nn.Sigmoid()
+            ),
+            
+            # Where is synergistic information most prominent?
+            'synergy_detector': nn.Sequential(
+                nn.Linear(fusion_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+                nn.Sigmoid()
+            )
+        })
+        
+        # ==================== QUESTION-ADAPTIVE ROUTING ====================
+        # Learn which PID patterns to emphasize based on question type
+        self.pid_pattern_router = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
             nn.LayerNorm(hidden_dim // 2),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
-            nn.LayerNorm(hidden_dim // 4),
-            nn.Dropout(0.1),
-            # Output 8 routing weights for each PID component
-            nn.Linear(hidden_dim // 4, 8),  # 8 PID components
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 3),  # 3 weights: redundancy, uniqueness, synergy
             nn.Softmax(dim=-1)
         )
         
-        # Enhanced attention weight generators for each component
-        self.attention_generators = nn.ModuleDict({
-            name: nn.Sequential(
-                # First compression layer
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.LayerNorm(hidden_dim // 2),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                
-                # Second compression layer  
-                nn.Linear(hidden_dim // 2, hidden_dim // 4),
-                nn.LayerNorm(hidden_dim // 4),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                
-                # Final attention weight generation
-                nn.Linear(hidden_dim // 4, 1),
-                nn.Sigmoid()
-            ) for name in self.pattern_detectors.keys()
-        })
+        # ==================== ENHANCEMENT NETWORKS ====================
+        # Simple enhancement of Z_fused based on detected patterns
         
-        # Enhanced feature modulation and aggregation
-        self.feature_modulator = nn.Sequential(
-            nn.Linear(fusion_dim * 8, fusion_dim * 4),
-            nn.LayerNorm(fusion_dim * 4),
+        self.feature_enhancer = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(fusion_dim * 4, fusion_dim * 2),
-            nn.LayerNorm(fusion_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, fusion_dim),
             nn.LayerNorm(fusion_dim)
         )
         
-        # Output projection with residual
-        self.output_projection = nn.Linear(fusion_dim, fusion_dim)
-        
-        # Initialize weights
-        self._initialize_weights()
-        
-    def _initialize_weights(self):
-        """Initialize weights using Xavier/Kaiming initialization."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.LayerNorm):
-                nn.init.constant_(module.weight, 1)
-                nn.init.constant_(module.bias, 0)
-        
-    def _make_pattern_detector(self, input_dim, hidden_dim):
-        """Create a pattern detection network."""
-        return nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU()
+        # ==================== OUTPUT PROJECTION ====================
+        self.output_projection = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
-    
-    def detect_redundancy(self, Z_TV, Z_PV, Z_PT):
-        """Detect information shared across all modalities."""
-        # Concatenate all bi-modal features
-        concat_features = torch.cat([Z_TV, Z_PV, Z_PT], dim=-1)
-        return self.pattern_detectors['redundancy'](concat_features)
-    
-    def detect_uniqueness(self, Z_fused, Z_TV, Z_PV, Z_PT):
-        """Detect information unique to each modality."""
-        # Approximate unique information by suppressing other modalities
-        unique_patterns = {
-            'unique_text': self.pattern_detectors['unique_text'](
-                Z_fused - 0.5 * (Z_PV + Z_PT)
-            ),
-            'unique_point': self.pattern_detectors['unique_point'](
-                Z_fused - 0.5 * (Z_TV + Z_PT)
-            ),
-            'unique_view': self.pattern_detectors['unique_view'](
-                Z_fused - 0.5 * (Z_TV + Z_PV)
-            )
-        }
-        return unique_patterns
-    
-    def detect_synergies(self, Z_TV, Z_PV, Z_PT, Z_fused):
-        """Detect synergistic information from modality pairs."""
-        synergy_patterns = {
-            'synergy_tp': self.pattern_detectors['synergy_tp'](Z_PT),
-            'synergy_tv': self.pattern_detectors['synergy_tv'](Z_TV),
-            'synergy_pv': self.pattern_detectors['synergy_pv'](Z_PV),
-            'synergy_tpv': self.pattern_detectors['synergy_tpv'](Z_fused)
-        }
-        return synergy_patterns
+        
+        # Learnable residual weight
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))  # Start with small enhancement
+        
+    def _initialize_alignment_layers(self, Z_TV, Z_PV, Z_PT):
+        """Initialize dimension alignment layers based on actual input dimensions."""
+        device = Z_TV.device
+        
+        tv_dim = Z_TV.shape[-1]
+        pv_dim = Z_PV.shape[-1] 
+        pt_dim = Z_PT.shape[-1]
+        
+        # Create alignment layers (only if needed)
+        self.tv_dim_align = nn.Linear(tv_dim, self.fusion_dim).to(device) if tv_dim != self.fusion_dim else nn.Identity()
+        self.pv_dim_align = nn.Linear(pv_dim, self.fusion_dim).to(device) if pv_dim != self.fusion_dim else nn.Identity()
+        self.pt_dim_align = nn.Linear(pt_dim, self.fusion_dim).to(device) if pt_dim != self.fusion_dim else nn.Identity()
+        
+        # Initialize weights if needed
+        for layer in [self.tv_dim_align, self.pv_dim_align, self.pt_dim_align]:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
     
     def forward(self, Z_TV, Z_PV, Z_PT, Z_fused, text_global):
         """
-        Apply enhanced PID-guided attention to enhance features based on question.
+        Apply PID-guided enhancement to the already-fused features.
         
         Args:
-            Z_TV: Text-View features [B, N, D]
-            Z_PV: Point-View features [B, N, D]
-            Z_PT: Point-Text features [B, N, D]
-            Z_fused: Fused trimodal features [B, N, D]
-            text_global: Global question representation [B, D]
+            Z_TV: [B, Np, D_tv] - Text-View bi-modal features  
+            Z_PV: [B, Np, D_pv] - Point-View bi-modal features
+            Z_PT: [B, Np, D_pt] - Point-Text bi-modal features
+            Z_fused: [B, Np, D] - Tri-modal fused features (main input)
+            text_global: [B, D] - Global question representation
             
         Returns:
-            Enhanced features [B, N, D]
+            enhanced_features: [B, Np, D] - PID-enhanced features
+            
+        Information Flow:
+            Question → Pattern analysis → PID-aware attention → Feature enhancement → Output
         """
-        B, N, D = Z_fused.shape
+        B, Np, D = Z_fused.shape
         
-        # Step 1: Enhanced question analysis
+        # ==================== DYNAMIC ALIGNMENT ====================
+        if not self._alignment_initialized:
+            self._initialize_alignment_layers(Z_TV, Z_PV, Z_PT)
+            self._alignment_initialized = True
+        
+        # Align dimensions (only used for pattern detection, not main processing)
+        Z_TV_aligned = self.tv_dim_align(Z_TV)  # [B, Np, fusion_dim]
+        Z_PV_aligned = self.pv_dim_align(Z_PV)  # [B, Np, fusion_dim]
+        Z_PT_aligned = self.pt_dim_align(Z_PT)  # [B, Np, fusion_dim]
+        
+        # ==================== QUESTION ANALYSIS ====================
+        # Analyze question to determine what kind of PID patterns to look for
         question_context = self.question_analyzer(text_global)  # [B, hidden_dim]
-        routing_weights = self.component_router(question_context)  # [B, 8]
         
-        # Step 2: Detect PID patterns
-        # Redundancy
-        redundancy_pattern = self.detect_redundancy(Z_TV, Z_PV, Z_PT)
+        # Determine PID pattern importance based on question
+        pid_weights = self.pid_pattern_router(question_context)  # [B, 3]
+        w_redundancy, w_uniqueness, w_synergy = pid_weights[:, 0:1], pid_weights[:, 1:2], pid_weights[:, 2:3]
         
-        # Uniqueness
-        unique_patterns = self.detect_uniqueness(Z_fused, Z_TV, Z_PV, Z_PT)
+        # ==================== PID-INSPIRED PATTERN DETECTION ====================
+        # Detect different types of information patterns in Z_fused
+        # This is MUCH simpler than explicit decomposition
         
-        # Synergies
-        synergy_patterns = self.detect_synergies(Z_TV, Z_PV, Z_PT, Z_fused)
+        redundancy_attention = self.pattern_detectors['redundancy_detector'](Z_fused)  # [B, Np, 1]
+        uniqueness_attention = self.pattern_detectors['uniqueness_detector'](Z_fused)  # [B, Np, 1]
+        synergy_attention = self.pattern_detectors['synergy_detector'](Z_fused)      # [B, Np, 1]
         
-        # Combine all patterns
-        all_patterns = {
-            'redundancy': redundancy_pattern,
-            **unique_patterns,
-            **synergy_patterns
-        }
+        # ==================== QUESTION-ADAPTIVE ATTENTION COMBINATION ====================
+        # Combine attention patterns based on question-specific PID requirements
         
-        # Step 3: Generate enhanced attention weights for each component
-        attention_weights = {}
-        for name, pattern in all_patterns.items():
-            attention_weights[name] = self.attention_generators[name](pattern)
+        # Expand question-level weights to point level
+        w_redundancy_exp = w_redundancy.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1]
+        w_uniqueness_exp = w_uniqueness.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1]
+        w_synergy_exp = w_synergy.unsqueeze(1).expand(-1, Np, -1)        # [B, Np, 1]
         
-        # Step 4: Apply question-guided attention with routing
-        modulated_features = []
-        component_names = ['redundancy', 'unique_text', 'unique_point', 'unique_view',
-                          'synergy_tp', 'synergy_tv', 'synergy_pv', 'synergy_tpv']
+        # Combine attention patterns based on question needs
+        combined_attention = (
+            w_redundancy_exp * redundancy_attention +
+            w_uniqueness_exp * uniqueness_attention +
+            w_synergy_exp * synergy_attention
+        )  # [B, Np, 1]
         
-        for i, name in enumerate(component_names):
-            # Get routing weight for this component
-            route_weight = routing_weights[:, i:i+1].unsqueeze(1)  # [B, 1, 1]
-            
-            # Get attention weight
-            att_weight = attention_weights[name]  # [B, N, 1]
-            
-            # Apply both weights with enhanced combination
-            component_feature = Z_fused * att_weight * route_weight
-            modulated_features.append(component_feature)
+        # ==================== FEATURE ENHANCEMENT ====================
+        # Apply PID-guided attention to enhance features
         
-        # Step 5: Enhanced feature aggregation
-        concatenated = torch.cat(modulated_features, dim=-1)  # [B, N, 8*D]
-        aggregated = self.feature_modulator(concatenated)  # [B, N, D]
+        # Apply attention to Z_fused
+        attention_enhanced = Z_fused * combined_attention  # [B, Np, fusion_dim]
         
-        # Step 6: Output with residual connection
-        output = self.output_projection(aggregated)
-        return output + Z_fused  # Residual connection preserves information
+        # Further enhance through learned transformations
+        enhanced_features = self.feature_enhancer(attention_enhanced)  # [B, Np, fusion_dim]
+        
+        # ==================== OUTPUT WITH RESIDUAL ====================
+        # Combine original and enhanced features
+        
+        output_features = self.output_projection(enhanced_features)  # [B, Np, fusion_dim]
+        
+        # Residual connection preserves original information
+        final_output = Z_fused + self.residual_weight * output_features  # [B, Np, fusion_dim]
+        
+        return final_output
     
-    def get_routing_statistics(self, text_global):
+    def get_pid_pattern_weights(self, text_global):
         """
-        Utility function to analyze routing patterns for interpretability.
+        Utility function to analyze which PID patterns are emphasized for different questions.
+        Useful for interpretability and analysis.
         
-        Args:
-            text_global: Global question representation [B, D]
-            
         Returns:
-            Dictionary with routing weights and component importance
+            pid_weights: [B, 3] - Weights for [redundancy, uniqueness, synergy]
         """
         question_context = self.question_analyzer(text_global)
-        routing_weights = self.component_router(question_context)
+        pid_weights = self.pid_pattern_router(question_context)
+        return pid_weights
+    
+    def get_attention_maps(self, Z_fused):
+        """
+        Get attention maps for different PID patterns.
+        Useful for visualization and analysis.
         
-        component_names = ['redundancy', 'unique_text', 'unique_point', 'unique_view',
-                          'synergy_tp', 'synergy_tv', 'synergy_pv', 'synergy_tpv']
+        Returns:
+            attention_maps: Dict with keys ['redundancy', 'uniqueness', 'synergy']
+        """
+        attention_maps = {}
+        for pattern_name, detector in self.pattern_detectors.items():
+            pattern_type = pattern_name.split('_')[0]  # Extract 'redundancy', 'uniqueness', 'synergy'
+            attention_maps[pattern_type] = detector(Z_fused)
         
-        return {
-            'routing_weights': routing_weights,
-            'component_names': component_names,
-            'dominant_component': component_names[routing_weights.argmax(dim=1).item()],
-            'entropy': -torch.sum(routing_weights * torch.log(routing_weights + 1e-8), dim=1)
-        }
+        return attention_maps
