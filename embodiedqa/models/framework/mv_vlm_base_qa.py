@@ -178,7 +178,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Reasoning
         self.reason = FeatureRefinement(
             hidden_dim=self.D_fus,
-            max_visual_tokens=512,
+            vision_num_queries=256,
         )
         
     @property
@@ -548,11 +548,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         # ============ Step 1: Extract Features ============
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
-        points = batch_inputs_dict['points']
-        full_point_feats = feat_dict['fp_features'][-1].transpose(1, 2).contiguous()  # B, Np, Dp
-        full_point_pos = feat_dict['fp_xyz'][-1]  # B, Np, 3
-        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), feat_dict['last_fp_indices']).transpose(1, 2)  # B, Np, 3
-        
         # ============ Step 2: Enhanced Forward Fusion ============
         head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
         
@@ -635,19 +630,28 @@ class MultiViewVLMBase3DQA(BaseModel):
     
         
     def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        """Simplified prediction without superpoints."""
+        """
+        Prediction method that uses the SAME pipeline as training for consistency.
         
+        Key Changes:
+        1. Use the same feature extraction and refinement pipeline as loss()
+        2. Ensure spatial alignment for all downstream heads
+        3. Handle both QA and bbox predictions properly
+        """
+        # ============ Step 1: Extract Features (Same as Training) ============
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
         
-        # Use simplified fusion features
-        head_inputs = self._forward_simplified_fusion(feat_dict, text_dict)
+        # ============ Step 2: Use Same Feature Refinement as Training ============
+        # CRITICAL: Use the same forward_reasoning pipeline as in loss()
+        head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
         
-        results_list = self.qa_head.predict(**head_inputs,
-                                          batch_data_samples=batch_data_samples)
+        # ============ Step 3: QA Predictions ============
+        qa_predictions = self.qa_head.predict(**head_inputs_dict, batch_data_samples=batch_data_samples)
         
-        for data_sample, pred_scores in zip(batch_data_samples, results_list):
+        for data_sample, pred_scores in zip(batch_data_samples, qa_predictions):
             data_sample.pred_scores = pred_scores
+
         
         return batch_data_samples
         
