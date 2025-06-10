@@ -167,10 +167,23 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Tri-modal fusion
+        # self.adaptive_fusion = AdaptiveTrimodalFusion(
+        #     fusion_dim=self.D_fus,
+        # )
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=self.D_fus,
+            hidden_dim=256,
+            dropout=0.1,
+            # Specify input dimensions based on your encoders
+            text_input_dim=self.text_encoder.config.hidden_size,  # 768 for sentence-bert
+            view_input_dim=self.backbone.out_channels[-1],        # 1024 for swin
+            point_input_dim=self.backbone_lidar.fp_channels[-1][-1],  # 256 for pointnet++
+            # Bi-modal input dimensions (existing)
+            tv_input_dim=self.backbone.out_channels[-1],  # 1024
+            pv_input_dim=self.D_fus,  # 768
+            pt_input_dim=self.D_fus   # 768
         )
-        
+            
         
         # PID Guided Attention
         self.pid = PIDGuidedEnhancement(self.D_fus)
@@ -391,9 +404,22 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['Z_PT'] = Z_PT
         
         # 4. Tri-modal fusion
-        Z_fused, fusion_weights = self.adaptive_fusion(Z_TV, Z_PV, Z_PT)
+        # Z_fused, fusion_weights = self.adaptive_fusion(Z_TV, Z_PV, Z_PT)
+        # feat_dict['Z_fused'] = Z_fused
+        # feat_dict['fusion_weights'] = fusion_weights
+        Z_fused, fusion_weights, component_dict = self.adaptive_fusion(
+            # Bi-modal synergies
+            Z_TV, Z_PV, Z_PT,
+            # Uni-modal features
+            text_features=text_dict['text_feats'],
+            view_features=raw_view_feats,
+            point_features=raw_point_feats,
+        )
+        # store enhanced output
         feat_dict['Z_fused'] = Z_fused
-        feat_dict['fusion_weights'] = fusion_weights
+        feat_dict['fusion_weights'] = fusion_weights  # [B, 8] - now includes all PID components
+        feat_dict['component_dict'] = component_dict
+        
         
         # 5. Compositional PID
         pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_global_features_for_att)
@@ -583,7 +609,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         if self.with_situation_predict_head:
             fusion_feat = qa_losses['fusion_feat']
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
-            losses.update(situation_predict_loss) 
+            losses.update(situation_predict_loss)
+            
+        # component_analysis = self.adaptive_fusion.get_component_analysis(feat_dict['fusion_weights'])
+        # print("=== PID Component Analysis ===")
+        # for component, importance in component_analysis.items():
+        #     print(f"{component}: {importance:.4f}")
         
         losses = self.loss_collect(losses)
         
