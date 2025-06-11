@@ -27,6 +27,7 @@ from .pid import PIDGuidedEnhancement
 from .adaptive_fusion import AdaptiveTrimodalFusion
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
+from embodiedqa.models.losses import EnhancedLossComputation
 
 import traceback
 
@@ -192,6 +193,16 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.reason = FeatureRefinement(
             hidden_dim=self.D_fus,
             vision_num_queries=256,
+        )
+        
+        # PID regularisation loss
+        self.enhanced_loss_computation = EnhancedLossComputation(
+            uniqueness_weight=0.1,    # Encourage component specialization
+            synergy_weight=0.1,       # Encourage bi-modal synergies
+            redundancy_weight=0.05,   # Encourage tri-modal redundancy
+            balance_weight=0.05,      # Prevent component domination
+            spatial_weight=0.2,       # CRITICAL: Higher weight for spatial reasoning
+            adaptive_weight=0.1       # Question-type adaptation
         )
         
     @property
@@ -490,70 +501,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         # print("===== END OF EXTRACT_TEXT_FEAT DEBUGGING =====\n")
         
         return text_dict
-
-    
-
-    # def loss(self, batch_inputs_dict: dict, batch_data_samples: SampleList,
-    #          **kwargs) -> Union[dict, list]:        
-    #     """Calculate losses from a batch of inputs dict and data samples.
-
-    #     Args:
-    #         batch_inputs_dict (dict): The model input dict which include
-    #             'points', 'img' keys.
-
-    #                 - points (list[torch.Tensor]): Point cloud of each sample.
-    #                 - imgs (torch.Tensor, optional): Image of each sample.
-
-    #         batch_data_samples (List[:obj:`Det3DDataSample`]): The Data
-    #             Samples. It usually includes information such as
-    #             `gt_instance_3d`, `gt_panoptic_seg_3d` and `gt_sem_seg_3d`.
-
-    #     Returns:
-    #         dict: A dictionary of loss components.
-    #     """
-    #     text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-    #     feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-
-    #     points = batch_inputs_dict['points']
-    #     batch_size = len(points)
-    #     losses = {}
-
-    #     full_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous() #B,seed_num,hidden_size
-    #     full_point_pos = feat_dict['fp_xyz'][-1]
-    #     point_mask = None #B,proposal_num
-
-    #     fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-    #     point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
-    #     point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
-
-    #     head_inputs_dict = self.forward_transformer(point_feats=point_feats,
-    #                                                 point_pos=point_pos,
-    #                                                 point_mask=point_mask,
-    #                                                 text_dict=text_dict,
-    #                                                 full_point_feats=full_point_feats,
-    #                                                 full_point_pos=full_point_pos)
-    #     qa_losses = self.qa_head.loss(**head_inputs_dict,
-    #                                  ret_fusion_feat=True,
-    #                                  batch_data_samples=batch_data_samples)
-    #     losses.update(qa_losses)
-        
-    #     if self.with_target_bbox_head:
-    #         ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
-    #                                                 points=points, 
-    #                                                 aggregated_points=point_pos, 
-    #                                                 batch_data_samples=batch_data_samples)
-    #         losses.update(ref_loc_losses)
-    #     if self.with_target_cls_head:
-    #         fusion_feat = qa_losses['fusion_feat']
-    #         ref_cls_loss = self.target_cls_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
-    #         losses.update(ref_cls_loss)
-    #     if self.with_situation_predict_head:
-    #         fusion_feat = qa_losses['fusion_feat']
-    #         situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
-    #         losses.update(situation_predict_loss)  
-    #     losses = self.loss_collect(losses)
-    #     return losses
-    
     
     def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
         """Calculate losses from a batch of inputs dict and data samples.
@@ -583,39 +530,81 @@ class MultiViewVLMBase3DQA(BaseModel):
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                     ret_fusion_feat=True,
                                     batch_data_samples=batch_data_samples)
-        losses.update(qa_losses)
+        standard_qa_loss = qa_losses['qa_cls_loss']
+    
+        # ============ Step 4: Extract Questions for PID Loss ============
+        questions = [sample.question for sample in batch_data_samples]
+        
+        # ============ Step 5: Compute Enhanced Loss with PID Regularization ============
+        total_loss, loss_dict = self.enhanced_loss_computation(
+            qa_loss=standard_qa_loss,
+            component_dict=feat_dict['component_dict'],
+            component_weights=feat_dict['fusion_weights'],
+            questions=questions
+        )
+        
+        # ============ Step 6: Add Other Standard Losses ============ 
+        losses = {'loss': total_loss}  # Main loss for backprop
+        
+        # Add individual loss components for monitoring
+        losses.update(loss_dict)
         
         # Target classification loss  
         if self.with_target_cls_head:
             fusion_feat = qa_losses['fusion_feat']
-            ref_cls_loss = self.target_cls_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
+            ref_cls_loss = self.target_cls_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
+            cls_loss_value = ref_cls_loss['ref_cls_loss']
+            total_loss += cls_loss_value
+            losses['loss'] = total_loss
+            
+            # Add individual components
             losses.update(ref_cls_loss)
         
         # Target bbox loss
         if self.with_target_bbox_head:
-            # Extract the coordinates that correspond to the features
             proposal_coordinates = head_inputs_dict['sampled_coordinates']  # [B, K, 3]
             
             ref_loc_losses = self.target_bbox_head.loss(
                 **{k: v for k, v in head_inputs_dict.items() 
-                    if k not in ['fps_indices', 'sampled_coordinates']},  # Pass head inputs
-                points=batch_inputs_dict['points'],                      # Original raw points
-                aggregated_points=proposal_coordinates,                  # ALIGNED coordinates
+                    if k not in ['fps_indices', 'sampled_coordinates']},
+                points=batch_inputs_dict['points'],
+                aggregated_points=proposal_coordinates,
                 batch_data_samples=batch_data_samples
             )
+
+            bbox_loss_value = ref_loc_losses['ref_loc_loss']
+            total_loss += bbox_loss_value
+            losses['loss'] = total_loss
+            
+            # Add individual components
             losses.update(ref_loc_losses)
         
         # Situation prediction loss
         if self.with_situation_predict_head:
             fusion_feat = qa_losses['fusion_feat']
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
-            losses.update(situation_predict_loss)
             
-        # component_analysis = self.adaptive_fusion.get_component_analysis(feat_dict['fusion_weights'])
-        # print("=== PID Component Analysis ===")
-        # for component, importance in component_analysis.items():
-        #     print(f"{component}: {importance:.4f}")
+            # Add to total loss
+            situation_loss_value = situation_predict_loss['situation_predict_loss']
+            total_loss += situation_loss_value
+            losses['loss'] = total_loss
+            
+            # Add individual components  
+            losses.update(situation_predict_loss)
         
+        # ============ Step 7: Component Analysis (Optional, for debugging) ============
+        if hasattr(self, 'training') and self.training and hasattr(self, '_log_component_analysis'):
+            if self._log_component_analysis:
+                component_analysis = self.adaptive_fusion.get_component_analysis(feat_dict['fusion_weights'])
+                
+                # Print periodically for monitoring
+                if kwargs.get('step', 0) % 100 == 0:
+                    print("\n=== PID Component Analysis ===")
+                    for component, importance in component_analysis.items():
+                        print(f"{component}: {importance:.4f}")
+                    print("================================\n")
+        
+        # ============ Step 8: Final Loss Collection ============
         losses = self.loss_collect(losses)
         
         return losses
@@ -807,43 +796,4 @@ class MultiViewVLMBase3DQA(BaseModel):
     
     def forward_reasoning(self, feat_dict, text_dict):
         return self.reason(feat_dict, text_dict)
-    
-    
-    # def forward_transformer(self,
-    #                         point_feats: Tensor,
-    #                         point_pos: Tensor,
-    #                         point_mask:Tensor,
-    #                         text_dict: Dict,
-    #                         full_point_feats: Tensor = None,
-    #                         full_point_pos: Tensor = None,
-    #                         full_point_mask: Tensor = None
-    #                         ) -> Dict:
-    #     #feats: mapping and add pos embedding
-    #     point_feats = self.visual_feat_map(point_feats)
-    #     point_feats += self.pos_embedding(point_pos)
-    #     point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
-        
-    #     full_point_feats = self.full_visual_feat_map(full_point_feats)
-    #     full_point_feats += self.full_pos_embedding(full_point_pos)
-    #     full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
-        
-    #     fusion_encoder_inputs_dict = dict(
-    #         lang_feats = text_dict['text_feats'],
-    #         lang_attention_mask = text_dict['text_token_mask'],
-    #         visual_feats = point_feats,
-    #         visual_attention_mask = point_mask,
-    #         full_visual_feats = full_point_feats,
-    #         full_visual_attention_mask = full_point_mask,
-    #         )
-    #     fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
-        # head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
-        #                         visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
-        #                         fusion_feat_language=fusion_output['lang_feats'], 
-        #                         language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
-        #                         fusion_feat_pooler=fusion_output.get('pooler_feat',None)
-        #                         )
-        
-    #     return head_inputs_dict
-
-   
     
