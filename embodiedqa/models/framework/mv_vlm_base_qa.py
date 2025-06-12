@@ -183,7 +183,8 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.hybrid_spatial_reasoning = HybridSpatialReasoningModule(
             fusion_dim=self.D_fus,      # 768
             hidden_dim=256,
-            text_dim=self.text_encoder.config.hidden_size  # 768
+            text_dim=self.text_encoder.config.hidden_size,  # 768
+            sparse_points=256
         )
         
         
