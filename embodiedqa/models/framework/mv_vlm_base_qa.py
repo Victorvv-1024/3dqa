@@ -416,14 +416,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         Z_spatially_enhanced, spatial_info = self.hybrid_spatial_reasoning(
             Z_fused=Z_fused,
             coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
-            text_features=text_dict['text_global'],  # [B, D]
+            text_features=text_dict['text_global_token'],  # [B, D]
             questions=questions
         )
 
 
         # 6. PID enhancement
         Z_pid_enhanced = self.pid_enhancement(
-            Z_TV, Z_PV, Z_PT, Z_spatially_enhanced, text_dict['text_global']
+            Z_TV, Z_PV, Z_PT, Z_spatially_enhanced, text_dict['text_global_token']
         )
         # Selective blending: use PID more for non-spatial questions
         spatial_mask = spatial_info['spatial_mask']  # [B]
