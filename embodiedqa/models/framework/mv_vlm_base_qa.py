@@ -25,6 +25,7 @@ from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .pid import PIDGuidedEnhancement
 from .adaptive_fusion import AdaptiveTrimodalFusion
+from .hybrid_spatial_reasoning import HybridSpatialReasoningModule
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 from embodiedqa.models.losses import EnhancedLossComputation
@@ -130,31 +131,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.coord_type = coord_type
         self.voxel_size = voxel_size
         
-        """ --- New arguments for our framework --- """
-        # DISTILLATION LOSS CONFIGURATION
-        # self.distillation_loss_cfg = distillation_loss_cfg
-        # self.use_distillation_loss = distillation_loss_cfg is not None
-
-        # if self.use_distillation_loss:
-        #     # Prefer new config with 'type' key for MODELS.build()
-        #     if isinstance(distillation_loss_cfg, dict) and 'type' in distillation_loss_cfg:
-        #         self.distillation_loss_calculator = MODELS.build(distillation_loss_cfg)
-        #         print(f"Distillation loss enabled: {distillation_loss_cfg['type']}")
-        #     else:
-        #         # Fallback: simple MSE loss for backward compatibility
-        #         loss_type = distillation_loss_cfg.get('loss_type', 'mse') if distillation_loss_cfg else 'mse'
-        #         loss_weight = distillation_loss_cfg.get('loss_weight', 0.2) if distillation_loss_cfg else 0.2
-        #         if loss_type == 'mse':
-        #             self.distillation_loss_calculator = nn.MSELoss()
-        #             self.distillation_loss_weight = loss_weight
-        #             print(f"Simple MSE distillation loss enabled with weight {loss_weight}")
-        #         else:
-        #             raise ValueError(f"Unsupported loss_type: {loss_type}")
-        # else:
-        #     self.distillation_loss_calculator = None
-        #     print("Distillation loss disabled")
-        
-        
         # Bi-Modal fusion
         self.pv_fusion = PointViewFusion(
             point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim = 256
@@ -167,10 +143,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_dim=self.D_fus,
         )
         
-        # Tri-modal fusion
-        # self.adaptive_fusion = AdaptiveTrimodalFusion(
-        #     fusion_dim=self.D_fus,
-        # )
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=self.D_fus,
             hidden_dim=256,
@@ -187,7 +159,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             
         
         # PID Guided Attention
-        self.pid = PIDGuidedEnhancement(self.D_fus)
+        self.pid_enhancement = PIDGuidedEnhancement(self.D_fus)
         
         # Reasoning
         self.reason = FeatureRefinement(
@@ -195,15 +167,26 @@ class MultiViewVLMBase3DQA(BaseModel):
             vision_num_queries=256,
         )
         
-        # PID regularisation loss
+        # Enhanced loss computation, includes spatial losses and PID regularization
         self.enhanced_loss_computation = EnhancedLossComputation(
-            uniqueness_weight=0.1,    # Encourage component specialization
-            synergy_weight=0.1,       # Encourage bi-modal synergies
-            redundancy_weight=0.05,   # Encourage tri-modal redundancy
-            balance_weight=0.05,      # Prevent component domination
-            spatial_weight=0.2,       # CRITICAL: Higher weight for spatial reasoning
-            adaptive_weight=0.1       # Question-type adaptation
+            uniqueness_weight=0.05,    # Reduced since spatial reasoning takes priority
+            synergy_weight=0.1,        
+            redundancy_weight=0.03,    
+            balance_weight=0.03,       
+            spatial_weight=0.15,       # Reduced (spatial module handles this)
+            adaptive_weight=0.05,
+            # New spatial loss weights
+            superpoint_consistency_weight=0.1  # Wang et al. consistency loss
         )
+        
+        # Hybrid Spatial Reasoning
+        self.hybrid_spatial_reasoning = HybridSpatialReasoningModule(
+            fusion_dim=self.D_fus,      # 768
+            hidden_dim=256,
+            text_dim=self.text_encoder.config.hidden_size  # 768
+        )
+        
+        
         
     @property
     def with_qa_head(self):
@@ -415,9 +398,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['Z_PT'] = Z_PT
         
         # 4. Tri-modal fusion
-        # Z_fused, fusion_weights = self.adaptive_fusion(Z_TV, Z_PV, Z_PT)
-        # feat_dict['Z_fused'] = Z_fused
-        # feat_dict['fusion_weights'] = fusion_weights
         Z_fused, fusion_weights, component_dict = self.adaptive_fusion(
             # Bi-modal synergies
             Z_TV, Z_PV, Z_PT,
@@ -426,15 +406,39 @@ class MultiViewVLMBase3DQA(BaseModel):
             view_features=raw_view_feats,
             point_features=raw_point_feats,
         )
-        # store enhanced output
+        
         feat_dict['Z_fused'] = Z_fused
         feat_dict['fusion_weights'] = fusion_weights  # [B, 8] - now includes all PID components
         feat_dict['component_dict'] = component_dict
         
+        # 5. Hybrid Spatial Reasoning
+        questions = [sample.question for sample in batch_data_samples]
+        Z_spatially_enhanced, spatial_info = self.hybrid_spatial_reasoning(
+            Z_fused=Z_fused,
+            coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
+            text_features=text_dict['text_global'],  # [B, D]
+            questions=questions
+        )
+
+
+        # 6. PID enhancement
+        Z_pid_enhanced = self.pid_enhancement(
+            Z_TV, Z_PV, Z_PT, Z_spatially_enhanced, text_dict['text_global']
+        )
+        # Selective blending: use PID more for non-spatial questions
+        spatial_mask = spatial_info['spatial_mask']  # [B]
+        final_features = torch.zeros_like(Z_spatially_enhanced)
         
-        # 5. Compositional PID
-        pid_output = self.pid(Z_TV, Z_PV, Z_PT, Z_fused, text_global_features_for_att)
-        feat_dict['Z_final'] = pid_output
+        for b in range(len(batch_data_samples)):
+            if spatial_mask[b]:
+                # Spatial question: prioritize spatial reasoning (80% spatial, 20% PID)
+                final_features[b] = 0.8 * Z_spatially_enhanced[b] + 0.2 * Z_pid_enhanced[b]
+            else:
+                # Non-spatial question: balanced approach (50% spatial, 50% PID)
+                final_features[b] = 0.5 * Z_spatially_enhanced[b] + 0.5 * Z_pid_enhanced[b]
+        
+        feat_dict['Z_final'] = final_features
+        feat_dict['spatial_info'] = spatial_info
 
         return feat_dict
     
@@ -521,25 +525,28 @@ class MultiViewVLMBase3DQA(BaseModel):
         # ============ Step 1: Extract Features ============
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
+        
         # ============ Step 2: Enhanced Forward Fusion ============
         head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
         
-        # ============ Step 3: Compute Losses ============
-        losses = {}
-        # QA loss
+        # ============ Step 3: Standard QA Loss ============
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                     ret_fusion_feat=True,
                                     batch_data_samples=batch_data_samples)
+        
         standard_qa_loss = qa_losses['qa_cls_loss']
-    
-        # ============ Step 4: Extract Questions for PID Loss ============
+        
+        # ============ Step 4: Extract Information for Enhanced Loss ============
         questions = [sample.question for sample in batch_data_samples]
         
-        # ============ Step 5: Compute Enhanced Loss with PID Regularization ============
+        # ============ Step 5: Compute Enhanced Loss with Spatial Reasoning ============
         total_loss, loss_dict = self.enhanced_loss_computation(
             qa_loss=standard_qa_loss,
             component_dict=feat_dict['component_dict'],
             component_weights=feat_dict['fusion_weights'],
+            spatial_info=feat_dict['spatial_info'],  # New spatial information
+            Z_fused=feat_dict['Z_fused'],
+            coordinates=feat_dict['fp_xyz'][-1],
             questions=questions
         )
         
@@ -553,16 +560,16 @@ class MultiViewVLMBase3DQA(BaseModel):
         if self.with_target_cls_head:
             fusion_feat = qa_losses['fusion_feat']
             ref_cls_loss = self.target_cls_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
+            
             cls_loss_value = ref_cls_loss['ref_cls_loss']
             total_loss += cls_loss_value
             losses['loss'] = total_loss
             
-            # Add individual components
             losses.update(ref_cls_loss)
         
         # Target bbox loss
         if self.with_target_bbox_head:
-            proposal_coordinates = head_inputs_dict['sampled_coordinates']  # [B, K, 3]
+            proposal_coordinates = head_inputs_dict['sampled_coordinates']
             
             ref_loc_losses = self.target_bbox_head.loss(
                 **{k: v for k, v in head_inputs_dict.items() 
@@ -571,12 +578,11 @@ class MultiViewVLMBase3DQA(BaseModel):
                 aggregated_points=proposal_coordinates,
                 batch_data_samples=batch_data_samples
             )
-
+            
             bbox_loss_value = ref_loc_losses['ref_loc_loss']
             total_loss += bbox_loss_value
             losses['loss'] = total_loss
             
-            # Add individual components
             losses.update(ref_loc_losses)
         
         # Situation prediction loss
@@ -584,28 +590,52 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_feat = qa_losses['fusion_feat']
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
             
-            # Add to total loss
             situation_loss_value = situation_predict_loss['situation_predict_loss']
             total_loss += situation_loss_value
             losses['loss'] = total_loss
             
-            # Add individual components  
             losses.update(situation_predict_loss)
-        
-        # ============ Step 7: Component Analysis (Optional, for debugging) ============
-        if hasattr(self, 'training') and self.training and hasattr(self, '_log_component_analysis'):
-            if self._log_component_analysis:
-                component_analysis = self.adaptive_fusion.get_component_analysis(feat_dict['fusion_weights'])
-                
-                # Print periodically for monitoring
-                if kwargs.get('step', 0) % 100 == 0:
-                    print("\n=== PID Component Analysis ===")
-                    for component, importance in component_analysis.items():
-                        print(f"{component}: {importance:.4f}")
-                    print("================================\n")
-        
+            
         # ============ Step 8: Final Loss Collection ============
         losses = self.loss_collect(losses)
+        
+        
+        # ============ Step 7: Spatial Analysis (Optional, for debugging) ============
+        if hasattr(self, 'training') and self.training and kwargs.get('step', 0) % 100 == 0:
+            spatial_info = feat_dict['spatial_info']
+            questions = [sample.question for sample in batch_data_samples]
+            analysis = {
+                'spatial_routing': spatial_info,
+                'questions': questions,
+                'superpoint_statistics': {},
+                'geometric_analysis': {}
+            }
+            self._log_spatial_analysis(feat_dict['spatial_info'], questions)
+            # Analyze superpoint quality
+            if 'superpoint_labels' in spatial_info:
+                superpoint_labels = spatial_info['superpoint_labels']
+                B, N = superpoint_labels.shape
+                
+                for b in range(B):
+                    unique_sps = torch.unique(superpoint_labels[b])
+                    sp_sizes = []
+                    for sp_id in unique_sps:
+                        if sp_id != -1:
+                            sp_size = (superpoint_labels[b] == sp_id).sum().item()
+                            sp_sizes.append(sp_size)
+                    
+                    stats = {
+                        'num_superpoints': len(sp_sizes),
+                        'avg_superpoint_size': sum(sp_sizes) / len(sp_sizes) if sp_sizes else 0,
+                        'superpoint_sizes': sp_sizes
+                    }
+                    analysis['superpoint_statistics'][f'sample_{b}'] = stats
+                    
+                    # Print superpoint statistics
+                    print(f"Sample {b}: {stats['num_superpoints']} superpoints, "
+                          f"avg size: {stats['avg_superpoint_size']:.1f}, "
+                          f"sizes: {sp_sizes[:5]}{'...' if len(sp_sizes) > 5 else ''}")
+                    
         
         return losses
 
@@ -797,3 +827,23 @@ class MultiViewVLMBase3DQA(BaseModel):
     def forward_reasoning(self, feat_dict, text_dict):
         return self.reason(feat_dict, text_dict)
     
+    def _log_spatial_analysis(self, spatial_info, questions):
+        """Log spatial reasoning analysis for debugging."""
+        if 'spatial_mask' in spatial_info:
+            spatial_mask = spatial_info['spatial_mask']
+            num_spatial = spatial_mask.sum().item()
+            total_questions = len(spatial_mask)
+            
+            print(f"\n=== Spatial Reasoning Analysis ===")
+            print(f"Spatial questions: {num_spatial}/{total_questions}")
+            
+            if 'superpoint_counts' in spatial_info:
+                avg_superpoints = sum(spatial_info['superpoint_counts']) / len(spatial_info['superpoint_counts'])
+                print(f"Average superpoints per sample: {avg_superpoints:.1f}")
+            
+            # Log spatial vs non-spatial questions
+            for i, (is_spatial, question) in enumerate(zip(spatial_mask, questions)):
+                question_type = "SPATIAL" if is_spatial else "NON-SPATIAL"
+                print(f"  {question_type}: {question[:50]}...")
+            
+            print("=====================================\n")

@@ -206,22 +206,21 @@ class PIDRegularizationLoss(nn.Module):
 
 
 class EnhancedLossComputation(nn.Module):
-    """
-    Enhanced loss computation that incorporates PID regularization.
-    """
+    """Enhanced loss computation with spatial reasoning losses."""
     
     def __init__(self, 
-                 uniqueness_weight=0.1,
+                 uniqueness_weight=0.05,
                  synergy_weight=0.1, 
-                 redundancy_weight=0.05,
-                 balance_weight=0.05,
-                 spatial_weight=0.2,
-                 adaptive_weight=0.1):
+                 redundancy_weight=0.03,
+                 balance_weight=0.03,
+                 spatial_weight=0.15,
+                 adaptive_weight=0.05,
+                 superpoint_consistency_weight=0.1):  # New spatial loss
         super().__init__()
         
         self.pid_regularization = PIDRegularizationLoss()
         
-        # Loss weights
+        # Existing PID loss weights (reduced)
         self.uniqueness_weight = uniqueness_weight
         self.synergy_weight = synergy_weight
         self.redundancy_weight = redundancy_weight
@@ -229,33 +228,83 @@ class EnhancedLossComputation(nn.Module):
         self.spatial_weight = spatial_weight
         self.adaptive_weight = adaptive_weight
         
+        # New spatial loss weights
+        self.superpoint_consistency_weight = superpoint_consistency_weight
+        
     def forward(self, 
                 qa_loss: torch.Tensor,
                 component_dict: Dict[str, torch.Tensor],
                 component_weights: torch.Tensor, 
+                spatial_info: Dict,
+                Z_fused: torch.Tensor,
+                coordinates: torch.Tensor,
                 questions: list = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """
-        Compute total loss with PID regularization.
+        """Enhanced loss computation with spatial reasoning."""
         
-        Args:
-            qa_loss: Standard QA loss
-            component_dict: PID component dictionary
-            component_weights: Component importance weights
-            questions: List of question strings
-            
-        Returns:
-            total_loss: Combined loss
-            loss_dict: Dictionary of individual loss components
-        """
-        
-        # Compute PID regularization losses
+        # Existing PID regularization losses
         pid_losses = self.pid_regularization(component_dict, component_weights, questions)
+        
+        # New spatial reasoning losses
+        spatial_losses = {}
+        
+        # Superpoint consistency loss (Wang et al. approach)
+        if 'superpoint_labels' in spatial_info:
+            superpoint_consistency_loss = 0.0
+            valid_superpoints = 0
+            
+            superpoint_labels = spatial_info['superpoint_labels']  # [B, N]
+            B, N, D = Z_fused.shape
+            
+            for b in range(B):
+                unique_superpoints = torch.unique(superpoint_labels[b])
+                
+                for sp_id in unique_superpoints:
+                    if sp_id == -1:
+                        continue
+                        
+                    sp_mask = (superpoint_labels[b] == sp_id)
+                    if sp_mask.sum() < 2:
+                        continue
+                    
+                    sp_features = Z_fused[b][sp_mask]  # [Nsp, D]
+                    sp_mean = sp_features.mean(dim=0)  # [D]
+                    
+                    # Features within superpoint should be consistent
+                    superpoint_consistency_loss += F.mse_loss(
+                        sp_features, 
+                        sp_mean.unsqueeze(0).expand_as(sp_features)
+                    )
+                    valid_superpoints += 1
+            
+            if valid_superpoints > 0:
+                spatial_losses['superpoint_consistency_loss'] = superpoint_consistency_loss / valid_superpoints
+            else:
+                spatial_losses['superpoint_consistency_loss'] = torch.tensor(0.0, device=Z_fused.device)
+        
+        # Spatial question encouragement loss
+        if 'spatial_mask' in spatial_info:
+            spatial_mask = spatial_info['spatial_mask']  # [B]
+            num_spatial = spatial_mask.sum()
+            
+            if num_spatial > 0:
+                # Encourage spatial routing for "where" questions
+                spatial_encouragement_loss = torch.tensor(0.0, device=Z_fused.device)
+                
+                # Add loss to encourage spatial features for spatial questions
+                for i, question in enumerate(questions or []):
+                    if spatial_mask[i] and self._is_spatial_question(question):
+                        # Spatial questions should have more spatial emphasis
+                        spatial_encouragement_loss += 0.1  # Small constant encouragement
+                
+                spatial_losses['spatial_encouragement_loss'] = spatial_encouragement_loss / max(num_spatial, 1)
+            else:
+                spatial_losses['spatial_encouragement_loss'] = torch.tensor(0.0, device=Z_fused.device)
         
         # Combine all losses
         total_loss = qa_loss
         loss_dict = {'qa_loss': qa_loss}
         
-        # Add PID regularization losses
+        # Add existing PID losses (with reduced weights)
         total_loss += self.uniqueness_weight * pid_losses['uniqueness_loss']
         total_loss += self.synergy_weight * pid_losses['synergy_loss']
         total_loss += self.redundancy_weight * pid_losses['redundancy_loss']  
@@ -263,8 +312,20 @@ class EnhancedLossComputation(nn.Module):
         total_loss += self.spatial_weight * pid_losses['spatial_reasoning_loss']
         total_loss += self.adaptive_weight * pid_losses['question_adaptive_loss']
         
+        # Add new spatial reasoning losses
+        total_loss += self.superpoint_consistency_weight * spatial_losses['superpoint_consistency_loss']
+        total_loss += 0.05 * spatial_losses['spatial_encouragement_loss']
+        
         # Store individual losses for monitoring
         loss_dict.update(pid_losses)
+        loss_dict.update(spatial_losses)
         loss_dict['total_loss'] = total_loss
         
         return total_loss, loss_dict
+    
+    def _is_spatial_question(self, question: str) -> bool:
+        """Check if question is spatial (where/location related)"""
+        spatial_keywords = ['where', 'location', 'side', 'next to', 'near', 'far', 'left', 'right', 
+                          'front', 'behind', 'above', 'below', 'between', 'corner', 'center']
+        question_lower = question.lower()
+        return any(keyword in question_lower for keyword in spatial_keywords)

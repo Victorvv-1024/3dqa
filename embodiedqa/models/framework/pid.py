@@ -1,20 +1,170 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, Tuple
+
+
+class EnhancedQuestionTypeRouter(nn.Module):
+    """
+    Enhanced question-type aware routing for PID components.
+    
+    Key improvements:
+    1. Explicit question-type classification (what, where, how, is, which, others)
+    2. Question-type specific PID patterns optimized for each question type
+    3. Spatial reasoning booster for "where" questions (addresses major weakness)
+    4. Handles 8 PID components (matching enhanced fusion)
+    5. Context-aware refinement using scene information
+    """
+    
+    def __init__(self, hidden_dim=256, fusion_dim=768, dropout=0.1):
+        super().__init__()
+        
+        self.hidden_dim = hidden_dim
+        self.fusion_dim = fusion_dim
+        
+        # ==================== QUESTION TYPE CLASSIFICATION ====================
+        self.question_type_classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 6),  # what, where, how, is, which, others
+            nn.Softmax(dim=-1)
+        )
+        
+        # ==================== OPTIMIZED PID PATTERNS PER QUESTION TYPE ====================
+        # Empirically optimized patterns based on question requirements
+        # [T_unique, V_unique, P_unique, TV_synergy, PV_synergy, PT_synergy, Redundant, Higher_synergy]
+        
+        self.register_buffer('question_type_patterns', torch.tensor([
+            # WHAT: Object recognition - emphasize visual and point features
+            [0.15, 0.25, 0.20, 0.15, 0.10, 0.05, 0.05, 0.05],
+            
+            # WHERE: SPATIAL REASONING - heavy point geometry + spatial synergies
+            [0.05, 0.10, 0.35, 0.05, 0.30, 0.10, 0.03, 0.02],
+            
+            # HOW: Procedural reasoning - balanced with text-visual emphasis
+            [0.20, 0.15, 0.15, 0.20, 0.10, 0.10, 0.05, 0.05],
+            
+            # IS: Binary classification - text emphasis + redundancy for stability
+            [0.25, 0.15, 0.15, 0.15, 0.10, 0.05, 0.10, 0.05],
+            
+            # WHICH: Comparative selection - balanced visual-spatial comparison
+            [0.15, 0.20, 0.20, 0.15, 0.15, 0.10, 0.03, 0.02],
+            
+            # OTHERS: Generic balanced approach
+            [0.15, 0.15, 0.15, 0.15, 0.15, 0.10, 0.08, 0.07]
+        ]).float())
+        
+        # ==================== ADAPTIVE PATTERN LEARNING ====================
+        self.pattern_adaptation_network = nn.Sequential(
+            nn.Linear(hidden_dim + 6, hidden_dim),  # hidden_dim + question_type_probs
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 8),  # 8 PID components
+            nn.Tanh()  # [-1, 1] for controlled adaptation
+        )
+        
+        # ==================== SPATIAL REASONING BOOSTER ====================
+        # Critical for improving "where" question performance
+        self.spatial_booster = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 3),  # P_unique, PV_synergy, PT_synergy
+            nn.Sigmoid()  # [0, 1] multiplicative boost
+        )
+        
+        # ==================== CONTEXT-AWARE REFINEMENT ====================
+        self.context_refiner = nn.Sequential(
+            nn.Linear(hidden_dim + fusion_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 8),
+            nn.Softmax(dim=-1)
+        )
+        
+    def forward(self, question_context: torch.Tensor, 
+                scene_context: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Enhanced question-type aware PID routing.
+        
+        Args:
+            question_context: [B, hidden_dim] - Analyzed question features
+            scene_context: [B, fusion_dim] - Scene context for refinement
+            
+        Returns:
+            pid_weights: [B, 8] - Adaptive PID component weights
+            analysis_dict: Dict with routing analysis for debugging
+        """
+        B = question_context.shape[0]
+        analysis_dict = {}
+        
+        # Step 1: Classify question type
+        question_type_probs = self.question_type_classifier(question_context)  # [B, 6]
+        analysis_dict['question_type_probs'] = question_type_probs
+        
+        # Step 2: Get base PID patterns for question types
+        base_patterns = torch.matmul(question_type_probs, self.question_type_patterns)  # [B, 8]
+        analysis_dict['base_patterns'] = base_patterns
+        
+        # Step 3: Adaptive pattern refinement
+        adaptation_input = torch.cat([question_context, question_type_probs], dim=-1)
+        pattern_adaptations = self.pattern_adaptation_network(adaptation_input)  # [B, 8]
+        
+        adapted_patterns = base_patterns + 0.1 * pattern_adaptations
+        adapted_patterns = F.softmax(adapted_patterns, dim=-1)
+        analysis_dict['adapted_patterns'] = adapted_patterns
+        
+        # Step 4: Spatial reasoning boost (critical for "where" questions)
+        spatial_boost_weights = self.spatial_booster(question_context)  # [B, 3]
+        
+        spatial_boosted_patterns = adapted_patterns.clone()
+        # Boost spatial components: P_unique (idx=2), PV_synergy (idx=4), PT_synergy (idx=5)
+        spatial_indices = [2, 4, 5]
+        for i, idx in enumerate(spatial_indices):
+            spatial_boosted_patterns[:, idx] = (
+                adapted_patterns[:, idx] * (1.0 + spatial_boost_weights[:, i])
+            )
+        
+        spatial_boosted_patterns = F.softmax(spatial_boosted_patterns, dim=-1)
+        analysis_dict['spatial_boosted_patterns'] = spatial_boosted_patterns
+        
+        # Step 5: Context-aware final refinement
+        if scene_context is not None:
+            combined_context = torch.cat([question_context, scene_context], dim=-1)
+            context_refined_weights = self.context_refiner(combined_context)  # [B, 8]
+            
+            # Blend context-refined with spatial-boosted (70-30 mix)
+            final_pid_weights = (
+                0.7 * context_refined_weights + 
+                0.3 * spatial_boosted_patterns
+            )
+        else:
+            final_pid_weights = spatial_boosted_patterns
+        
+        # Final normalization
+        final_pid_weights = F.softmax(final_pid_weights, dim=-1)
+        analysis_dict['final_pid_weights'] = final_pid_weights
+        
+        return final_pid_weights, analysis_dict
 
 
 class PIDGuidedEnhancement(nn.Module):
     """
-    PID-guided enhancement.
+    Enhanced PID Enhancement module with sophisticated question-type routing.
     
-    Key Insight: Your bi-modal and tri-modal fusion already implements PID theory.
-    This module should ENHANCE rather than RE-DECOMPOSE.
-    
-    Design Philosophy:
-    1. Z_TV, Z_PV, Z_PT already contain PID components (bi-modal synergies)
-    2. Z_fused already combines these PID components intelligently 
-    3. This module enhances Z_fused based on question-specific PID patterns
-    4. NO explicit decomposition - soft attention enhancement only
+    This replaces your current PID enhancement with:
+    1. Enhanced question-type aware routing (8 components vs 3)
+    2. Spatial reasoning emphasis for "where" questions  
+    3. Pattern detectors for all 8 PID components
+    4. Better question understanding and scene context integration
     """
     
     def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1):
@@ -22,18 +172,9 @@ class PIDGuidedEnhancement(nn.Module):
         
         self.fusion_dim = fusion_dim
         self.hidden_dim = hidden_dim
-        
-        # ==================== DIMENSION ALIGNMENT ====================
-        # Handle dimension mismatches (Z_TV might be 1024D)
-        self.tv_dim_align = None  # Will be set dynamically
-        self.pv_dim_align = None
-        self.pt_dim_align = None
         self._alignment_initialized = False
         
-        # ==================== QUESTION-GUIDED PID PATTERN DETECTION ====================
-        # Instead of explicit decomposition, detect PID-inspired attention patterns
-        
-        # Question analyzer - determines what kind of information is needed
+        # ==================== QUESTION ANALYSIS ====================
         self.question_analyzer = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -43,51 +184,33 @@ class PIDGuidedEnhancement(nn.Module):
             nn.LayerNorm(hidden_dim)
         )
         
-        # PID-inspired pattern detectors (much simpler than current approach)
-        # These detect WHERE to look for different types of information
-        self.pattern_detectors = nn.ModuleDict({
-            # Where is redundant (shared) information most prominent?
-            'redundancy_detector': nn.Sequential(
-                nn.Linear(fusion_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-                nn.Sigmoid()
-            ),
-            
-            # Where is unique information from each modality most prominent?
-            'uniqueness_detector': nn.Sequential(
-                nn.Linear(fusion_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-                nn.Sigmoid()
-            ),
-            
-            # Where is synergistic information most prominent?
-            'synergy_detector': nn.Sequential(
-                nn.Linear(fusion_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-                nn.Sigmoid()
-            )
-        })
-        
-        # ==================== QUESTION-ADAPTIVE ROUTING ====================
-        # Learn which PID patterns to emphasize based on question type
-        self.pid_pattern_router = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 3),  # 3 weights: redundancy, uniqueness, synergy
-            nn.Softmax(dim=-1)
+        # ==================== ENHANCED QUESTION-TYPE ROUTING ====================
+        # Replace simple pid_pattern_router with sophisticated routing
+        self.enhanced_question_router = EnhancedQuestionTypeRouter(
+            hidden_dim=hidden_dim,
+            fusion_dim=fusion_dim,
+            dropout=dropout
         )
         
-        # ==================== ENHANCEMENT NETWORKS ====================
-        # Simple enhancement of Z_fused based on detected patterns
+        # ==================== ENHANCED PATTERN DETECTORS ====================
+        # Extend from 3 to 8 pattern detectors for complete PID coverage
+        self.pattern_detectors = nn.ModuleDict({
+            # Unique information detectors
+            'uniqueness_t_detector': self._build_pattern_detector(),
+            'uniqueness_v_detector': self._build_pattern_detector(),
+            'uniqueness_p_detector': self._build_pattern_detector(),
+            
+            # Bi-modal synergy detectors
+            'synergy_tv_detector': self._build_pattern_detector(),
+            'synergy_pv_detector': self._build_pattern_detector(),
+            'synergy_pt_detector': self._build_pattern_detector(),
+            
+            # Tri-modal detectors
+            'redundancy_detector': self._build_pattern_detector(),
+            'higher_synergy_detector': self._build_pattern_detector()
+        })
         
+        # ==================== FEATURE ENHANCEMENT ====================
         self.feature_enhancer = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -104,7 +227,17 @@ class PIDGuidedEnhancement(nn.Module):
         )
         
         # Learnable residual weight
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))  # Start with small enhancement
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        
+    def _build_pattern_detector(self):
+        """Build individual pattern detector for each PID component."""
+        return nn.Sequential(
+            nn.Linear(self.fusion_dim, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, 1),
+            nn.Sigmoid()
+        )
         
     def _initialize_alignment_layers(self, Z_TV, Z_PV, Z_PT):
         """Initialize dimension alignment layers based on actual input dimensions."""
@@ -128,7 +261,7 @@ class PIDGuidedEnhancement(nn.Module):
     
     def forward(self, Z_TV, Z_PV, Z_PT, Z_fused, text_global):
         """
-        Apply PID-guided enhancement to the already-fused features.
+        Enhanced PID-guided feature enhancement with sophisticated question routing.
         
         Args:
             Z_TV: [B, Np, D_tv] - Text-View bi-modal features  
@@ -139,9 +272,6 @@ class PIDGuidedEnhancement(nn.Module):
             
         Returns:
             enhanced_features: [B, Np, D] - PID-enhanced features
-            
-        Information Flow:
-            Question → Pattern analysis → PID-aware attention → Feature enhancement → Output
         """
         B, Np, D = Z_fused.shape
         
@@ -150,54 +280,59 @@ class PIDGuidedEnhancement(nn.Module):
             self._initialize_alignment_layers(Z_TV, Z_PV, Z_PT)
             self._alignment_initialized = True
         
-        # Align dimensions (only used for pattern detection, not main processing)
+        # Align dimensions (used for pattern detection context)
         Z_TV_aligned = self.tv_dim_align(Z_TV)  # [B, Np, fusion_dim]
         Z_PV_aligned = self.pv_dim_align(Z_PV)  # [B, Np, fusion_dim]
         Z_PT_aligned = self.pt_dim_align(Z_PT)  # [B, Np, fusion_dim]
         
-        # ==================== QUESTION ANALYSIS ====================
-        # Analyze question to determine what kind of PID patterns to look for
+        # ==================== ENHANCED QUESTION ANALYSIS ====================
         question_context = self.question_analyzer(text_global)  # [B, hidden_dim]
         
-        # Determine PID pattern importance based on question
-        pid_weights = self.pid_pattern_router(question_context)  # [B, 3]
-        w_redundancy, w_uniqueness, w_synergy = pid_weights[:, 0:1], pid_weights[:, 1:2], pid_weights[:, 2:3]
+        # Get scene context for enhanced routing
+        scene_context = Z_fused.mean(dim=1)  # [B, fusion_dim] - global scene representation
         
-        # ==================== PID-INSPIRED PATTERN DETECTION ====================
-        # Detect different types of information patterns in Z_fused
-        # This is MUCH simpler than explicit decomposition
+        # ==================== ENHANCED QUESTION-TYPE ROUTING ====================
+        # This is the key improvement: sophisticated 8-component routing
+        pid_weights, routing_analysis = self.enhanced_question_router(
+            question_context, scene_context
+        )  # [B, 8]
         
-        redundancy_attention = self.pattern_detectors['redundancy_detector'](Z_fused)  # [B, Np, 1]
-        uniqueness_attention = self.pattern_detectors['uniqueness_detector'](Z_fused)  # [B, Np, 1]
-        synergy_attention = self.pattern_detectors['synergy_detector'](Z_fused)      # [B, Np, 1]
+        # ==================== ENHANCED PATTERN DETECTION ====================
+        # Apply all 8 pattern detectors to Z_fused
+        pattern_attentions = {}
+        for detector_name, detector in self.pattern_detectors.items():
+            pattern_attentions[detector_name] = detector(Z_fused)  # [B, Np, 1]
         
         # ==================== QUESTION-ADAPTIVE ATTENTION COMBINATION ====================
-        # Combine attention patterns based on question-specific PID requirements
+        # Combine attention patterns using enhanced 8-component PID weights
+        combined_attention = torch.zeros_like(pattern_attentions['redundancy_detector'])  # [B, Np, 1]
         
-        # Expand question-level weights to point level
-        w_redundancy_exp = w_redundancy.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1]
-        w_uniqueness_exp = w_uniqueness.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 1]
-        w_synergy_exp = w_synergy.unsqueeze(1).expand(-1, Np, -1)        # [B, Np, 1]
+        # Map PID weights to pattern detectors
+        # Order: [T_unique, V_unique, P_unique, TV_synergy, PV_synergy, PT_synergy, Redundant, Higher_synergy]
+        detector_mapping = [
+            'uniqueness_t_detector',     # T_unique
+            'uniqueness_v_detector',     # V_unique  
+            'uniqueness_p_detector',     # P_unique
+            'synergy_tv_detector',       # TV_synergy
+            'synergy_pv_detector',       # PV_synergy
+            'synergy_pt_detector',       # PT_synergy
+            'redundancy_detector',       # Redundant
+            'higher_synergy_detector'    # Higher_synergy
+        ]
         
-        # Combine attention patterns based on question needs
-        combined_attention = (
-            w_redundancy_exp * redundancy_attention +
-            w_uniqueness_exp * uniqueness_attention +
-            w_synergy_exp * synergy_attention
-        )  # [B, Np, 1]
+        # Combine attentions weighted by question-adaptive PID weights
+        for i, detector_name in enumerate(detector_mapping):
+            weight = pid_weights[:, i:i+1].unsqueeze(1)  # [B, 1, 1]
+            combined_attention += weight * pattern_attentions[detector_name]
         
         # ==================== FEATURE ENHANCEMENT ====================
         # Apply PID-guided attention to enhance features
-        
-        # Apply attention to Z_fused
         attention_enhanced = Z_fused * combined_attention  # [B, Np, fusion_dim]
         
         # Further enhance through learned transformations
         enhanced_features = self.feature_enhancer(attention_enhanced)  # [B, Np, fusion_dim]
         
         # ==================== OUTPUT WITH RESIDUAL ====================
-        # Combine original and enhanced features
-        
         output_features = self.output_projection(enhanced_features)  # [B, Np, fusion_dim]
         
         # Residual connection preserves original information
@@ -205,29 +340,32 @@ class PIDGuidedEnhancement(nn.Module):
         
         return final_output
     
-    def get_pid_pattern_weights(self, text_global):
+    def get_question_type_analysis(self, text_global):
         """
-        Utility function to analyze which PID patterns are emphasized for different questions.
-        Useful for interpretability and analysis.
-        
-        Returns:
-            pid_weights: [B, 3] - Weights for [redundancy, uniqueness, synergy]
+        Utility method to analyze question types in a batch.
+        Useful for debugging and understanding model behavior.
         """
         question_context = self.question_analyzer(text_global)
-        pid_weights = self.pid_pattern_router(question_context)
-        return pid_weights
+        question_type_probs = self.enhanced_question_router.question_type_classifier(question_context)
+        
+        question_types = ['what', 'where', 'how', 'is', 'which', 'others']
+        
+        # Get average probabilities across batch
+        avg_probs = question_type_probs.mean(dim=0)
+        analysis = {qtype: prob.item() for qtype, prob in zip(question_types, avg_probs)}
+        
+        return analysis
     
-    def get_attention_maps(self, Z_fused):
+    def get_pid_pattern_weights(self, text_global, scene_context=None):
         """
-        Get attention maps for different PID patterns.
-        Useful for visualization and analysis.
-        
-        Returns:
-            attention_maps: Dict with keys ['redundancy', 'uniqueness', 'synergy']
+        Get PID pattern weights for analysis.
+        Enhanced version with scene context support.
         """
-        attention_maps = {}
-        for pattern_name, detector in self.pattern_detectors.items():
-            pattern_type = pattern_name.split('_')[0]  # Extract 'redundancy', 'uniqueness', 'synergy'
-            attention_maps[pattern_type] = detector(Z_fused)
+        question_context = self.question_analyzer(text_global)
         
-        return attention_maps
+        if scene_context is None:
+            # Use dummy scene context if not provided
+            scene_context = torch.zeros(text_global.shape[0], self.fusion_dim, device=text_global.device)
+        
+        pid_weights, analysis = self.enhanced_question_router(question_context, scene_context)
+        return pid_weights, analysis
