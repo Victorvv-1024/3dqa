@@ -26,8 +26,8 @@ from .point_text_fusion import PointTextFusion
 from .pid import PIDGuidedEnhancement
 from .adaptive_fusion import AdaptiveTrimodalFusion
 from .hybrid_spatial_reasoning import HybridSpatialReasoningModule
+from .enhanced_spatial_reasoning import EnhancedSpatialReasoningModule
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
-from embodiedqa.models.losses.uncertainty_weighting import UncertaintyWeightingLayer
 from embodiedqa.models.losses import EnhancedLossComputation
 
 import traceback
@@ -180,10 +180,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Hybrid Spatial Reasoning
-        self.hybrid_spatial_reasoning = HybridSpatialReasoningModule(
+        # self.hybrid_spatial_reasoning = HybridSpatialReasoningModule(
+        #     fusion_dim=self.D_fus,      # 768
+        #     hidden_dim=256,
+        #     text_dim=self.text_encoder.config.hidden_size,  # 768
+        #     sparse_points=256
+        # )
+        self.hybrid_spatial_reasoning = EnhancedSpatialReasoningModule(
             fusion_dim=self.D_fus,      # 768
-            hidden_dim=256,
-            text_dim=self.text_encoder.config.hidden_size,  # 768
             sparse_points=256
         )
         
@@ -602,40 +606,40 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         
         # ============ Step 7: Spatial Analysis (Optional, for debugging) ============
-        if hasattr(self, 'training') and self.training and kwargs.get('step', 0) % 100 == 0:
-            spatial_info = feat_dict['spatial_info']
-            questions = [sample.question for sample in batch_data_samples]
-            analysis = {
-                'spatial_routing': spatial_info,
-                'questions': questions,
-                'superpoint_statistics': {},
-                'geometric_analysis': {}
-            }
-            self._log_spatial_analysis(feat_dict['spatial_info'], questions)
-            # Analyze superpoint quality
-            if 'superpoint_labels' in spatial_info:
-                superpoint_labels = spatial_info['superpoint_labels']
-                B, N = superpoint_labels.shape
+        # if hasattr(self, 'training') and self.training and kwargs.get('step', 0) % 100 == 0:
+        #     spatial_info = feat_dict['spatial_info']
+        #     questions = [sample.question for sample in batch_data_samples]
+        #     analysis = {
+        #         'spatial_routing': spatial_info,
+        #         'questions': questions,
+        #         'superpoint_statistics': {},
+        #         'geometric_analysis': {}
+        #     }
+        #     self._log_spatial_analysis(feat_dict['spatial_info'], questions)
+        #     # Analyze superpoint quality
+        #     if 'superpoint_labels' in spatial_info:
+        #         superpoint_labels = spatial_info['superpoint_labels']
+        #         B, N = superpoint_labels.shape
                 
-                for b in range(B):
-                    unique_sps = torch.unique(superpoint_labels[b])
-                    sp_sizes = []
-                    for sp_id in unique_sps:
-                        if sp_id != -1:
-                            sp_size = (superpoint_labels[b] == sp_id).sum().item()
-                            sp_sizes.append(sp_size)
+        #         for b in range(B):
+        #             unique_sps = torch.unique(superpoint_labels[b])
+        #             sp_sizes = []
+        #             for sp_id in unique_sps:
+        #                 if sp_id != -1:
+        #                     sp_size = (superpoint_labels[b] == sp_id).sum().item()
+        #                     sp_sizes.append(sp_size)
                     
-                    stats = {
-                        'num_superpoints': len(sp_sizes),
-                        'avg_superpoint_size': sum(sp_sizes) / len(sp_sizes) if sp_sizes else 0,
-                        'superpoint_sizes': sp_sizes
-                    }
-                    analysis['superpoint_statistics'][f'sample_{b}'] = stats
+        #             stats = {
+        #                 'num_superpoints': len(sp_sizes),
+        #                 'avg_superpoint_size': sum(sp_sizes) / len(sp_sizes) if sp_sizes else 0,
+        #                 'superpoint_sizes': sp_sizes
+        #             }
+        #             analysis['superpoint_statistics'][f'sample_{b}'] = stats
                     
-                    # Print superpoint statistics
-                    print(f"Sample {b}: {stats['num_superpoints']} superpoints, "
-                          f"avg size: {stats['avg_superpoint_size']:.1f}, "
-                          f"sizes: {sp_sizes[:5]}{'...' if len(sp_sizes) > 5 else ''}")
+        #             # Print superpoint statistics
+        #             print(f"Sample {b}: {stats['num_superpoints']} superpoints, "
+        #                   f"avg size: {stats['avg_superpoint_size']:.1f}, "
+        #                   f"sizes: {sp_sizes[:5]}{'...' if len(sp_sizes) > 5 else ''}")
                     
         
         return losses

@@ -170,7 +170,7 @@ test_pipeline = [
 
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
-    batch_size=12,
+    batch_size=12, # 12
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -190,7 +190,7 @@ train_dataloader = dict(
                               box_type_3d='Depth',
                               remove_dontcare=True)))
 
-val_dataloader = dict(batch_size=12,
+val_dataloader = dict(batch_size=12, # 12
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,
@@ -207,7 +207,7 @@ val_dataloader = dict(batch_size=12,
                                    filter_empty_gt=True,
                                    box_type_3d='Depth',
                                    remove_dontcare=True))
-test_dataloader = dict(batch_size=12,
+test_dataloader = dict(batch_size=12, # 12
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,

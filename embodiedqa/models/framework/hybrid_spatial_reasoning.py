@@ -15,7 +15,7 @@ class SuperpointGenerator(nn.Module):
     SPEED: O(N) instead of O(N²)
     """
     
-    def __init__(self, voxel_size=0.2, max_superpoints=64):  # Reduced from 512
+    def __init__(self, voxel_size=0.2, max_superpoints=512):  # Reduced from 512
         super().__init__()
         self.voxel_size = voxel_size  # 20cm voxels (larger = fewer superpoints)
         self.max_superpoints = max_superpoints
@@ -333,15 +333,11 @@ class HybridSpatialReasoningModule(nn.Module):
                 # FPS sampling for sparse points
                 from mmcv.ops import furthest_point_sample
                 fps_indices = furthest_point_sample(sample_coords, self.sparse_points)  # [1, K]
-                
+                fps_indices = fps_indices.long()
                 # Get sparse features and coordinates
-                sparse_coords = torch.gather(
-                    sample_coords, 1, fps_indices.unsqueeze(-1).expand(-1, -1, 3)
-                )  # [1, K, 3]
-                
-                sparse_features = torch.gather(
-                    sample_features, 1, fps_indices.unsqueeze(-1).expand(-1, -1, D)
-                )  # [1, K, D]
+                fps_indices_flat = fps_indices.squeeze(0)  # [K]
+                sparse_coords = sample_coords.squeeze(0)[fps_indices_flat].unsqueeze(0)  # [1, K, 3]
+                sparse_features = sample_features.squeeze(0)[fps_indices_flat].unsqueeze(0)  # [1, K, D]
                 
                 # Add position embeddings
                 pos_embeddings = self.position_embedding(sparse_coords.squeeze(0))  # [K, D]
@@ -364,7 +360,8 @@ class HybridSpatialReasoningModule(nn.Module):
                 
                 # Scatter enhanced sparse features back to dense
                 enhanced_dense = sample_features.squeeze(0).clone()  # [N, D]
-                enhanced_dense.scatter_(0, fps_indices.squeeze(0).unsqueeze(-1).expand(-1, D), enhanced_sparse)
+                fps_indices_for_scatter = fps_indices.squeeze(0).long()  # [K] - ensure int64
+                enhanced_dense.scatter_(0, fps_indices_for_scatter.unsqueeze(-1).expand(-1, D), enhanced_sparse)
                 
                 enhanced_features[idx] = enhanced_dense
         
