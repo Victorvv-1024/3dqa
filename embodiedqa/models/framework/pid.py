@@ -156,7 +156,7 @@ class EnhancedQuestionTypeRouter(nn.Module):
         return final_pid_weights, analysis_dict
 
 
-class PIDGuidedEnhancement(nn.Module):
+class PIDEnhancement(nn.Module):
     """
     Enhanced PID Enhancement module with sophisticated question-type routing.
     

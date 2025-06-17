@@ -204,6 +204,121 @@ class PIDRegularizationLoss(nn.Module):
         else:
             return 5
 
+class EnhancedLossComputation(nn.Module):
+    """Clean PID loss computation with proper superpoint support."""
+    
+    def __init__(self, 
+                 uniqueness_weight=0.02,    # Correctly reduced
+                 synergy_weight=0.05,       # Correctly reduced
+                 redundancy_weight=0.015,   # Correctly reduced
+                 balance_weight=0.015,      # Correctly reduced
+                 spatial_weight=0.03,       # Correctly reduced
+                 adaptive_weight=0.02,      # Correctly reduced
+                 superpoint_consistency_weight=0.05):  # Keep for enhanced spatial reasoning
+        super().__init__()
+        
+        self.pid_regularization = PIDRegularizationLoss()
+        
+        # Rebalanced weights (these are correct)
+        self.uniqueness_weight = uniqueness_weight
+        self.synergy_weight = synergy_weight
+        self.redundancy_weight = redundancy_weight
+        self.balance_weight = balance_weight
+        self.spatial_weight = spatial_weight
+        self.adaptive_weight = adaptive_weight
+        self.superpoint_consistency_weight = superpoint_consistency_weight
+        
+    def forward(self, 
+                qa_loss: torch.Tensor,
+                component_dict: Dict[str, torch.Tensor],
+                component_weights: torch.Tensor, 
+                spatial_info: Dict = None,
+                Z_fused: torch.Tensor = None,
+                coordinates: torch.Tensor = None,
+                questions: list = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Enhanced loss computation with proper superpoint support."""
+        
+        # Core PID regularization
+        pid_losses = self.pid_regularization(component_dict, component_weights, questions)
+        
+        # Build total loss
+        total_loss = qa_loss
+        loss_dict = {'qa_loss': qa_loss}
+        
+        # Add PID components with reduced weights
+        total_loss += self.uniqueness_weight * pid_losses['uniqueness_loss']
+        total_loss += self.synergy_weight * pid_losses['synergy_loss']
+        total_loss += self.redundancy_weight * pid_losses['redundancy_loss']
+        total_loss += self.balance_weight * pid_losses['component_balance_loss']
+        total_loss += self.adaptive_weight * pid_losses['question_adaptive_loss']
+        
+        if 'spatial_reasoning_loss' in pid_losses:
+            total_loss += self.spatial_weight * pid_losses['spatial_reasoning_loss']
+        
+        # Spatial reasoning losses from enhanced spatial module
+        if spatial_info is not None:
+            spatial_losses = {}
+            
+            # Superpoint consistency loss (KEEP - needed for enhanced spatial reasoning)
+            if 'superpoint_labels' in spatial_info:
+                superpoint_loss = self._compute_superpoint_consistency_loss(
+                    Z_fused, spatial_info['superpoint_labels']
+                )
+                spatial_losses['superpoint_consistency_loss'] = superpoint_loss
+                total_loss += self.superpoint_consistency_weight * superpoint_loss
+            
+            # Optional: Add other spatial losses if they exist in spatial_info
+            for key in ['spatial_attention_loss', 'complexity_routing_loss']:
+                if key in spatial_info:
+                    spatial_losses[key] = spatial_info[key]
+                    total_loss += 0.01 * spatial_info[key]  # Small weight for additional losses
+            
+            loss_dict.update(spatial_losses)
+        
+        # Store for monitoring
+        loss_dict.update(pid_losses)
+        loss_dict['total_loss'] = total_loss
+        
+        return total_loss, loss_dict
+    
+    def _compute_superpoint_consistency_loss(self, Z_fused, superpoint_labels):
+        """Compute superpoint consistency loss for enhanced spatial reasoning."""
+        if Z_fused is None or superpoint_labels is None:
+            return torch.tensor(0.0, device=Z_fused.device if Z_fused is not None else 'cpu')
+            
+        consistency_loss = 0.0
+        valid_superpoints = 0
+        
+        B, N, D = Z_fused.shape
+        
+        for b in range(B):
+            if b >= len(superpoint_labels):
+                continue
+                
+            unique_superpoints = torch.unique(superpoint_labels[b])
+            
+            for sp_id in unique_superpoints:
+                if sp_id == -1:  # Skip invalid superpoints
+                    continue
+                    
+                sp_mask = (superpoint_labels[b] == sp_id)
+                if sp_mask.sum() < 2:  # Need at least 2 points
+                    continue
+                
+                sp_features = Z_fused[b][sp_mask]  # [Nsp, D]
+                sp_mean = sp_features.mean(dim=0)  # [D]
+                
+                # Features within superpoint should be consistent
+                consistency_loss += F.mse_loss(
+                    sp_features, 
+                    sp_mean.unsqueeze(0).expand_as(sp_features)
+                )
+                valid_superpoints += 1
+        
+        if valid_superpoints > 0:
+            return consistency_loss / valid_superpoints
+        else:
+            return torch.tensor(0.0, device=Z_fused.device)
 
 # class EnhancedLossComputation(nn.Module):
 #     """Enhanced loss computation with spatial reasoning losses."""
@@ -327,104 +442,3 @@ class PIDRegularizationLoss(nn.Module):
 #                           'front', 'behind', 'above', 'below', 'between', 'corner', 'center']
 #         question_lower = question.lower()
 #         return any(keyword in question_lower for keyword in spatial_keywords)
-
-class EnhancedLossComputation(nn.Module):
-    """Clean PID loss computation with proper superpoint support."""
-    
-    def __init__(self, 
-                 uniqueness_weight=0.02,    # Reduced
-                 synergy_weight=0.05,       # Reduced
-                 redundancy_weight=0.015,   # Reduced
-                 balance_weight=0.015,      # Reduced
-                 spatial_weight=0.03,       # Much reduced
-                 adaptive_weight=0.02,      # Reduced
-                 superpoint_consistency_weight=0.05):  # Keep for enhanced spatial reasoning
-        super().__init__()
-        
-        self.pid_regularization = PIDRegularizationLoss()
-        
-        # Rebalanced weights
-        self.uniqueness_weight = uniqueness_weight
-        self.synergy_weight = synergy_weight
-        self.redundancy_weight = redundancy_weight
-        self.balance_weight = balance_weight
-        self.spatial_weight = spatial_weight
-        self.adaptive_weight = adaptive_weight
-        self.superpoint_consistency_weight = superpoint_consistency_weight  # KEEP THIS
-        
-    def forward(self, 
-                qa_loss: torch.Tensor,
-                component_dict: Dict[str, torch.Tensor],
-                component_weights: torch.Tensor, 
-                spatial_info: Dict = None,
-                Z_fused: torch.Tensor = None,
-                coordinates: torch.Tensor = None,
-                questions: list = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Enhanced loss computation with proper superpoint support."""
-        
-        # Core PID regularization
-        pid_losses = self.pid_regularization(component_dict, component_weights, questions)
-        
-        # Build total loss
-        total_loss = qa_loss
-        loss_dict = {'qa_loss': qa_loss}
-        
-        # Add PID components with reduced weights
-        total_loss += self.uniqueness_weight * pid_losses['uniqueness_loss']
-        total_loss += self.synergy_weight * pid_losses['synergy_loss']
-        total_loss += self.redundancy_weight * pid_losses['redundancy_loss']
-        total_loss += self.balance_weight * pid_losses['component_balance_loss']
-        total_loss += self.adaptive_weight * pid_losses['question_adaptive_loss']
-        
-        # Spatial reasoning losses
-        if spatial_info is not None:
-            spatial_losses = {}
-            
-            # Superpoint consistency loss (KEEP - needed for enhanced spatial reasoning)
-            if 'superpoint_labels' in spatial_info:
-                superpoint_loss = self._compute_superpoint_consistency_loss(
-                    Z_fused, spatial_info['superpoint_labels']
-                )
-                spatial_losses['superpoint_consistency_loss'] = superpoint_loss
-                total_loss += self.superpoint_consistency_weight * superpoint_loss
-            
-            loss_dict.update(spatial_losses)
-        
-        # Store for monitoring
-        loss_dict.update(pid_losses)
-        loss_dict['total_loss'] = total_loss
-        
-        return total_loss, loss_dict
-    
-    def _compute_superpoint_consistency_loss(self, Z_fused, superpoint_labels):
-        """Compute superpoint consistency loss for enhanced spatial reasoning."""
-        consistency_loss = 0.0
-        valid_superpoints = 0
-        
-        B, N, D = Z_fused.shape
-        
-        for b in range(B):
-            unique_superpoints = torch.unique(superpoint_labels[b])
-            
-            for sp_id in unique_superpoints:
-                if sp_id == -1:  # Skip invalid superpoints
-                    continue
-                    
-                sp_mask = (superpoint_labels[b] == sp_id)
-                if sp_mask.sum() < 2:  # Need at least 2 points
-                    continue
-                
-                sp_features = Z_fused[b][sp_mask]  # [Nsp, D]
-                sp_mean = sp_features.mean(dim=0)  # [D]
-                
-                # Features within superpoint should be consistent
-                consistency_loss += F.mse_loss(
-                    sp_features, 
-                    sp_mean.unsqueeze(0).expand_as(sp_features)
-                )
-                valid_superpoints += 1
-        
-        if valid_superpoints > 0:
-            return consistency_loss / valid_superpoints
-        else:
-            return torch.tensor(0.0, device=Z_fused.device)

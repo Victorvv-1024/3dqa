@@ -23,10 +23,9 @@ import open3d as o3d
 import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
-from .pid import PIDGuidedEnhancement
+from .pid import PIDEnhancement
 from .adaptive_fusion import AdaptiveTrimodalFusion
-from .hybrid_spatial_reasoning import HybridSpatialReasoningModule
-from .enhanced_spatial_reasoning import EnhancedSpatialReasoningModule
+from .spatial_reasoning import SpatialReason
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses import EnhancedLossComputation
 
@@ -131,6 +130,28 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.coord_type = coord_type
         self.voxel_size = voxel_size
         
+        # Unified projection
+        self.unified_proj = nn.ModuleDict({
+            'point': nn.Sequential(
+                nn.Linear(self.backbone_lidar.fp_channels[-1][-1], self.D_fus), # Point: 256 -> 768
+                nn.LayerNorm(self.D_fus),
+                nn.ReLU(),
+                nn.Linear(self.D_fus, self.D_fus)
+            ),
+            'view': nn.Sequential(
+                nn.Linear(self.backbone.out_channels[-1], self.D_fus), # View: 1024 -> 768
+                nn.LayerNorm(self.D_fus),
+                nn.ReLU(),
+                nn.Linear(self.D_fus, self.D_fus)
+            ),
+            'text': nn.Sequential(
+                nn.Linear(self.text_encoder.config.hidden_size, self.D_fus), # Text: 768 -> 768
+                nn.LayerNorm(self.D_fus),
+                nn.ReLU(),
+                nn.Linear(self.D_fus, self.D_fus)
+            )
+        })
+
         # Bi-Modal fusion
         self.pv_fusion = PointViewFusion(
             point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim = 256
@@ -157,9 +178,9 @@ class MultiViewVLMBase3DQA(BaseModel):
             pt_input_dim=self.D_fus   # 768
         )
             
-        
-        # PID Guided Attention
-        self.pid_enhancement = PIDGuidedEnhancement(self.D_fus)
+
+        # PID Enhancement
+        self.pid_enhancement = PIDEnhancement(self.D_fus)
         
         # Reasoning
         self.reason = FeatureRefinement(
@@ -179,19 +200,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             superpoint_consistency_weight=0.1  # Wang et al. consistency loss
         )
         
-        # Hybrid Spatial Reasoning
-        # self.hybrid_spatial_reasoning = HybridSpatialReasoningModule(
-        #     fusion_dim=self.D_fus,      # 768
-        #     hidden_dim=256,
-        #     text_dim=self.text_encoder.config.hidden_size,  # 768
-        #     sparse_points=256
-        # )
-        self.hybrid_spatial_reasoning = EnhancedSpatialReasoningModule(
+        # Spatial Reasoning
+        self.spatial_reason = SpatialReason(
             fusion_dim=self.D_fus,      # 768
             sparse_points=256
         )
-        
-        
         
     @property
     def with_qa_head(self):
@@ -383,18 +396,20 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
         raw_view_feats = raw_points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
+        raw_text_feats = text_dict['text_feats']  # [B, L, D] = [12, 14, 768]
+        
+        # 2. Uni-modal representation space
+        Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
+        Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, D_fus] = [12, 1024, 768]
+        Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
+        
+        # 3. Bi-modal representation space
         Z_TV = points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
-        # Store basic features
         feat_dict['Z_TV'] = Z_TV
         
-        # 2. Create Z_PV (Point-View fusion)
-        Z_PV = self.pv_fusion(
-            raw_point_feats,
-            raw_view_feats, 
-            superpoint_ids=None)
-        feat_dict['Z_PV'] = Z_PV
+        Z_PV = self.pv_fusion(Z_P, Z_V)
+        feat_dict['Z_PV'] = Z_PV # [B, Np, D_fus] = [12, 1024, 768]
         
-        # 3. Create Z_PT (Point-Text fusion) 
         Z_PT = self.pt_fusion(
             Z_PV,
             Z_TV,
@@ -416,9 +431,9 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['fusion_weights'] = fusion_weights  # [B, 8] - now includes all PID components
         feat_dict['component_dict'] = component_dict
         
-        # 5. Hybrid Spatial Reasoning
+        # 5. Spatial Reasoning
         questions = [sample.question for sample in batch_data_samples]
-        Z_spatially_enhanced, spatial_info = self.hybrid_spatial_reasoning(
+        Z_spatially_enhanced, spatial_info = self.spatial_reason(
             Z_fused=Z_fused,
             coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
             text_features=text_dict['text_global_token'],  # [B, D]

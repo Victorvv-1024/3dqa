@@ -77,23 +77,8 @@ import torch.nn as nn
 #         return Z_PV
 
 class PointViewFusion(nn.Module):
-    def __init__(self, point_dim=256, view_dim=1024, fusion_dim=768):
+    def __init__(self, fusion_dim=768):
         super().__init__()
-        
-        # Project to common semantic space (NOT dimension alignment, but REPRESENTATION alignment)
-        self.point_semantic_proj = nn.Sequential(
-            nn.Linear(point_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.ReLU(),
-            nn.Linear(fusion_dim, fusion_dim)  # Learn rich point representations
-        )
-        
-        self.view_semantic_proj = nn.Sequential(
-            nn.Linear(view_dim, fusion_dim), 
-            nn.LayerNorm(fusion_dim),
-            nn.ReLU(),
-            nn.Linear(fusion_dim, fusion_dim)  # Learn rich view representations
-        )
         
         # Synergy detector (captures I(P,V) - I(P) - I(V))
         self.synergy_detector = nn.MultiheadAttention(
@@ -108,19 +93,16 @@ class PointViewFusion(nn.Module):
             nn.LayerNorm(fusion_dim)
         )
         
-    def forward(self, point_features, view_features, superpoint_ids=None):
-        # Step 1: Project to compatible semantic spaces
-        P_sem = self.point_semantic_proj(point_features)  # [B, Np, 768]
-        V_sem = self.view_semantic_proj(view_features)    # [B, Np, 768]
+    def forward(self, Z_P, Z_V):
         
-        # Step 2: Detect point-view synergy via cross-attention
+        # Step 1: Detect point-view synergy via cross-attention
         P_attended, _ = self.synergy_detector(
-            query=P_sem, key=V_sem, value=V_sem
+            query=Z_P, key=Z_V, value=Z_V
         )
         
-        # Step 3: Fuse synergistic information
+        # Step 2: Fuse synergistic information
         Z_PV = self.synergy_fusion(
-            torch.cat([P_attended, V_sem], dim=-1)
+            torch.cat([P_attended, Z_V], dim=-1)
         )
-        
+
         return Z_PV  # Contains P-V synergistic information

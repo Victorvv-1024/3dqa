@@ -6,7 +6,7 @@ from typing import Dict, Tuple, List, Optional
 
 # ================= STEP 1: CREATE NEW ENHANCED SPATIAL MODULE =================
 
-class EnhancedSpatialReasoningModule(nn.Module):
+class SpatialReason(nn.Module):
     """
     Enhanced spatial reasoning with complexity-aware dense/sparse processing.
     
@@ -16,7 +16,7 @@ class EnhancedSpatialReasoningModule(nn.Module):
     - Explicit spatial relationship modeling
     """
     
-    def __init__(self, fusion_dim=768, sparse_points=64):
+    def __init__(self, fusion_dim=768, sparse_points=256):
         super().__init__()
         
         self.fusion_dim = fusion_dim
