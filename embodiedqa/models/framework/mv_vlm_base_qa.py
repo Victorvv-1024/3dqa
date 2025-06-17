@@ -13,7 +13,7 @@ from mmengine.model import BaseModel,BaseModule
 from mmengine.structures import InstanceData
 from mmcv.ops import furthest_point_sample,gather_points
 from embodiedqa.models.layers.fusion_layers.point_fusion import (
-    batch_point_sample, point_sample, batch_point_sample_in_visible, enhanced_batch_point_sample_in_visible)
+    batch_point_sample, point_sample, batch_point_sample_in_visible, visible_sample)
 from embodiedqa.registry import MODELS
 from embodiedqa.structures.bbox_3d import get_proj_mat_by_coord_type
 from embodiedqa.utils import ConfigType, OptConfigType
@@ -101,8 +101,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             self.backbone = MODELS.build(backbone)
             #for TGMF
             # This projects Z_t to G_t
-            self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
-                                                    nn.LayerNorm(self.D_fus))
+            # self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
+            #                                         nn.LayerNorm(self.D_fus))
             # This projects U_i to G_i
             self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
                                             nn.LayerNorm(self.D_fus))
@@ -249,9 +249,8 @@ class MultiViewVLMBase3DQA(BaseModel):
                 and for inside 3D object detection, usually a dict containing
                 features will be obtained.
         """
-        # print("\n===== DEBUGGING EXTRACT_TEXT_FEAT =====")
         # print(f"batch_inputs_dict keys: {batch_inputs_dict.keys()}") # points, imgs
-        # print(f"batch_data_samples type: {type(batch_data_samples)}, length: {len(batch_data_samples)}") # B = 12
+
         # Point Cloud Processing
         points = batch_inputs_dict['points']
         stack_points = torch.stack(points)  # B, N, 6 
@@ -267,14 +266,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         if not self.use_2d:
             raise ValueError("Not implemented yet")
-        
-        feat_dict['original_stack_points'] = stack_points
-        feat_dict['last_fp_indices'] = feat_dict['fp_indices'][-1] # [B, Np] = [12, 1024]
-        # Store FP indices for pre-computed superpoint mapping
-        self.current_fp_indices = feat_dict['last_fp_indices']
-        feat_dict['P_xyz'] = feat_dict['fp_xyz'][-1] # [B, Np, 3] = [12, 1024, 3]
-        
-        
+                
         # Multi-view 2D Images Processing
         # print(f"batch_inputs_dict['imgs'] shape: {batch_inputs_dict['imgs'].shape}") # [B, M, C, H, W] = [12, 20, 3, 224, 224]
         # M is the number of multiple views 
@@ -301,24 +293,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             img_features_dict = self.backbone(img) # directly pass through the 2D Swin backbone 
             img_features, img_global_features = img_features_dict['layer_outputs'], img_features_dict['pooler_output']
             
-        all_points_imgfeats = []
-        img_feat_valid_flags = []
-        points_imgfeats = []
-        raw_points_imgfeats = []
-        
-        # get the global token G_t from text_dict 
-        text_global_token = text_dict.get('text_global_token', None) 
-        # project the global token for attention weight computation
-        text_global_features_for_att = self.text_global_att_proj(text_global_token) 
-        # print(f"text_global_features_for_att shape: {text_global_features_for_att.shape}") # [B, Dm] = [12, 768]
-        # in the paper, Gt is [B, 1, D_fusion] = [12, 1, 768]
-        
-        # Only use the most abstract features from Swin for attention weight computation
-        # .mean(dim=[-1,-2]) computes the mean over the spatial dimensions (H, W)
-        # print(f"img_features[-1] shape: {img_features[-1].shape}") # [B, M, Di, H, W] = [12, 20, 1024, 7, 7]
-        img_features_for_att = self.img_att_proj(img_features[-1].mean(dim=[-1,-2]))
-        # print(f"img_features_for_att shape: {img_features_for_att.shape}") # [B, M, D_fusion] = [12, 20, 768]
-        
+        visible_imgfeats = [] # list to store visible image features after lifting
         all_extrinsics = [] # store camera extrinsic matrices for each sample in the batch
         for idx in range(len(batch_img_metas)):
             img_meta = batch_img_metas[idx]
@@ -335,8 +310,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             assert 'intrinsic' in proj_mat.keys() # contains camera's intrinsic parameters (focal length, principal point, etc.)
             projection = []
             # Support different intrinsic matrices for different images
-            # if the original intrinsic is only a matrix
-            # we will simply copy it to construct the intrinsic matrix list
+            # if the original intrinsic is only a matrix we will simply copy it to construct the intrinsic matrix list
             # in MultiViewPipeline
             assert isinstance(proj_mat['intrinsic'], list)
             for proj_idx in range(len(proj_mat['extrinsic'])):
@@ -351,12 +325,10 @@ class MultiViewVLMBase3DQA(BaseModel):
                 
             # all_extrinsics.append(img.new_tensor(proj_mat['extrinsic'])) # n_views, 4, 4 CAN BE SLOW
             all_extrinsics.append(img.new_tensor(np.array(proj_mat['extrinsic']))) # n_views, 4, 4
-            
             proj_mat = torch.stack(projection) # n_views, 4, 4
 
-            # TGMF happens here
-            # we get Z_TV in our framework
-            raw_points_imgfeat, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(
+            """We make visible sampling here"""
+            visible_imgfeat = visible_sample(
                 img_meta,
                 img_features=img_features[-1][idx], # sample the last feature level
                 points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
@@ -370,32 +342,22 @@ class MultiViewVLMBase3DQA(BaseModel):
                 img_pad_shape=img.shape[-2:],
                 img_shape=img_meta['img_shape'][:2],
                 aligned=False,
-                return_valid_flag=True,
-                text_global_features_for_att=text_global_features_for_att[idx], # use attention mechanism to weight the features
-                img_features_for_att=img_features_for_att[idx])
+                valid_flag=True,
+                return_valid_flag=False  # Simplified - just get clean features
+                # Note: Removed text_global_features_for_att and img_features_for_att
+            )
             
-            points_imgfeats.append(points_imgfeat)  # all sample
-            raw_points_imgfeats.append(raw_points_imgfeat) # all sample
-            img_feat_valid_flags.append(img_feat_valid_flag) # last_level
+            visible_imgfeats.append(visible_imgfeat)  # still list of tensors
 
-        points_imgfeats = torch.stack(points_imgfeats) # B, Np, Di
-        raw_points_imgfeats = torch.stack(raw_points_imgfeats) # B, Np, Di
-        
-        
-        img_feat_valid_flags = torch.stack(img_feat_valid_flags) # B, Np
-        # print(f"img_feat_valid_flags shape: {img_feat_valid_flags.shape}") # [B, Np] = [12, 1024]
-        all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device) # B, n_views, 4, 4
-        # feat_dict['fp_features'][-1] is the last feature level of the 3D backbone [B, Dp, Np], with transpose [B, Np, Dp]
-        # points_imgfeats is the sampled image features from TGMF [B, Np, Di]
-        # feat_dict['fp_features'][-1] = self.fusion_map(feat_dict['fp_features'][-1].transpose(1,2),points_imgfeats).transpose(1,2) # B, C, N
-        # print(f"feat_dict['fp_features'][-1] shape: {feat_dict['fp_features'][-1].shape}") # [B, C, N]
+        visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, Di
+        all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
 
         """ 
-        Our code starts here 
+        Our pipeline starts here 
         """
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
-        raw_view_feats = raw_points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
+        raw_view_feats = visible_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
         raw_text_feats = text_dict['text_feats']  # [B, L, D] = [12, 14, 768]
         
         # 2. Uni-modal representation space

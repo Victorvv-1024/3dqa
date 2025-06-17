@@ -638,227 +638,163 @@ def voxel_sample(voxel_features: Tensor,
 
     return frustum_features
 
-###############Our code######################
-def enhanced_batch_point_sample_in_visible(
-        img_meta: dict,
-        img_features: Tensor,
-        points: Tensor,
-        proj_mat: Tensor,
-        views_points: Tensor,
-        voxel_size: float,
-        coord_type: str,
-        img_scale_factor: Tensor,
-        img_crop_offset: Tensor,
-        img_flip: bool,
-        img_pad_shape: Tuple[int],
-        img_shape: Tuple[int],
-        aligned: bool = True,
-        padding_mode: str = 'zeros',
-        align_corners: bool = True,
-        valid_flag: bool = True,
-        return_valid_flag: bool = False,
-        text_global_features_for_att: Tensor = None,  # [B, D_fusion]
-        img_features_for_att: Tensor = None,  # [B, M, D_fusion]
-        mode: str = 'hybrid',  # 'redundant', 'synergistic', or 'hybrid'
-        redundancy_weight: float = 0.5,  # Used in hybrid mode
-        temperature: float = 1.0  # Controls attention distribution peakiness
-) -> Union[Tensor, Tuple[Tensor, Tensor, Tensor]]:
-    """Enhanced version of batch_point_sample_in_visible that explicitly models
-    redundant and synergistic information between image and text.
+"""Our method"""
+def visible_sample(img_meta: dict,
+                   img_features: Tensor,
+                   points: Tensor,
+                   proj_mat: Tensor,
+                   views_points: Tensor,
+                   voxel_size: float,
+                   coord_type: str,
+                   img_scale_factor: Tensor,
+                   img_crop_offset: Tensor,
+                   img_flip: bool,
+                   img_pad_shape: Tuple[int],
+                   img_shape: Tuple[int],
+                   aligned: bool = True,
+                   padding_mode: str = 'zeros',
+                   align_corners: bool = True,
+                   valid_flag: bool = True,
+                   return_valid_flag: bool = False) -> Union[Tensor, Tuple[Tensor, Tensor, Tensor]]:
+    """
+    Clean 2D→3D lifting and visible sampling WITHOUT text contamination.
     
-    This function extends the original implementation by providing different
-    attention mechanisms for capturing either redundant information (shared between
-    modalities) or synergistic information (emerging from combination of modalities).
+    This method performs ONLY:
+    1. Pure 2D→3D feature lifting via perspective projection
+    2. Visibility-based filtering using geometric constraints
+    3. Multi-view aggregation via averaging (no attention)
+    
+    Mathematical Formulation:
+    F_v^{clean} = VisibilityMask(Lift2D3D(I_raw, P_coords))
+    
+    Where:
+    - I_raw: Raw 2D image features [Mp, Di, H, W]
+    - P_coords: 3D point coordinates [Np, 3]
+    - VisibilityMask: Geometric visibility filtering
+    - F_v^{clean}: Clean view features [Np, Di] preserving I_unique(V)
     
     Args:
         img_meta (dict): Meta info.
-        img_features (Tensor): B x C x H x W image features.
-        points (Tensor): BxNx3 point cloud in LiDAR coordinates.
-        proj_mat (Tensor): Bx4x4 transformation matrix.
+        img_features (Tensor): Mp x Di x H x W image features.
+        points (Tensor): Np x 3 point cloud in LiDAR coordinates.
+        proj_mat (Tensor): Mp x 4 x 4 transformation matrix.
         views_points (Tensor): Camera view positions.
-        voxel_size (float): Size of each voxel.
+        voxel_size (float): Size of each voxel for visibility computation.
         coord_type (str): 'DEPTH' or 'CAMERA' or 'LIDAR'.
-        img_scale_factor (Tensor): Scale factor with shape of (w_scale, h_scale).
-        img_crop_offset (Tensor): Crop offset used to crop image during data augmentation.
+        img_scale_factor (Tensor): Scale factor (w_scale, h_scale).
+        img_crop_offset (Tensor): Crop offset (w_offset, h_offset).
         img_flip (bool): Whether the image is flipped.
-        img_pad_shape (Tuple[int]): Int tuple indicates the h & w after padding.
-        img_shape (Tuple[int]): Int tuple indicates the h & w before padding.
-        aligned (bool): Whether to use bilinear interpolation when sampling.
-        padding_mode (str): Padding mode when padding values.
-        align_corners (bool): Whether to align corners when sampling.
-        valid_flag (bool): Whether to filter points outside the image.
-        return_valid_flag (bool): Whether to return validity flags.
-        text_global_features_for_att (Tensor): Global text features [B, D_fusion].
-        img_features_for_att (Tensor): Global image features [B, M, D_fusion].
-        mode (str): Type of attention - 'redundant', 'synergistic', or 'hybrid'.
-        redundancy_weight (float): Balance between redundant and synergistic in hybrid mode.
-        temperature (float): Controls the peakiness of attention distributions.
+        img_pad_shape (Tuple[int]): (h, w) after padding.
+        img_shape (Tuple[int]): (h, w) before padding after scaling.
+        aligned (bool): Whether to use bilinear interpolation. Defaults to True.
+        padding_mode (str): Padding mode for out-of-image points. Defaults to 'zeros'.
+        align_corners (bool): Whether to align corners when sampling. Defaults to True.
+        valid_flag (bool): Whether to filter points outside image. Defaults to True.
+        return_valid_flag (bool): Whether to return validity flags. Defaults to False.
         
     Returns:
-        Union[Tensor, Tuple[Tensor, Tensor, Tensor]]: Point features or features with validity flags.
+        If return_valid_flag is False:
+            Tensor: [Np, Di] clean view features
+        If return_valid_flag is True:
+            Tuple[Tensor, Tensor, Tensor]: (raw_features, clean_features, valid_mask)
     """
-    use_views_attention = text_global_features_for_att is not None and img_features_for_att is not None
     
-    # Apply transformation, project points to image coordinate (same as original)
-    points = apply_3d_transformation(points, coord_type, img_meta, reverse=True)
-    points = points.repeat(proj_mat.shape[0], 1, 1)
+    # Step 1: Apply 3D coordinate transformation
+    # Transform points from source coordinate system to camera coordinate system
+    points_transformed = apply_3d_transformation(points, coord_type, img_meta, reverse=True)
     
+    # Step 2: Expand points for multi-view processing
+    # points_transformed: [Np, 3] → [Mp, Np, 3]
+    Mp = proj_mat.shape[0]  # Number of views
+    Np = points_transformed.shape[0]  # Number of points
+    points_expanded = points_transformed.repeat(Mp, 1, 1)
+    
+    # Step 3: Project 3D points to 2D image coordinates
+    # Mathematical operation: P_2d = K @ [R|t] @ P_3d
     if valid_flag:
-        proj_pts = batch_points_cam2img(points, proj_mat, with_depth=True)
-        pts_2d = proj_pts[..., :2]
-        depths = proj_pts[..., 2]
+        proj_pts = batch_points_cam2img(points_expanded, proj_mat, with_depth=True)
+        pts_2d = proj_pts[..., :2]  # [Mp, Np, 2] - 2D coordinates
+        depths = proj_pts[..., 2]   # [Mp, Np] - depth values
     else:
-        pts_2d = points_cam2img(points, proj_mat)
+        pts_2d = points_cam2img(points_expanded, proj_mat)
+        depths = None
     
-    # Image transformation (same as original)
-    img_coors = pts_2d[..., 0:2] * img_scale_factor
-    img_coors -= img_crop_offset
-    coor_x, coor_y = torch.split(img_coors, 1, dim=2)
+    # Step 4: Apply image transformations (scale, crop, flip)
+    # Transform 2D coordinates to match processed image coordinates
+    img_coors = pts_2d[..., 0:2] * img_scale_factor  # Apply scaling
+    img_coors -= img_crop_offset  # Apply cropping offset
+    
+    coor_x, coor_y = torch.split(img_coors, 1, dim=2)  # [Mp, Np, 1] each
     
     if img_flip:
+        # Handle horizontal flip
         ori_h, ori_w = img_shape
         coor_x = ori_w - coor_x
     
+    # Step 5: Normalize coordinates for grid sampling
+    # Convert to normalized coordinates [-1, 1] for F.grid_sample
     h, w = img_pad_shape
     norm_coor_y = coor_y / h * 2 - 1
     norm_coor_x = coor_x / w * 2 - 1
-    grid = torch.cat([norm_coor_x, norm_coor_y], dim=2).unsqueeze(1)
+    grid = torch.cat([norm_coor_x, norm_coor_y], dim=2).unsqueeze(1)  # [Mp, 1, Np, 2]
     
-    # Sample features (same as original)
-    mode_sampling = 'bilinear' if aligned else 'nearest'
+    # Step 6: Sample 2D features at projected 3D point locations
+    # This is the core 2D→3D lifting operation
+    mode = 'bilinear' if aligned else 'nearest'
     point_features = F.grid_sample(
-        img_features,
-        grid,
-        mode=mode_sampling,
+        img_features,  # [Mp, Di, H, W]
+        grid,          # [Mp, 1, Np, 2]
+        mode=mode,
         padding_mode=padding_mode,
         align_corners=align_corners
-    )
+    )  # Output: [Mp, Di, 1, Np]
+    
     point_features = point_features.squeeze(2)  # [Mp, Di, Np]
     
-    # Create visibility and validity masks (same as original)
     if valid_flag:
-        visible_valid = get_visible_valid_points(depths, views_points, voxel_size, proj_mat)
-        valid = (coor_x.squeeze(2) < w) & (coor_x.squeeze(2) > 0) & (
-            coor_y.squeeze(2) < h) & (coor_y.squeeze(2) > 0) & (depths > 0)
-        valid = valid & visible_valid
-        valid_num = valid.sum(dim=0)
+        # Step 7: Compute geometric validity masks
         
-        # Enhanced attention mechanism based on mode
-        if use_views_attention:
-            if mode == 'redundant':
-                views_att = _compute_redundant_attention(
-                    img_features_for_att, text_global_features_for_att, valid, temperature)
-            elif mode == 'synergistic':
-                views_att = _compute_synergistic_attention(
-                    img_features_for_att, text_global_features_for_att, valid, temperature)
-            else:  # hybrid mode
-                redundant_att = _compute_redundant_attention(
-                    img_features_for_att, text_global_features_for_att, valid, temperature)
-                synergistic_att = _compute_synergistic_attention(
-                    img_features_for_att, text_global_features_for_att, valid, temperature)
-                views_att = _combine_attention_distributions(
-                    redundant_att, synergistic_att, redundancy_weight, temperature)
-            
-            point_features = point_features * views_att.unsqueeze(1)
-        else:
-            point_features = point_features * valid.float().unsqueeze(1)
+        # 7a: Image boundary validity - points must be within image bounds
+        img_valid = (
+            (coor_x.squeeze(2) < w) & (coor_x.squeeze(2) > 0) &
+            (coor_y.squeeze(2) < h) & (coor_y.squeeze(2) > 0) &
+            (depths > 0)
+        )  # [Mp, Np]
         
-        # Aggregate features (same as original)
-        valid_features = point_features.sum(dim=0).t()
-        valid_each = valid
-        valid = valid_num > 0
+        # 7b: 3D visibility validity - points must be visible from camera views
+        # This uses geometric reasoning to determine if points are occluded
+        visible_valid = get_visible_valid_points(
+            depths, views_points, voxel_size, proj_mat
+        )  # [Mp, Np]
         
-        if not use_views_attention:
-            valid_features /= torch.clamp(valid_num[:, None], min=1)
+        # 7c: Combined validity mask
+        valid = img_valid & visible_valid  # [Mp, Np]
         
-        valid_features[~valid, :] = 0.
+        # Step 8: Apply validity filtering
+        # Zero out features for invalid points
+        point_features_filtered = point_features * valid.float().unsqueeze(1)  # [Mp, Di, Np]
+        
+        # Step 9: Multi-view aggregation via simple averaging
+        # Count valid views per point
+        valid_num = valid.sum(dim=0)  # [Np] - number of valid views per point
+        
+        # Aggregate features across views (simple averaging, NO attention)
+        clean_features = point_features_filtered.sum(dim=0).t()  # [Np, Di]
+        raw_features = point_features.sum(dim=0).t()  # [Np, Di] - before validity filtering
+        
+        # Normalize by number of valid views
+        clean_features = clean_features / torch.clamp(valid_num[:, None], min=1)
+        
+        # Zero out features for points with no valid views
+        point_valid = valid_num > 0  # [Np] - points visible in at least one view
+        clean_features[~point_valid, :] = 0.0
         
         if return_valid_flag:
-            return valid_features, valid, valid_each
-        return valid_features
+            return raw_features, clean_features, point_valid, valid  # Also return per-view validity
+        else:
+            return clean_features  # [Np, Di]
     
-    return point_features.squeeze().sum(dim=0).t()
-
-
-def _compute_redundant_attention(
-    img_features_for_att: Tensor,   # Shape: [M, D_fusion]
-    text_global_features_for_att: Tensor,  # Shape: [D_fusion]
-    valid: Tensor,                  # Shape: [M, Np]
-    temperature: float = 1.0
-) -> Tensor:                       # Return Shape: [M, Np]
-    """Compute attention weights that emphasize redundant information (single sample)."""
-    
-    # L2 normalize both features for cosine similarity
-    img_norm = F.normalize(img_features_for_att, p=2, dim=-1)  # [M, D_fusion]
-    text_norm = F.normalize(text_global_features_for_att, p=2, dim=-1)  # [D_fusion]
-    
-    # Compute cosine similarity using matmul for [M, D] x [D] -> [M]
-    # Equivalent to dot product for each view feature with the text feature
-    cosine_sim = torch.matmul(img_norm, text_norm)  # [M] 
-    
-    # Rescale to [0, 1] range for consistency
-    cosine_sim = (cosine_sim + 1) / 2
-    
-    # Apply validity mask and temperature-scaled softmax
-    # Unsqueeze cosine_sim to align with valid mask for broadcasting
-    attention = cosine_sim.unsqueeze(-1) * valid.float()  # [M, 1] * [M, Np] -> [M, Np]
-    attention[~valid] = -1e4 # Use a large negative number for stability with softmax
-    # Apply softmax across the 'M' dimension (views) for each point Np
-    attention = F.softmax(attention / temperature, dim=0)  # Apply softmax over views (dim=0)
-    
-    return attention
-
-
-def _compute_synergistic_attention(
-    img_features_for_att: Tensor,   # Shape: [M, D_fusion]
-    text_global_features_for_att: Tensor,  # Shape: [D_fusion]
-    valid: Tensor,                  # Shape: [M, Np]
-    temperature: float = 1.0
-) -> Tensor:                       # Return Shape: [M, Np]
-    """Compute attention weights that emphasize synergistic information (single sample)."""
-    num_views, dim = img_features_for_att.shape
-    
-    # L2 normalize both features for consistency
-    img_norm = F.normalize(img_features_for_att, p=2, dim=-1)  # [M, D_fusion]
-    text_norm = F.normalize(text_global_features_for_att, p=2, dim=-1)  # [D_fusion]
-    
-    # Compute projection magnitude (cosine similarity) using matmul [M, D] x [D] -> [M]
-    proj_magnitude = torch.matmul(img_norm, text_norm) # [M] 
-    
-    # Orthogonality is higher when projection is closer to 0
-    # Convert to [0, 1] range where 1 means most orthogonal
-    ortho_score = 1 - torch.abs(proj_magnitude) # [M]
-    
-    # Apply validity mask and temperature-scaled softmax
-    # Unsqueeze ortho_score to align with valid mask for broadcasting
-    attention = ortho_score.unsqueeze(-1) * valid.float()  # [M, 1] * [M, Np] -> [M, Np]
-    attention[~valid] = -1e4 # Use a large negative number
-    # Apply softmax across the 'M' dimension (views) for each point Np
-    attention = F.softmax(attention / temperature, dim=0)  # Apply softmax over views (dim=0)
-    
-    return attention
-
-
-def _combine_attention_distributions(
-    redundant_att: Tensor,    # Shape: [M, Np]
-    synergistic_att: Tensor,  # Shape: [M, Np]
-    redundancy_weight: float, 
-    temperature: float = 1.0
-) -> Tensor:                 # Return Shape: [M, Np]
-    """Combine redundant and synergistic attention distributions (single sample)."""
-    # Ensure inputs are probabilities (though softmax output already is)
-    redundant_att = torch.clamp(redundant_att, min=1e-10)
-    synergistic_att = torch.clamp(synergistic_att, min=1e-10)
-    
-    # Convert to logits by applying inverse softmax (log and scale by temp)
-    # Note: Softmax was applied over dim=0 (views)
-    redundant_logits = torch.log(redundant_att) * temperature
-    synergistic_logits = torch.log(synergistic_att) * temperature
-    
-    # Weighted combination of logits
-    combined_logits = redundancy_weight * redundant_logits + (1 - redundancy_weight) * synergistic_logits
-    
-    # Apply softmax again over the same dimension (dim=0)
-    combined_att = F.softmax(combined_logits / temperature, dim=0)
-    
-    return combined_att
+    else:
+        # No validity filtering - just aggregate across views
+        clean_features = point_features.sum(dim=0).t()  # [Np, Di]
+        return clean_features
