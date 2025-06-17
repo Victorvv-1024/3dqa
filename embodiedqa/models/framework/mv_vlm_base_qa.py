@@ -372,15 +372,15 @@ class MultiViewVLMBase3DQA(BaseModel):
         Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
         
         # 3. Bi-modal representation space
-        Z_VT = self.tv_fusion(Z_V, Z_T)  # [B, Np, Di] = [12, 1024, 1024]
-        feat_dict['Z_VT'] = Z_VT
+        Z_TV = self.tv_fusion(Z_T, Z_V)  # [B, Np, Di] = [12, 1024, 768]
+        feat_dict['Z_VT'] = Z_TV
         
         Z_PV = self.pv_fusion(Z_P, Z_V)
         feat_dict['Z_PV'] = Z_PV # [B, Np, D_fus] = [12, 1024, 768]
         
         Z_PT = self.pt_fusion(
             Z_PV,
-            Z_VT,
+            Z_TV,
             Z_T
         )
         feat_dict['Z_PT'] = Z_PT

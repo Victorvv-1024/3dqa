@@ -31,13 +31,13 @@ class TextViewFusion(nn.Module):
             nn.LayerNorm(fusion_dim)
         )
         
-    def forward(self, Z_V, Z_T):
+    def forward(self, Z_T, Z_V):
         """
         Minimal implementation exactly like point-view fusion.
         
         Args:
-            Z_V: [B, Np, 768] - View features in representation space
             Z_T: [B, L, 768] -  Text in representation space
+            Z_V: [B, Np, 768] - View features in representation space
             
         Returns:
             Z_TV: [B, Np, 768] - Text-view synergy
