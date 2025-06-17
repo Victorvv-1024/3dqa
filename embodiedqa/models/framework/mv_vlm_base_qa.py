@@ -24,8 +24,9 @@ import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .text_view_fusion import TextViewFusion
-from .pid import PIDEnhancement
-from .adaptive_fusion import AdaptiveTrimodalFusion
+# from .pid import PIDEnhancement
+# from .adaptive_fusion import AdaptiveTrimodalFusion
+from .unified_pid_fusion import UnifiedAdaptivePIDFusion
 from .spatial_reasoning import SpatialReason
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses import EnhancedLossComputation
@@ -170,23 +171,30 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Composition of all three modalities
-        self.adaptive_fusion = AdaptiveTrimodalFusion(
-            fusion_dim=self.D_fus,
-            hidden_dim=256,
-            dropout=0.1,
-            # Specify input dimensions based on your encoders
-            text_input_dim=self.text_encoder.config.hidden_size,  # 768 for sentence-bert
-            view_input_dim=self.backbone.out_channels[-1],        # 1024 for swin
-            point_input_dim=self.backbone_lidar.fp_channels[-1][-1],  # 256 for pointnet++
-            # Bi-modal input dimensions (existing)
-            tv_input_dim=self.backbone.out_channels[-1],  # 1024
-            pv_input_dim=self.D_fus,  # 768
-            pt_input_dim=self.D_fus   # 768
-        )
+        # self.adaptive_fusion = AdaptiveTrimodalFusion(
+        #     fusion_dim=self.D_fus,
+        #     hidden_dim=256,
+        #     dropout=0.1,
+        #     # Specify input dimensions based on your encoders
+        #     text_input_dim=self.text_encoder.config.hidden_size,  # 768 for sentence-bert
+        #     view_input_dim=self.backbone.out_channels[-1],        # 1024 for swin
+        #     point_input_dim=self.backbone_lidar.fp_channels[-1][-1],  # 256 for pointnet++
+        #     # Bi-modal input dimensions (existing)
+        #     tv_input_dim=self.backbone.out_channels[-1],  # 1024
+        #     pv_input_dim=self.D_fus,  # 768
+        #     pt_input_dim=self.D_fus   # 768
+        # )
             
 
-        # PID Enhancement
-        self.pid_enhancement = PIDEnhancement(self.D_fus)
+        # # PID Enhancement
+        # self.pid_enhancement = PIDEnhancement(self.D_fus)
+        
+        # Unified Adaptive PID Fusion
+        self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
+            fusion_dim=self.D_fus,  # 768
+            hidden_dim=256,
+            dropout=0.1
+        )
         
         # Reasoning
         self.reason = FeatureRefinement(
@@ -195,16 +203,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Enhanced loss computation, includes spatial losses and PID regularization
-        self.enhanced_loss_computation = EnhancedLossComputation(
-            uniqueness_weight=0.05,    # Reduced since spatial reasoning takes priority
-            synergy_weight=0.1,        
-            redundancy_weight=0.03,    
-            balance_weight=0.03,       
-            spatial_weight=0.15,       # Reduced (spatial module handles this)
-            adaptive_weight=0.05,
-            # New spatial loss weights
-            superpoint_consistency_weight=0.1  # Wang et al. consistency loss
-        )
+        self.enhanced_loss_computation = EnhancedLossComputation()
         
         # Spatial Reasoning
         self.spatial_reason = SpatialReason(
