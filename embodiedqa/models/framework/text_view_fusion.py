@@ -1,99 +1,61 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
+from typing import Optional
 
 
 class TextViewFusion(nn.Module):
     """
-    Clean Text-View fusion without contamination from 2D→3D lifting.
+    Text-View Fusion using consistent representation space.
+    
+    Use Z_T (projected text) and Z_V (projected view)
+    Both inputs are in the unified 768D representation space.
     
     Mathematical Foundation:
-    Z_TV captures I_synergy(T,V; Y) = information emerging from text-view interaction
+    Z_TV = I_synergy(T, V; Y) where T and V are in same representation space
     """
     
-    def __init__(self, fusion_dim=768, hidden_dim=512):
+    def __init__(self, fusion_dim=768):
         super().__init__()
         
-        # ==================== QUESTION-GUIDED VIEW SELECTION ====================
-        # Similar to TGMF but operates on clean Z_V features
-        self.question_view_attention = nn.MultiheadAttention(
+        # Exact same pattern as point-view
+        self.synergy_detector = nn.MultiheadAttention(
             embed_dim=fusion_dim,
             num_heads=8,
-            dropout=0.1,
             batch_first=True
         )
         
-        # ==================== SEMANTIC ALIGNMENT ====================
-        # Align view spatial features with text semantic features
-        self.semantic_alignment = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Dropout(0.1)
-        )
-        
-        # ==================== SYNERGY DETECTION ====================
-        # Detect text-view synergistic information
-        self.synergy_detector = nn.Sequential(
-            nn.Linear(fusion_dim * 2, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, fusion_dim),
+        self.synergy_fusion = nn.Sequential(
+            nn.Linear(fusion_dim * 2, fusion_dim),
             nn.LayerNorm(fusion_dim)
         )
         
-        # ==================== INFORMATION INTEGRATION ====================
-        self.info_integrator = nn.Sequential(
-            nn.Linear(fusion_dim * 3, fusion_dim),  # T + V + synergy
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(fusion_dim, fusion_dim)
-        )
-    
-    def forward(self, Z_T: torch.Tensor, Z_V: torch.Tensor) -> torch.Tensor:
+    def forward(self, Z_V, Z_T):
         """
+        Minimal implementation exactly like point-view fusion.
+        
         Args:
-            Z_T: [B, Lt, 768] - Clean text features
-            Z_V: [B, Np, 768] - Clean view features (no text contamination)
+            Z_V: [B, Np, 768] - View features in representation space
+            Z_T: [B, L, 768] -  Text in representation space
+            
         Returns:
-            Z_TV: [B, Np, 768] - Text-view synergistic features
+            Z_TV: [B, Np, 768] - Text-view synergy
         """
-        B, Lt, D = Z_T.shape
-        B, Np, D = Z_V.shape
         
-        # ================= QUESTION-GUIDED VIEW SELECTION =================
-        # Text attends to view features to identify relevant visual regions
-        question_guided_views, attention_weights = self.question_view_attention(
-            query=Z_T.mean(dim=1, keepdim=True),  # [B, 1, D] - Global question
-            key=Z_V,                              # [B, Np, D] - View features
-            value=Z_V                             # [B, Np, D] - View features
-        )  # Output: [B, 1, D]
+        B, Np, d_model = Z_V.shape
         
-        # Broadcast question-guided signal to all points
-        question_signal = question_guided_views.expand(B, Np, D)  # [B, Np, D]
+        # Step 1: Expand text to view space (like expanding point features)
+        text_expanded = Z_T.unsqueeze(1).expand(B, Np, d_model)  # [B, Np, 768]
         
-        # ================= SEMANTIC ALIGNMENT =================
-        # Align view features to semantic space for text interaction
-        semantically_aligned_views = self.semantic_alignment(Z_V)  # [B, Np, D]
+        # Step 2: Cross-attention (exactly like point-view)
+        text_attended, _ = self.synergy_detector(
+            query=text_expanded, key=Z_V, value=Z_V
+        )  # [B, Np, 768]
         
-        # ================= SYNERGY DETECTION =================
-        # Detect synergistic information between text intent and view content
-        text_view_concat = torch.cat([
-            question_signal,           # [B, Np, D] - Question intent per point
-            semantically_aligned_views # [B, Np, D] - Semantically aligned views
-        ], dim=-1)  # [B, Np, 2D]
-        
-        synergistic_features = self.synergy_detector(text_view_concat)  # [B, Np, D]
-        
-        # ================= INFORMATION INTEGRATION =================
-        # Integrate: original views + question guidance + synergy
-        integrated_input = torch.cat([
-            Z_V,                    # [B, Np, D] - Original view information
-            question_signal,        # [B, Np, D] - Question-guided information
-            synergistic_features    # [B, Np, D] - Synergistic information
-        ], dim=-1)  # [B, Np, 3D]
-        
-        Z_TV = self.info_integrator(integrated_input)  # [B, Np, D]
+        # Step 3: Synergy fusion (exactly like point-view)
+        Z_TV = self.synergy_fusion(
+            torch.cat([text_attended, Z_V], dim=-1)
+        )  # [B, Np, 768]
         
         return Z_TV

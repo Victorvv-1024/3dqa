@@ -23,6 +23,7 @@ import open3d as o3d
 import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
+from .text_view_fusion import TextViewFusion
 from .pid import PIDEnhancement
 from .adaptive_fusion import AdaptiveTrimodalFusion
 from .spatial_reasoning import SpatialReason
@@ -164,6 +165,11 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_dim=self.D_fus,
         )
         
+        self.tv_fusion = TextViewFusion(
+            fusion_dim=self.D_fus,  # 768
+        )
+        
+        # Composition of all three modalities
         self.adaptive_fusion = AdaptiveTrimodalFusion(
             fusion_dim=self.D_fus,
             hidden_dim=256,
@@ -358,24 +364,24 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
         raw_view_feats = visible_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
-        raw_text_feats = text_dict['text_feats']  # [B, L, D] = [12, 14, 768]
+        raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
         
         # 2. Uni-modal representation space
         Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
         Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, D_fus] = [12, 1024, 768]
-        Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
+        Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
         
         # 3. Bi-modal representation space
-        Z_TV = points_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
-        feat_dict['Z_TV'] = Z_TV
+        Z_VT = self.tv_fusion(Z_V, Z_T)  # [B, Np, Di] = [12, 1024, 1024]
+        feat_dict['Z_VT'] = Z_VT
         
         Z_PV = self.pv_fusion(Z_P, Z_V)
         feat_dict['Z_PV'] = Z_PV # [B, Np, D_fus] = [12, 1024, 768]
         
         Z_PT = self.pt_fusion(
             Z_PV,
-            Z_TV,
-            text_global_features_for_att
+            Z_VT,
+            Z_T
         )
         feat_dict['Z_PT'] = Z_PT
         
