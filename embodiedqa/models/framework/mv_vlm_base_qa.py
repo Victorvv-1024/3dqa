@@ -394,48 +394,12 @@ class MultiViewVLMBase3DQA(BaseModel):
             questions=questions,
         )
         
-        # # 4. Tri-modal fusion
-        # Z_fused, fusion_weights, component_dict = self.adaptive_fusion(
-        #     # Bi-modal synergies
-        #     Z_TV, Z_PV, Z_PT,
-        #     # Uni-modal features
-        #     text_features=text_dict['text_feats'],
-        #     view_features=raw_view_feats,
-        #     point_features=raw_point_feats,
-        # )
-        
-        # feat_dict['Z_fused'] = Z_fused
-        # feat_dict['fusion_weights'] = fusion_weights  # [B, 8] - now includes all PID components
-        # feat_dict['component_dict'] = component_dict
-        
-        # # 5. Spatial Reasoning
-        # questions = [sample.question for sample in batch_data_samples]
-        # Z_spatially_enhanced, spatial_info = self.spatial_reason(
-        #     Z_fused=Z_fused,
-        #     coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
-        #     text_features=text_dict['text_global_token'],  # [B, D]
-        #     questions=questions
-        # )
-
-
-        # # 6. PID enhancement
-        # Z_pid_enhanced = self.pid_enhancement(
-        #     Z_TV, Z_PV, Z_PT, Z_spatially_enhanced, text_dict['text_global_token']
-        # )
-        # # Selective blending: use PID more for non-spatial questions
-        # spatial_mask = spatial_info['spatial_mask']  # [B]
-        # final_features = torch.zeros_like(Z_spatially_enhanced)
-        
-        # for b in range(len(batch_data_samples)):
-        #     if spatial_mask[b]:
-        #         # Spatial question: prioritize spatial reasoning (80% spatial, 20% PID)
-        #         final_features[b] = 0.8 * Z_spatially_enhanced[b] + 0.2 * Z_pid_enhanced[b]
-        #     else:
-        #         # Non-spatial question: balanced approach (50% spatial, 50% PID)
-        #         final_features[b] = 0.5 * Z_spatially_enhanced[b] + 0.5 * Z_pid_enhanced[b]
-        
-        # feat_dict['Z_final'] = final_features
-        # feat_dict['spatial_info'] = spatial_info
+        # 5. Unified PID Fusion
+        Z_final, fusion_weights, component_dict = self.unified_pid_fusion(
+            Z_T, Z_V, Z_P,
+            Z_TV, Z_PV, Z_PT,
+            geometric_context=geometric_context,
+            spatial_info=spatial_info)
 
         return feat_dict
     
