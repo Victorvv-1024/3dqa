@@ -27,7 +27,7 @@ from .text_view_fusion import TextViewFusion
 # from .pid import PIDEnhancement
 # from .adaptive_fusion import AdaptiveTrimodalFusion
 from .unified_pid_fusion import UnifiedAdaptivePIDFusion
-from .spatial_reasoning import SpatialReason
+from .spatial_reason import SpatialReason
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses import EnhancedLossComputation
 
@@ -189,6 +189,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         # # PID Enhancement
         # self.pid_enhancement = PIDEnhancement(self.D_fus)
         
+        # Spatial Reasoning
+        self.spatial_reason = SpatialReason(
+            fusion_dim=self.D_fus,      # 768
+        )
+        
         # Unified Adaptive PID Fusion
         self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
             fusion_dim=self.D_fus,  # 768
@@ -204,13 +209,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         # Enhanced loss computation, includes spatial losses and PID regularization
         self.enhanced_loss_computation = EnhancedLossComputation()
-        
-        # Spatial Reasoning
-        self.spatial_reason = SpatialReason(
-            fusion_dim=self.D_fus,      # 768
-            sparse_points=256
-        )
-        
+         
     @property
     def with_qa_head(self):
         """Whether the detector has a qa head."""
@@ -384,48 +383,59 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         feat_dict['Z_PT'] = Z_PT
         
-        # 4. Tri-modal fusion
-        Z_fused, fusion_weights, component_dict = self.adaptive_fusion(
-            # Bi-modal synergies
-            Z_TV, Z_PV, Z_PT,
-            # Uni-modal features
-            text_features=text_dict['text_feats'],
-            view_features=raw_view_feats,
-            point_features=raw_point_feats,
-        )
-        
-        feat_dict['Z_fused'] = Z_fused
-        feat_dict['fusion_weights'] = fusion_weights  # [B, 8] - now includes all PID components
-        feat_dict['component_dict'] = component_dict
-        
-        # 5. Spatial Reasoning
+        # 4. Spatial Reasoning
         questions = [sample.question for sample in batch_data_samples]
-        Z_spatially_enhanced, spatial_info = self.spatial_reason(
-            Z_fused=Z_fused,
+        print(questions)
+        exit()
+        geometric_context, spatial_info = self.spatial_reason(
+            features=Z_PV,
             coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
-            text_features=text_dict['text_global_token'],  # [B, D]
-            questions=questions
+            question_context=Z_TV,  # [B, Np, D_fus]
+            questions=questions,
         )
+        
+        # # 4. Tri-modal fusion
+        # Z_fused, fusion_weights, component_dict = self.adaptive_fusion(
+        #     # Bi-modal synergies
+        #     Z_TV, Z_PV, Z_PT,
+        #     # Uni-modal features
+        #     text_features=text_dict['text_feats'],
+        #     view_features=raw_view_feats,
+        #     point_features=raw_point_feats,
+        # )
+        
+        # feat_dict['Z_fused'] = Z_fused
+        # feat_dict['fusion_weights'] = fusion_weights  # [B, 8] - now includes all PID components
+        # feat_dict['component_dict'] = component_dict
+        
+        # # 5. Spatial Reasoning
+        # questions = [sample.question for sample in batch_data_samples]
+        # Z_spatially_enhanced, spatial_info = self.spatial_reason(
+        #     Z_fused=Z_fused,
+        #     coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
+        #     text_features=text_dict['text_global_token'],  # [B, D]
+        #     questions=questions
+        # )
 
 
-        # 6. PID enhancement
-        Z_pid_enhanced = self.pid_enhancement(
-            Z_TV, Z_PV, Z_PT, Z_spatially_enhanced, text_dict['text_global_token']
-        )
-        # Selective blending: use PID more for non-spatial questions
-        spatial_mask = spatial_info['spatial_mask']  # [B]
-        final_features = torch.zeros_like(Z_spatially_enhanced)
+        # # 6. PID enhancement
+        # Z_pid_enhanced = self.pid_enhancement(
+        #     Z_TV, Z_PV, Z_PT, Z_spatially_enhanced, text_dict['text_global_token']
+        # )
+        # # Selective blending: use PID more for non-spatial questions
+        # spatial_mask = spatial_info['spatial_mask']  # [B]
+        # final_features = torch.zeros_like(Z_spatially_enhanced)
         
-        for b in range(len(batch_data_samples)):
-            if spatial_mask[b]:
-                # Spatial question: prioritize spatial reasoning (80% spatial, 20% PID)
-                final_features[b] = 0.8 * Z_spatially_enhanced[b] + 0.2 * Z_pid_enhanced[b]
-            else:
-                # Non-spatial question: balanced approach (50% spatial, 50% PID)
-                final_features[b] = 0.5 * Z_spatially_enhanced[b] + 0.5 * Z_pid_enhanced[b]
+        # for b in range(len(batch_data_samples)):
+        #     if spatial_mask[b]:
+        #         # Spatial question: prioritize spatial reasoning (80% spatial, 20% PID)
+        #         final_features[b] = 0.8 * Z_spatially_enhanced[b] + 0.2 * Z_pid_enhanced[b]
+        #     else:
+        #         # Non-spatial question: balanced approach (50% spatial, 50% PID)
+        #         final_features[b] = 0.5 * Z_spatially_enhanced[b] + 0.5 * Z_pid_enhanced[b]
         
-        feat_dict['Z_final'] = final_features
-        feat_dict['spatial_info'] = spatial_info
+        # feat_dict['Z_final'] = final_features
+        # feat_dict['spatial_info'] = spatial_info
 
         return feat_dict
     
