@@ -178,46 +178,31 @@ class HigherOrderExtractor(nn.Module):
         return Z_redundant, Z_higher_synergy
 
 
-class SpatiallyAwarePIDFusion(nn.Module):
+class GeometricContextIntegrator(nn.Module):
     """
-    Unified PID fusion that integrates spatial reasoning directly into the PID framework.
+    Integrates geometric context from spatial reasoning into PID components.
     
-    Mathematical Foundation:
-    Z_final = Σᵢ wᵢ(spatial_context, question) * PIDᵢ(spatial_enhanced)
-    
-    Where PIDᵢ are the 8 PID components, and weights are adapted based on:
-    1. Spatial complexity of the question
-    2. Spatial structure of the scene
-    3. Question type requirements
+    Design Philosophy:
+    - Uses pre-computed geometric_context from SimplifiedSpatialReasoning
+    - Applies spatial enhancement selectively based on spatial_mask
+    - Preserves PID mathematical principles while adding geometric awareness
     """
     
-    def __init__(self, fusion_dim=768, num_heads=8):
+    def __init__(self, fusion_dim=768):
         super().__init__()
         self.fusion_dim = fusion_dim
         
-        # Spatial context encoder
-        self.spatial_encoder = nn.Sequential(
-            nn.Linear(fusion_dim + 3, fusion_dim),  # +3 for xyz coordinates
-            nn.LayerNorm(fusion_dim),
-            nn.ReLU(),
+        # Geometric context processor
+        self.geometric_processor = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim // 2),
             nn.LayerNorm(fusion_dim // 2),
             nn.ReLU(),
-            nn.Linear(fusion_dim // 2, 64)  # Compact spatial representation
+            nn.Linear(fusion_dim // 2, 64)  # Compact geometric representation
         )
         
-        # Spatial complexity detector
-        self.spatial_complexity_detector = nn.Sequential(
-            nn.Linear(fusion_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(), 
-            nn.Linear(128, 3)  # [complex_spatial, simple_spatial, non_spatial]
-        )
-        
-        # Adaptive weight predictor based on spatial context
-        self.spatial_adaptive_weights = nn.Sequential(
-            nn.Linear(64 + fusion_dim, 256),  # spatial_context + question_context
+        # Adaptive weight predictor (spatial-aware)
+        self.spatial_weight_predictor = nn.Sequential(
+            nn.Linear(64 + fusion_dim, 256),  # geometric_context + question_context
             nn.LayerNorm(256),
             nn.GELU(),
             nn.Dropout(0.1),
@@ -227,140 +212,120 @@ class SpatiallyAwarePIDFusion(nn.Module):
             nn.Linear(128, 8)  # 8 PID component weights
         )
         
-        # Spatial enhancement for each PID component
+        # Spatial enhancement modules for different PID components
         self.spatial_enhancers = nn.ModuleDict({
-            'unique_P': self._make_spatial_enhancer(),  # Point unique gets spatial boost
-            'unique_V': self._make_spatial_enhancer(),  # View unique gets spatial boost
-            'unique_T': self._make_minimal_enhancer(),  # Text unique minimal spatial
-            'synergy_PV': self._make_spatial_enhancer(), # PV synergy gets major spatial boost
-            'synergy_TV': self._make_spatial_enhancer(), # TV synergy gets spatial boost
-            'synergy_PT': self._make_spatial_enhancer(), # PT synergy gets spatial boost
-            'redundant': self._make_minimal_enhancer(),  # Redundant minimal spatial
-            'higher_synergy': self._make_minimal_enhancer() # Higher-order minimal spatial
+            # Spatial-sensitive components (get strong geometric enhancement)
+            'P_unique': self._make_strong_spatial_enhancer(),     # Point unique - strongly spatial
+            'V_unique': self._make_strong_spatial_enhancer(),     # View unique - strongly spatial  
+            'PV_synergy': self._make_strong_spatial_enhancer(),   # PV synergy - most spatial
+            'TV_synergy': self._make_moderate_spatial_enhancer(), # TV synergy - moderately spatial
+            'PT_synergy': self._make_strong_spatial_enhancer(),   # PT synergy - strongly spatial
+            
+            # Non-spatial components (minimal geometric enhancement)
+            'T_unique': self._make_minimal_spatial_enhancer(),    # Text unique - minimal spatial
+            'redundant': self._make_minimal_spatial_enhancer(),   # Redundant - minimal spatial
+            'higher_synergy': self._make_minimal_spatial_enhancer() # Higher-order - minimal spatial
         })
         
-        # Final fusion network
-        self.final_fusion = nn.Sequential(
-            nn.Linear(fusion_dim * 8, fusion_dim * 2),
-            nn.LayerNorm(fusion_dim * 2),
+    def _make_strong_spatial_enhancer(self):
+        """Strong spatial enhancement for geometry-sensitive components."""
+        return nn.Sequential(
+            nn.Linear(self.fusion_dim + 64, self.fusion_dim),  # +64 for geometric context
+            nn.LayerNorm(self.fusion_dim),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Linear(fusion_dim, fusion_dim)
+            nn.Linear(self.fusion_dim, self.fusion_dim),
+            nn.LayerNorm(self.fusion_dim)
         )
         
-    def _make_spatial_enhancer(self, fusion_dim=768):
-        """Create spatial enhancement network for spatial-sensitive components."""
+    def _make_moderate_spatial_enhancer(self):
+        """Moderate spatial enhancement for partially spatial components."""
         return nn.Sequential(
-            nn.Linear(fusion_dim + 64, fusion_dim),  # +64 for spatial context
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(fusion_dim, fusion_dim)
-        )
-        
-    def _make_minimal_enhancer(self, fusion_dim=768):
-        """Create minimal spatial enhancement for non-spatial components."""
-        return nn.Sequential(
-            nn.Linear(fusion_dim + 64, fusion_dim),
-            nn.LayerNorm(fusion_dim),
+            nn.Linear(self.fusion_dim + 64, self.fusion_dim),
+            nn.LayerNorm(self.fusion_dim),
             nn.ReLU(),
-            nn.Linear(fusion_dim, fusion_dim)
+            nn.Linear(self.fusion_dim, self.fusion_dim)
         )
         
-    def forward(self, component_dict, coordinates, question_features):
+    def _make_minimal_spatial_enhancer(self):
+        """Minimal spatial enhancement for non-spatial components."""
+        return nn.Sequential(
+            nn.Linear(self.fusion_dim + 64, self.fusion_dim),
+            nn.LayerNorm(self.fusion_dim),
+            nn.ReLU(),
+            nn.Linear(self.fusion_dim, self.fusion_dim)
+        )
+        
+    def forward(self, component_dict, geometric_context, spatial_info, question_features):
         """
-        Unified spatial-aware PID fusion.
+        Integrate geometric context into PID components and compute adaptive weights.
         
         Args:
             component_dict: Dict with all 8 PID components
-            coordinates: [B, N, 3] - Point coordinates for spatial context
-            question_features: [B, D] - Question representation
+            geometric_context: [B, N, D] - From SimplifiedSpatialReasoning
+            spatial_info: Dict - Spatial metadata (spatial_mask, superpoint_labels, etc.)
+            question_features: [B, D] - Question context
             
         Returns:
-            Z_final: [B, N, D] - Final fused features
-            fusion_weights: [B, 8] - Adaptive PID weights
-            spatial_info: Dict - Spatial processing information
+            enhanced_components: List of spatially-enhanced PID components
+            adaptive_weights: [B, 8] - Spatial-aware component weights
         """
-        # Extract components
-        Z_P_unique = component_dict['Z_P_unique']
-        Z_V_unique = component_dict['Z_V_unique']
-        Z_T_unique = component_dict['Z_T_unique']
-        Z_PV_synergy = component_dict['Z_PV_synergy']
-        Z_TV_synergy = component_dict['Z_TV_synergy']
-        Z_PT_synergy = component_dict['Z_PT_synergy']
-        Z_redundant = component_dict['Z_redundant']
-        Z_higher_synergy = component_dict['Z_higher_synergy']
+        B, N, D = geometric_context.shape
         
-        B, N, D = Z_P_unique.shape
+        # Extract spatial mask from spatial_info
+        spatial_mask = spatial_info.get('spatial_mask', torch.ones(B, dtype=torch.bool, device=geometric_context.device))
         
-        # ==================== SPATIAL CONTEXT ENCODING ====================
-        # Combine features with coordinates for spatial context
-        spatial_input = torch.cat([
-            Z_PV_synergy,  # Use PV synergy as spatial representative
-            coordinates
-        ], dim=-1)  # [B, N, D+3]
-        
-        spatial_context = self.spatial_encoder(spatial_input)  # [B, N, 64]
-        spatial_context_global = spatial_context.mean(dim=1)  # [B, 64]
-        
-        # ==================== SPATIAL COMPLEXITY DETECTION ====================
-        spatial_complexity = self.spatial_complexity_detector(question_features)  # [B, 3]
-        spatial_complexity_probs = F.softmax(spatial_complexity, dim=-1)
-        
-        spatial_info = {
-            'spatial_complexity_probs': spatial_complexity_probs,
-            'spatial_context_global': spatial_context_global,
-            'is_complex_spatial': spatial_complexity_probs[:, 0] > 0.5,
-            'is_simple_spatial': spatial_complexity_probs[:, 1] > 0.5,
-            'is_non_spatial': spatial_complexity_probs[:, 2] > 0.5
-        }
+        # ==================== GEOMETRIC CONTEXT PROCESSING ====================
+        # Process geometric context to compact representation
+        geometric_context_compact = self.geometric_processor(geometric_context.mean(dim=1))  # [B, 64]
         
         # ==================== ADAPTIVE WEIGHT PREDICTION ====================
-        weight_input = torch.cat([spatial_context_global, question_features], dim=-1)
-        fusion_weights = self.spatial_adaptive_weights(weight_input)  # [B, 8]
-        fusion_weights = F.softmax(fusion_weights, dim=-1)  # Ensure sum to 1
+        # Predict component weights based on geometric + question context
+        weight_input = torch.cat([geometric_context_compact, question_features], dim=-1)  # [B, 64+D]
+        adaptive_weights = self.spatial_weight_predictor(weight_input)  # [B, 8]
+        adaptive_weights = F.softmax(adaptive_weights, dim=-1)  # Ensure sum to 1
         
         # ==================== SPATIAL ENHANCEMENT PER COMPONENT ====================
-        # Enhance each PID component based on spatial context
-        enhanced_components = []
-        component_names = ['unique_P', 'unique_V', 'unique_T', 'synergy_PV', 
-                          'synergy_TV', 'synergy_PT', 'redundant', 'higher_synergy']
-        component_tensors = [Z_P_unique, Z_V_unique, Z_T_unique, Z_PV_synergy,
-                           Z_TV_synergy, Z_PT_synergy, Z_redundant, Z_higher_synergy]
+        component_names = ['P_unique', 'V_unique', 'T_unique', 'PV_synergy', 
+                          'TV_synergy', 'PT_synergy', 'redundant', 'higher_synergy']
+        component_keys = ['Z_P_unique', 'Z_V_unique', 'Z_T_unique', 'Z_PV_synergy',
+                         'Z_TV_synergy', 'Z_PT_synergy', 'Z_redundant', 'Z_higher_synergy']
         
-        for name, component in zip(component_names, component_tensors):
-            # Prepare input for spatial enhancement
-            enhancer_input = torch.cat([
-                component,
-                spatial_context.expand_as(component)
-            ], dim=-1)  # [B, N, D+64]
+        enhanced_components = []
+        
+        # Expand geometric context for concatenation
+        geometric_context_expanded = geometric_context_compact.unsqueeze(1).expand(B, N, 64)  # [B, N, 64]
+        
+        for name, key in zip(component_names, component_keys):
+            component = component_dict[key]  # [B, N, D]
             
-            # Apply spatial enhancement
-            enhanced_component = self.spatial_enhancers[name](enhancer_input)
+            # ==================== CONDITIONAL SPATIAL ENHANCEMENT ====================
+            enhanced_component = torch.zeros_like(component)
+            
+            for b in range(B):
+                if spatial_mask[b]:
+                    # Spatial question: apply geometric enhancement
+                    component_with_context = torch.cat([
+                        component[b:b+1], 
+                        geometric_context_expanded[b:b+1]
+                    ], dim=-1)  # [1, N, D+64]
+                    enhanced_component[b:b+1] = self.spatial_enhancers[name](component_with_context)
+                else:
+                    # Non-spatial question: minimal enhancement (identity + small geometric context)
+                    if name in ['P_unique', 'V_unique', 'PV_synergy', 'TV_synergy', 'PT_synergy']:
+                        # Even for non-spatial, add tiny geometric awareness
+                        component_with_context = torch.cat([
+                            component[b:b+1], 
+                            geometric_context_expanded[b:b+1] * 0.1  # Reduced influence
+                        ], dim=-1)
+                        enhanced_component[b:b+1] = self.spatial_enhancers[name](component_with_context)
+                    else:
+                        # Pure non-spatial components: identity
+                        enhanced_component[b:b+1] = component[b:b+1]
+            
             enhanced_components.append(enhanced_component)
         
-        # ==================== WEIGHTED FUSION ====================
-        # Stack all enhanced components
-        all_components = torch.stack(enhanced_components, dim=2)  # [B, N, 8, D]
-        
-        # Apply adaptive weights
-        weighted_components = torch.sum(
-            fusion_weights.unsqueeze(1).unsqueeze(-1) * all_components,
-            dim=2
-        )  # [B, N, D]
-        
-        # ==================== FINAL FUSION ====================
-        # Concatenate all components for final processing
-        components_concat = torch.cat(enhanced_components, dim=-1)  # [B, N, 8*D]
-        Z_final = self.final_fusion(components_concat)  # [B, N, D]
-        
-        # Residual connection with weighted combination
-        Z_final = 0.7 * Z_final + 0.3 * weighted_components
-        
-        return Z_final, fusion_weights, spatial_info
+        return enhanced_components, adaptive_weights
 
 
 class UnifiedAdaptivePIDFusion(nn.Module):
@@ -378,15 +343,15 @@ class UnifiedAdaptivePIDFusion(nn.Module):
         super().__init__()
         self.fusion_dim = fusion_dim
         
-        # ==================== PID COMPONENT EXTRACTORS ====================
+        # ==================== PID COMPONENT EXTRACTORS (UNCHANGED) ====================
         self.unique_extractor = UniqueComponentExtractor(fusion_dim)
         self.higher_order_extractor = HigherOrderExtractor(fusion_dim)
         
-        # ==================== SPATIAL INTEGRATION ====================
-        # This integrates with your existing spatial reasoning, doesn't replace it
-        self.spatial_integrator = SpatiallyAwarePIDFusion(fusion_dim)
+        # ==================== GEOMETRIC CONTEXT INTEGRATION (NEW) ====================
+        # Replaces the old spatial processing with geometric context integration
+        self.geometric_integrator = GeometricContextIntegrator(fusion_dim)
         
-        # ==================== FINAL FUSION ====================
+        # ==================== FINAL FUSION (UNCHANGED) ====================
         self.final_fusion = nn.Sequential(
             nn.Linear(fusion_dim * 8, fusion_dim * 2),
             nn.LayerNorm(fusion_dim * 2),
@@ -403,40 +368,35 @@ class UnifiedAdaptivePIDFusion(nn.Module):
                 Z_T: torch.Tensor, Z_V: torch.Tensor, Z_P: torch.Tensor,
                 # Bi-modal synergies (from existing pipeline)
                 Z_TV: torch.Tensor, Z_PV: torch.Tensor, Z_PT: torch.Tensor,
-                # Spatial information
-                spatial_info,
-                # Question context
-                question_features: torch.Tensor
+                # Pre-computed geometric context from SimplifiedSpatialReasoning
+                geometric_context: torch.Tensor,
+                spatial_info: Dict,
                 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
-        Complete unified PID fusion forward pass.
+        Updated unified PID fusion with geometric context integration.
         
         Args:
-            Z_TV, Z_PV, Z_PT: [B, N, D] - Bi-modal synergies from existing pipeline
-            text_features: [B, D] or [B, Lt, D] - Raw text features
-            view_features: [B, N, D] - Raw view features  
-            point_features: [B, N, D] - Raw point features
-            spatial_info: [B, N, 3] - Point coordinates
-            question_features: [B, D] - Question representation
+            Z_T: [B, D] - Text features (pooled)
+            Z_V, Z_P: [B, N, D] - View and point features
+            Z_TV, Z_PV, Z_PT: [B, N, D] - Bi-modal synergies
+            geometric_context: [B, N, D] - From SimplifiedSpatialReasoning
+            spatial_info: Dict - Spatial metadata (spatial_mask, superpoint_labels, etc.)
+            question_features: [B, D] - Question context (optional)
             
         Returns:
             Z_final: [B, N, D] - Final unified PID-fused features
             fusion_weights: [B, 8] - Adaptive PID component weights
             component_dict: Dict - All 8 PID components for loss computation
         """
+        # ==================== STEP 1: PID COMPONENT EXTRACTION ====================
+        # Expand Z_T to match spatial dimensions for unique extraction
+        B, N, D = Z_V.shape
+        Z_T_expanded = Z_T.unsqueeze(1).expand(B, N, D) if Z_T.dim() == 2 else Z_T
         
-        # ==================== QUESTION FEATURES PREPARATION ====================
-        if question_features is None:
-            if Z_T.dim() == 3:  # [B, N, D] -> pool to [B, D]
-                question_features = Z_T.mean(dim=1)
-            else:  # [B, D] -> already pooled
-                question_features = Z_T
-        
-        # ==================== STEP 2: UNIQUE COMPONENT EXTRACTION ====================
         # Extract unique components (orthogonal to bi-modal synergies)
         Z_P_unique = self.unique_extractor(Z_P, [Z_PV, Z_PT])
         Z_V_unique = self.unique_extractor(Z_V, [Z_PV, Z_TV])
-        Z_T_unique = self.unique_extractor(Z_T, [Z_TV, Z_PT])
+        Z_T_unique = self.unique_extractor(Z_T_expanded, [Z_TV, Z_PT])
         
         # Extract higher-order components
         Z_redundant, Z_higher_synergy = self.higher_order_extractor(Z_TV, Z_PV, Z_PT)
@@ -453,32 +413,39 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             'Z_higher_synergy': Z_higher_synergy
         }
         
-        # ==================== STEP 3: SPATIAL-AWARE ADAPTIVE FUSION ====================
-        # Integrate with existing spatial reasoning results
-        enhanced_components, fusion_weights = self.spatial_integrator(
-            component_dict, spatial_info, question_features
+        # ==================== STEP 2: GEOMETRIC CONTEXT INTEGRATION ====================
+        # This is the KEY integration point with SimplifiedSpatialReasoning
+        enhanced_components, fusion_weights = self.geometric_integrator(
+            component_dict=component_dict,
+            geometric_context=geometric_context,  # From spatial reasoning
+            spatial_info=spatial_info,            # From spatial reasoning
+            question_features=Z_T
         )
         
-        # ==================== WEIGHTED FUSION ====================
+        # ==================== STEP 3: WEIGHTED FUSION ====================
         # Stack all enhanced components
-        all_components = torch.stack(enhanced_components, dim=2)  # [B, N, 8, D]
+        # all_components = torch.stack(enhanced_components, dim=2)  # [B, N, 8, D]
         
-        # Apply adaptive weights
-        weighted_components = torch.sum(
-            fusion_weights.unsqueeze(1).unsqueeze(-1) * all_components,
-            dim=2
-        )  # [B, N, D]
+        # Apply adaptive weights (learned from geometric + question context)
+        # weighted_components = torch.sum(
+        #     fusion_weights.unsqueeze(1).unsqueeze(-1) * all_components,
+        #     dim=2
+        # )  # [B, N, D]
         
-        # Final fusion through nonlinear network
+        # ==================== STEP 4: FINAL FUSION ====================
+        # Concatenate all enhanced components for final processing
         components_concat = torch.cat(enhanced_components, dim=-1)  # [B, N, 8*D]
         Z_final = self.final_fusion(components_concat)  # [B, N, D]
         
-        # Residual connection
-        Z_final = 0.7 * Z_final + 0.3 * weighted_components
+        # Residual connection with weighted combination
+        # Z_final = 0.7 * Z_final + 0.3 * weighted_components
         
-        # Add fusion weights to component dict for loss computation
-        component_dict['fusion_weights'] = fusion_weights
-        if spatial_info:
-            component_dict['spatial_info'] = spatial_info
+        # ==================== STEP 5: PREPARE OUTPUT ====================
+        # Add fusion weights and spatial info to component dict for loss computation
+        component_dict.update({
+            'fusion_weights': fusion_weights,
+            'spatial_info': spatial_info,
+            'geometric_context': geometric_context  # Pass through for potential loss usage
+        })
         
         return Z_final, fusion_weights, component_dict

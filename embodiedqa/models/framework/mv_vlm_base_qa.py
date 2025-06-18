@@ -399,10 +399,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             Z_T, Z_V, Z_P,
             Z_TV, Z_PV, Z_PT,
             geometric_context=geometric_context,
-            spatial_info=spatial_info)
+            spatial_info=spatial_info
+        )
+        
+        feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]
+        feat_dict['fusion_weights'] = fusion_weights
+        print(f'fusion weights shape: {fusion_weights.shape}') # [B, Np, ?]
+        feat_dict['component_dict'] = component_dict  # Dictionary of components
+        feat_dict['spatial_info'] = spatial_info  # Spatial information
 
         return feat_dict
-    
+
     def extract_text_feat(
         self, batch_inputs_dict: Dict[str,
                                       Tensor], batch_data_samples: SampleList,):
