@@ -107,8 +107,7 @@ class FeatureRefinement(nn.Module):
         """
         # ============ Step 1: Extract Rich PID Features ============
         Z_final = feat_dict['Z_final']                # [B, Np, D] - Your PID-enhanced features
-        points_xyz = feat_dict['P_xyz']               # [B, Np, 3] - 3D coordinates
-        
+        points_xyz = feat_dict['fp_xyz'][-1]            # [B, Np, 3] - 3D coordinates
         text_feats = text_dict['text_feats']          # [B, Lt, D] - Token-level text
         text_global = text_dict['text_global_token']  # [B, D] - Global question
         text_mask = text_dict['text_token_mask']      # [B, Lt] - Text mask

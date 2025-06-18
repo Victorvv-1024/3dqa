@@ -278,8 +278,7 @@ class EnhancedLossComputation(nn.Module):
                 component_weights: torch.Tensor, 
                 target_features: torch.Tensor = None,
                 spatial_info: Dict = None,
-                Z_fused: torch.Tensor = None,
-                questions: list = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+                Z_fused: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Enhanced loss computation with proper PID regularization."""
         
         # Core PID regularization (no question-adaptive components)

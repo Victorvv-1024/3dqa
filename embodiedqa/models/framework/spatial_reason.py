@@ -23,14 +23,6 @@ class SpatialQuestionRouter(nn.Module):
             nn.Sigmoid()
         )
         
-        # Spatial keywords for backup classification
-        self.spatial_keywords = {
-            'where', 'left', 'right', 'front', 'behind', 'above', 'below', 
-            'near', 'far', 'next', 'between', 'inside', 'outside', 'on', 
-            'under', 'beside', 'across', 'around', 'direction', 'location',
-            'position', 'side', 'corner', 'center', 'edge', 'top', 'bottom'
-        }
-        
     def forward(self, text_features: torch.Tensor, questions: List[str] = None) -> torch.Tensor:
         """
         Classify spatial vs non-spatial questions.
@@ -42,27 +34,8 @@ class SpatialQuestionRouter(nn.Module):
         Returns:
             spatial_mask: [B] - Boolean mask for spatial questions
         """
-        B = text_features.size(0)
-        
-        # Neural classification
-        neural_scores = self.spatial_classifier(text_features).squeeze(-1)  # [B]
-        neural_spatial = neural_scores > 0.5
-        
-        # String pattern matching (backup)
-        if questions is not None:
-            string_spatial = torch.zeros(B, dtype=torch.bool, device=text_features.device)
-            for i, question in enumerate(questions):
-                question_lower = question.lower()
-                has_spatial_keyword = any(keyword in question_lower for keyword in self.spatial_keywords)
-                string_spatial[i] = has_spatial_keyword
-            
-            # Combine: spatial if EITHER neural OR string indicates spatial
-            spatial_mask = neural_spatial | string_spatial
-        else:
-            spatial_mask = neural_spatial
-            
-        return spatial_mask
-
+        scores = self.spatial_classifier(text_features).squeeze(-1)  # [B]
+        return scores > 0.5
 
 class SuperpointGenerator(nn.Module):
     """
@@ -278,7 +251,6 @@ class SpatialReason(nn.Module):
                 features: torch.Tensor,           # Z_PV: [B, N, D] - Point-View synergy
                 coordinates: torch.Tensor,        # [B, N, 3] - Point coordinates
                 question_context: torch.Tensor,   # Z_T: [B, D] - Question features
-                questions: List[str] = None       # Optional raw question strings
                 ) -> Tuple[torch.Tensor, Dict]:
         """
         Extract geometric spatial context for PID fusion.
@@ -296,7 +268,7 @@ class SpatialReason(nn.Module):
         B, N, D = features.shape
         
         # ==================== STEP 1: SPATIAL QUESTION ROUTING ====================
-        spatial_mask = self.spatial_router(question_context, questions)
+        spatial_mask = self.spatial_router(question_context)
         
         # ==================== STEP 2: SUPERPOINT GENERATION ====================
         superpoint_labels = self.superpoint_generator(coordinates)

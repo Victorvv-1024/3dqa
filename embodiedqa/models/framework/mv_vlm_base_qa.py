@@ -106,14 +106,14 @@ class MultiViewVLMBase3DQA(BaseModel):
             # self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
             #                                         nn.LayerNorm(self.D_fus))
             # This projects U_i to G_i
-            self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
-                                            nn.LayerNorm(self.D_fus))
+            # self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
+            #                                 nn.LayerNorm(self.D_fus))
 
         self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size, self.D_fus),
                                            nn.LayerNorm(self.D_fus)
                                            )
         
-        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)
+        # self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)
 
         
         self.text_max_length = text_max_length
@@ -156,13 +156,10 @@ class MultiViewVLMBase3DQA(BaseModel):
 
         # Bi-Modal fusion
         self.pv_fusion = PointViewFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # 3D feature dim = 256
-            view_dim=self.backbone.out_channels[-1],    # 2D feature dim = 1024
             fusion_dim=self.D_fus,  # Output dim = 768
         )
         
         self.pt_fusion = PointTextFusion(
-            view_dim=self.backbone.out_channels[-1],  # 2D feature dim = 1024
             fusion_dim=self.D_fus,
         )
         
@@ -384,14 +381,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['Z_PT'] = Z_PT
         
         # 4. Spatial Reasoning
-        questions = [sample.question for sample in batch_data_samples]
-        print(questions)
-        exit()
         geometric_context, spatial_info = self.spatial_reason(
             features=Z_PV,
             coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
-            question_context=Z_TV,  # [B, Np, D_fus]
-            questions=questions,
+            question_context=Z_T,  # [B, Np, D_fus]
         )
         
         # 5. Unified PID Fusion
@@ -403,8 +396,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]
-        feat_dict['fusion_weights'] = fusion_weights
-        print(f'fusion weights shape: {fusion_weights.shape}') # [B, Np, ?]
+        feat_dict['fusion_weights'] = fusion_weights # [B, 8], 8 PID components
         feat_dict['component_dict'] = component_dict  # Dictionary of components
         feat_dict['spatial_info'] = spatial_info  # Spatial information
 
