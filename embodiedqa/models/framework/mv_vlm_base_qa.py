@@ -504,10 +504,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             qa_loss=standard_qa_loss,
             component_dict=feat_dict['component_dict'],
             component_weights=feat_dict['fusion_weights'],
-            spatial_info=feat_dict['spatial_info'],  # New spatial information
-            Z_fused=feat_dict['Z_fused'],
-            coordinates=feat_dict['fp_xyz'][-1],
-            questions=questions
+            spatial_info=feat_dict['spatial_info'],
+            Z_final=feat_dict['Z_final'],
         )
         
         # ============ Step 6: Add Other Standard Losses ============ 

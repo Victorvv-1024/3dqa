@@ -17,13 +17,19 @@ class MINENetwork(nn.Module):
     
     def __init__(self, input_dim, hidden_dim=512):
         super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.network = None  # Will be initialized dynamically
+        
+    def _init_network(self, actual_input_dim, device):
+        """Initialize network with actual input dimension."""
         self.network = nn.Sequential(
-            nn.Linear(input_dim * 2, hidden_dim),
+            nn.Linear(actual_input_dim, self.hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
+            nn.Linear(self.hidden_dim // 2, 1)
+        ).to(device)
         
     def forward(self, x, y):
         """
@@ -38,23 +44,40 @@ class MINENetwork(nn.Module):
         """
         # Flatten spatial dimensions if present
         if x.dim() > 2:
-            x = x.view(x.size(0), -1).mean(dim=-1, keepdim=True)  # [B, 1]
+            x = x.view(x.size(0), -1)
         if y.dim() > 2:
-            y = y.view(y.size(0), -1).mean(dim=-1, keepdim=True)  # [B, 1]
+            y = y.view(y.size(0), -1)
             
-        # Ensure same dimensionality
+        # Ensure both tensors are properly 2D
+        if x.dim() == 1:
+            x = x.unsqueeze(-1)  # [B] -> [B, 1]
+        if y.dim() == 1:
+            y = y.unsqueeze(-1)  # [B] -> [B, 1]
+            
+        # Ensure same dimensionality by taking minimum
         if x.size(-1) != y.size(-1):
             min_dim = min(x.size(-1), y.size(-1))
             x = x[..., :min_dim]
             y = y[..., :min_dim]
         
+        # Get actual input dimension for network
+        feature_dim = x.size(-1)
+        actual_input_dim = feature_dim * 2
+        
+        # Initialize network if not done or if dimension changed
+        if self.network is None:
+            self._init_network(actual_input_dim, x.device)
+        elif self.network[0].in_features != actual_input_dim:
+            # Reinitialize if input dimension changed
+            self._init_network(actual_input_dim, x.device)
+        
         # Joint samples (positive pairs)
-        joint = torch.cat([x, y], dim=-1)  # [B, 2*dim]
+        joint = torch.cat([x, y], dim=-1)  # [B, 2*feature_dim]
         joint_scores = self.network(joint)  # [B, 1]
         
         # Marginal samples (negative pairs) - shuffle y
         y_shuffled = y[torch.randperm(y.size(0))]
-        marginal = torch.cat([x, y_shuffled], dim=-1)  # [B, 2*dim]
+        marginal = torch.cat([x, y_shuffled], dim=-1)  # [B, 2*feature_dim]
         marginal_scores = self.network(marginal)  # [B, 1]
         
         # MINE objective: E[T(x,y)] - log(E[exp(T(x,y'))])
@@ -278,7 +301,7 @@ class EnhancedLossComputation(nn.Module):
                 component_weights: torch.Tensor, 
                 target_features: torch.Tensor = None,
                 spatial_info: Dict = None,
-                Z_fused: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+                Z_final: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Enhanced loss computation with proper PID regularization."""
         
         # Core PID regularization (no question-adaptive components)
@@ -296,13 +319,13 @@ class EnhancedLossComputation(nn.Module):
         total_loss += self.orthogonality_weight * pid_losses['orthogonality_loss']
         
         # Spatial reasoning losses (if applicable)
-        if spatial_info is not None and Z_fused is not None:
+        if spatial_info is not None and Z_final is not None:
             spatial_losses = {}
             
             # Superpoint consistency loss
             if 'superpoint_labels' in spatial_info:
                 superpoint_loss = self._compute_superpoint_consistency_loss(
-                    Z_fused, spatial_info['superpoint_labels']
+                    Z_final, spatial_info['superpoint_labels']
                 )
                 spatial_losses['superpoint_consistency_loss'] = superpoint_loss
                 total_loss += self.superpoint_consistency_weight * superpoint_loss
@@ -315,15 +338,15 @@ class EnhancedLossComputation(nn.Module):
         
         return total_loss, loss_dict
     
-    def _compute_superpoint_consistency_loss(self, Z_fused, superpoint_labels):
+    def _compute_superpoint_consistency_loss(self, Z_final, superpoint_labels):
         """Compute superpoint consistency loss for enhanced spatial reasoning."""
-        if Z_fused is None or superpoint_labels is None:
-            return torch.tensor(0.0, device=Z_fused.device if Z_fused is not None else 'cpu')
+        if Z_final is None or superpoint_labels is None:
+            return torch.tensor(0.0, device=Z_final.device if Z_final is not None else 'cpu')
             
         consistency_loss = 0.0
         valid_superpoints = 0
         
-        B, N, D = Z_fused.shape
+        B, N, D = Z_final.shape
         
         for b in range(B):
             if b >= len(superpoint_labels):
@@ -339,7 +362,7 @@ class EnhancedLossComputation(nn.Module):
                 if sp_mask.sum() < 2:  # Need at least 2 points
                     continue
                 
-                sp_features = Z_fused[b][sp_mask]  # [Nsp, D]
+                sp_features = Z_final[b][sp_mask]  # [Nsp, D]
                 sp_mean = sp_features.mean(dim=0)  # [D]
                 
                 # Features within superpoint should be consistent
@@ -352,4 +375,4 @@ class EnhancedLossComputation(nn.Module):
         if valid_superpoints > 0:
             return consistency_loss / valid_superpoints
         else:
-            return torch.tensor(0.0, device=Z_fused.device)
+            return torch.tensor(0.0, device=Z_final.device)
