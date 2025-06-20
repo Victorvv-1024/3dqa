@@ -5,6 +5,7 @@ from typing import Dict, Tuple, Optional
 import math
 
 
+"""Non-CrossOver Module"""
 class UniqueComponentExtractor(nn.Module):
     """
     Extract unique information from a modality that's NOT present in bi-modal synergies.
@@ -87,115 +88,6 @@ class UniqueComponentExtractor(nn.Module):
         # Extract unique information from residual
         unique_features = self.unique_extractor(residual)
         
-        return unique_features
-
-class CrossOverEnhancedUniqueExtractor(nn.Module):
-    """
-    CROSSOVER ENHANCEMENT: Component-specific encoding + unified representation space
-    
-    KEY IMPROVEMENTS:
-    1. Modality-specific encoders (text/view/point) like CrossOver's component encoders
-    2. Unified projection space for better alignment
-    3. Enhanced orthogonalization using attention
-    4. Contrastive learning for component specialization
-    """
-    
-    def __init__(self, fusion_dim=768):
-        super().__init__()
-        self.fusion_dim = fusion_dim
-        
-        # CROSSOVER PRINCIPLE 1: Component-specific encoders
-        self.component_encoders = nn.ModuleDict({
-            'text': nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
-                nn.LayerNorm(fusion_dim),
-                nn.GELU(),  # Better for text
-                nn.Dropout(0.1),
-                nn.Linear(fusion_dim, fusion_dim)
-            ),
-            'view': nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim), 
-                nn.LayerNorm(fusion_dim),
-                nn.ReLU(),  # Better for visual
-                nn.Dropout(0.1),
-                nn.Linear(fusion_dim, fusion_dim)
-            ),
-            'point': nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
-                nn.LayerNorm(fusion_dim),
-                nn.ReLU(),
-                nn.Dropout(0.05),  # Lower dropout for geometry
-                nn.Linear(fusion_dim, fusion_dim)
-            )
-        })
-        
-        # CROSSOVER PRINCIPLE 2: Unified projection space
-        self.unified_projector = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.ReLU(),
-            nn.Linear(fusion_dim, fusion_dim)
-        )
-        
-        # ENHANCED: Better orthogonalization using attention
-        self.synergy_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
-        )
-        
-        # CROSSOVER PRINCIPLE 3: Contrastive projector for specialization
-        self.contrastive_projector = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim // 2),
-            nn.ReLU(),
-            nn.Linear(fusion_dim // 2, 128)  # For contrastive learning
-        )
-        
-    def forward(self, modality_features, synergy_features_list, modality_type):
-        """
-        Enhanced unique extraction with CrossOver principles.
-        
-        Args:
-            modality_features: [B, N, D] - Single modality
-            synergy_features_list: List of [B, N, D] - Synergies to orthogonalize against
-            modality_type: 'text', 'view', or 'point'
-        """
-        # STEP 1: Component-specific encoding (CrossOver enhancement)
-        encoded = self.component_encoders[modality_type](modality_features)
-        
-        # STEP 2: Project to unified space (CrossOver principle) 
-        unified = self.unified_projector(encoded)
-        
-        # STEP 3: Enhanced orthogonalization against synergies
-        if synergy_features_list and len(synergy_features_list) > 0:
-            encoded_synergies = []
-            for i, synergy in enumerate(synergy_features_list):
-                if synergy is not None and synergy.numel() > 0:
-                    if synergy.shape == unified.shape:  # Shape validation
-                        encoded_synergy = self.unified_projector(synergy)
-                        encoded_synergies.append(encoded_synergy)
-            
-            if encoded_synergies:
-                # FIXED: Use .reshape() instead of .view()
-                synergy_stack = torch.stack(encoded_synergies, dim=1)  # [B, num_syn, N, D]
-                B, num_syn, N, D = synergy_stack.shape
-                synergy_combined = synergy_stack.reshape(B, num_syn * N, D) 
-                
-                # Attention-based orthogonalization
-                modality_flat = unified.reshape(B, N, D)
-                try:
-                    attended_synergy, _ = self.synergy_attention(
-                        query=modality_flat, key=synergy_combined, value=synergy_combined
-                    )
-                    unique_features = unified - attended_synergy
-                except Exception as e:
-                    print(f"Attention failed: {e}")
-                    # Fallback: simple average subtraction
-                    avg_synergy = torch.stack(encoded_synergies, dim=0).mean(dim=0)
-                    unique_features = unified - avg_synergy
-            else:
-                unique_features = unified
-        else:
-            unique_features = unified
-            
         return unique_features
 
 class HigherOrderExtractor(nn.Module):
@@ -282,96 +174,6 @@ class HigherOrderExtractor(nn.Module):
         
         # Combine both methods
         Z_higher_synergy = 0.6 * higher_synergy_raw + 0.4 * attended_mean
-        
-        return Z_redundant, Z_higher_synergy
-
-class CrossOverEnhancedHigherOrderExtractor(nn.Module):
-    """
-    CROSSOVER ENHANCEMENT: Multi-scale synergy encoding + hierarchical processing
-    
-    KEY IMPROVEMENTS:
-    1. Multi-scale synergy encoders for different interaction levels
-    2. Cross-modal attention for better interaction modeling
-    3. Hierarchical information processing
-    4. Unified representation for higher-order components
-    """
-    
-    def __init__(self, fusion_dim=768):
-        super().__init__()
-        self.fusion_dim = fusion_dim
-        
-        # CROSSOVER PRINCIPLE: Multi-scale encoders
-        self.synergy_encoders = nn.ModuleDict({
-            'pairwise': nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
-                nn.LayerNorm(fusion_dim),
-                nn.ReLU(),
-                nn.Linear(fusion_dim, fusion_dim)
-            ),
-            'trimodal': nn.Sequential(
-                nn.Linear(fusion_dim * 3, fusion_dim * 2),
-                nn.LayerNorm(fusion_dim * 2),
-                nn.GELU(),
-                nn.Dropout(0.1),
-                nn.Linear(fusion_dim * 2, fusion_dim)
-            )
-        })
-        
-        # ENHANCED: Unified redundancy extraction (CrossOver's shared space)
-        self.redundancy_extractor = nn.Sequential(
-            nn.Linear(fusion_dim * 3, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(fusion_dim, fusion_dim)
-        )
-        
-        # ENHANCED: Higher-order synergy with better architecture
-        self.higher_synergy_network = nn.Sequential(
-            nn.Linear(fusion_dim * 3, fusion_dim * 2),
-            nn.LayerNorm(fusion_dim * 2),
-            nn.GELU(),
-            nn.Dropout(0.15),
-            nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Linear(fusion_dim, fusion_dim)
-        )
-        
-        # CROSSOVER PRINCIPLE: Cross-modal attention for interactions
-        self.trimodal_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
-        )
-        
-    def forward(self, Z_TV, Z_PV, Z_PT):
-        """Enhanced higher-order extraction with CrossOver principles."""
-        B, N, D = Z_TV.shape
-        
-        # STEP 1: Apply pairwise encoding to each synergy
-        encoded_synergies = []
-        for synergy in [Z_TV, Z_PV, Z_PT]:
-            encoded = self.synergy_encoders['pairwise'](synergy)
-            encoded_synergies.append(encoded)
-        Z_TV_enc, Z_PV_enc, Z_PT_enc = encoded_synergies
-        
-        # STEP 2: Extract redundant information (shared across all)
-        combined = torch.cat([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=-1)  # [B, N, 3D]
-        Z_redundant = self.redundancy_extractor(combined)
-        
-        # STEP 3: Cross-modal attention for interaction modeling
-        synergy_stack = torch.stack([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=2)  # [B, N, 3, D]
-        synergy_for_attention = synergy_stack.reshape(B * N, 3, D)  # [B*N, 3, D]
-        
-        attended_synergies, _ = self.trimodal_attention(
-            query=synergy_for_attention,
-            key=synergy_for_attention, 
-            value=synergy_for_attention
-        )  # [B*N, 3, D]
-        attended_synergies = attended_synergies.reshape(B, N, 3, D)  # [B, N, 3, D]
-        attended_combined = attended_synergies.reshape(B, N, 3 * D)  # [B, N, 3D] 
-        
-        # STEP 4: Extract higher-order synergy (emergent information)
-        Z_higher_synergy = self.higher_synergy_network(attended_combined)
         
         return Z_redundant, Z_higher_synergy
 
@@ -538,7 +340,6 @@ class GeometricContextIntegrator(nn.Module):
         
         return enhanced_components, adaptive_weights
 
-
 class UnifiedAdaptivePIDFusion(nn.Module):
     """
     Complete unified PID fusion module replacing both adaptive_fusion and pid_enhancement.
@@ -660,6 +461,206 @@ class UnifiedAdaptivePIDFusion(nn.Module):
         })
         
         return Z_final, fusion_weights, component_dict
+
+"""CrossOver Module"""
+class CrossOverEnhancedUniqueExtractor(nn.Module):
+    """
+    CROSSOVER ENHANCEMENT: Component-specific encoding + unified representation space
+    
+    KEY IMPROVEMENTS:
+    1. Modality-specific encoders (text/view/point) like CrossOver's component encoders
+    2. Unified projection space for better alignment
+    3. Enhanced orthogonalization using attention
+    4. Contrastive learning for component specialization
+    """
+    
+    def __init__(self, fusion_dim=768):
+        super().__init__()
+        self.fusion_dim = fusion_dim
+        
+        # CROSSOVER PRINCIPLE 1: Component-specific encoders
+        self.component_encoders = nn.ModuleDict({
+            'text': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim),
+                nn.GELU(),  # Better for text
+                nn.Dropout(0.1),
+                nn.Linear(fusion_dim, fusion_dim)
+            ),
+            'view': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim), 
+                nn.LayerNorm(fusion_dim),
+                nn.ReLU(),  # Better for visual
+                nn.Dropout(0.1),
+                nn.Linear(fusion_dim, fusion_dim)
+            ),
+            'point': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim),
+                nn.ReLU(),
+                nn.Dropout(0.05),  # Lower dropout for geometry
+                nn.Linear(fusion_dim, fusion_dim)
+            )
+        })
+        
+        # CROSSOVER PRINCIPLE 2: Unified projection space
+        self.unified_projector = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim)
+        )
+        
+        # ENHANCED: Better orthogonalization using attention
+        self.synergy_attention = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
+        )
+        
+        # CROSSOVER PRINCIPLE 3: Contrastive projector for specialization
+        self.contrastive_projector = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim // 2),
+            nn.ReLU(),
+            nn.Linear(fusion_dim // 2, 128)  # For contrastive learning
+        )
+        
+    def forward(self, modality_features, synergy_features_list, modality_type):
+        """
+        Enhanced unique extraction with CrossOver principles.
+        
+        Args:
+            modality_features: [B, N, D] - Single modality
+            synergy_features_list: List of [B, N, D] - Synergies to orthogonalize against
+            modality_type: 'text', 'view', or 'point'
+        """
+        # STEP 1: Component-specific encoding (CrossOver enhancement)
+        encoded = self.component_encoders[modality_type](modality_features)
+        
+        # STEP 2: Project to unified space (CrossOver principle) 
+        unified = self.unified_projector(encoded)
+        
+        # STEP 3: Enhanced orthogonalization against synergies
+        if synergy_features_list and len(synergy_features_list) > 0:
+            encoded_synergies = []
+            for i, synergy in enumerate(synergy_features_list):
+                if synergy is not None and synergy.numel() > 0:
+                    if synergy.shape == unified.shape:  # Shape validation
+                        encoded_synergy = self.unified_projector(synergy)
+                        encoded_synergies.append(encoded_synergy)
+            
+            if encoded_synergies:
+                # FIXED: Use .reshape() instead of .view()
+                synergy_stack = torch.stack(encoded_synergies, dim=1)  # [B, num_syn, N, D]
+                B, num_syn, N, D = synergy_stack.shape
+                synergy_combined = synergy_stack.reshape(B, num_syn * N, D) 
+                
+                # Attention-based orthogonalization
+                modality_flat = unified.reshape(B, N, D)
+                try:
+                    attended_synergy, _ = self.synergy_attention(
+                        query=modality_flat, key=synergy_combined, value=synergy_combined
+                    )
+                    unique_features = unified - attended_synergy
+                except Exception as e:
+                    print(f"Attention failed: {e}")
+                    # Fallback: simple average subtraction
+                    avg_synergy = torch.stack(encoded_synergies, dim=0).mean(dim=0)
+                    unique_features = unified - avg_synergy
+            else:
+                unique_features = unified
+        else:
+            unique_features = unified
+            
+        return unique_features
+
+class CrossOverEnhancedHigherOrderExtractor(nn.Module):
+    """
+    CROSSOVER ENHANCEMENT: Multi-scale synergy encoding + hierarchical processing
+    
+    KEY IMPROVEMENTS:
+    1. Multi-scale synergy encoders for different interaction levels
+    2. Cross-modal attention for better interaction modeling
+    3. Hierarchical information processing
+    4. Unified representation for higher-order components
+    """
+    
+    def __init__(self, fusion_dim=768):
+        super().__init__()
+        self.fusion_dim = fusion_dim
+        
+        # CROSSOVER PRINCIPLE: Multi-scale encoders
+        self.synergy_encoders = nn.ModuleDict({
+            'pairwise': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim),
+                nn.ReLU(),
+                nn.Linear(fusion_dim, fusion_dim)
+            ),
+            'trimodal': nn.Sequential(
+                nn.Linear(fusion_dim * 3, fusion_dim * 2),
+                nn.LayerNorm(fusion_dim * 2),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(fusion_dim * 2, fusion_dim)
+            )
+        })
+        
+        # ENHANCED: Unified redundancy extraction (CrossOver's shared space)
+        self.redundancy_extractor = nn.Sequential(
+            nn.Linear(fusion_dim * 3, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(fusion_dim, fusion_dim)
+        )
+        
+        # ENHANCED: Higher-order synergy with better architecture
+        self.higher_synergy_network = nn.Sequential(
+            nn.Linear(fusion_dim * 3, fusion_dim * 2),
+            nn.LayerNorm(fusion_dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.15),
+            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.GELU(),
+            nn.Linear(fusion_dim, fusion_dim)
+        )
+        
+        # CROSSOVER PRINCIPLE: Cross-modal attention for interactions
+        self.trimodal_attention = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
+        )
+        
+    def forward(self, Z_TV, Z_PV, Z_PT):
+        """Enhanced higher-order extraction with CrossOver principles."""
+        B, N, D = Z_TV.shape
+        
+        # STEP 1: Apply pairwise encoding to each synergy
+        encoded_synergies = []
+        for synergy in [Z_TV, Z_PV, Z_PT]:
+            encoded = self.synergy_encoders['pairwise'](synergy)
+            encoded_synergies.append(encoded)
+        Z_TV_enc, Z_PV_enc, Z_PT_enc = encoded_synergies
+        
+        # STEP 2: Extract redundant information (shared across all)
+        combined = torch.cat([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=-1)  # [B, N, 3D]
+        Z_redundant = self.redundancy_extractor(combined)
+        
+        # STEP 3: Cross-modal attention for interaction modeling
+        synergy_stack = torch.stack([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=2)  # [B, N, 3, D]
+        synergy_for_attention = synergy_stack.reshape(B * N, 3, D)  # [B*N, 3, D]
+        
+        attended_synergies, _ = self.trimodal_attention(
+            query=synergy_for_attention,
+            key=synergy_for_attention, 
+            value=synergy_for_attention
+        )  # [B*N, 3, D]
+        attended_synergies = attended_synergies.reshape(B, N, 3, D)  # [B, N, 3, D]
+        attended_combined = attended_synergies.reshape(B, N, 3 * D)  # [B, N, 3D] 
+        
+        # STEP 4: Extract higher-order synergy (emergent information)
+        Z_higher_synergy = self.higher_synergy_network(attended_combined)
+        
+        return Z_redundant, Z_higher_synergy
     
 class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
     """
@@ -676,14 +677,12 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         super().__init__()
         self.fusion_dim = fusion_dim
         
-        # REPLACE: Use enhanced extractors with CrossOver principles
         self.enhanced_unique_extractor = CrossOverEnhancedUniqueExtractor(fusion_dim)
         self.enhanced_higher_order_extractor = CrossOverEnhancedHigherOrderExtractor(fusion_dim)
-        
-        # KEEP: Your existing geometric integrator
+        # KEEP (NEED REWORK LATER)
         self.geometric_integrator = GeometricContextIntegrator(fusion_dim)
         
-        # NEW: CrossOver-inspired component importance predictor
+        # CrossOver-inspired component importance predictor
         self.component_importance_predictor = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
             nn.ReLU(),
@@ -713,7 +712,7 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         
         Z_T_expanded = Z_T.unsqueeze(1).expand(B, N, D) if Z_T.dim() == 2 else Z_T
         
-        # Extract components (now using fixed extractors)
+        # Extract components
         Z_P_unique = self.enhanced_unique_extractor(Z_P, [Z_PV, Z_PT], 'point')
         Z_V_unique = self.enhanced_unique_extractor(Z_V, [Z_PV, Z_TV], 'view')
         Z_T_unique = self.enhanced_unique_extractor(Z_T_expanded, [Z_TV, Z_PT], 'text')
@@ -734,11 +733,13 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
             component_dict, geometric_context, spatial_info, question_features
         )
         
-        combined_weights = 0.7 * component_importance.unsqueeze(1) + 0.3 * spatial_weights.unsqueeze(1)
+        # NO spatial at the moment
+        # combined_weights = 0.7 * component_importance.unsqueeze(1) + 0.3 * spatial_weights.unsqueeze(1)
+        combined_weights = component_importance.unsqueeze(1)
         
         all_components = torch.stack(enhanced_components, dim=-1)  # [B, N, D, 8]
         weighted_components = all_components * combined_weights.unsqueeze(-2)
-        components_concat = weighted_components.reshape(B, N, D * 8)  # ✅ FIXED: Use .reshape()
+        components_concat = weighted_components.reshape(B, N, D * 8)
         Z_final = self.unified_final_fusion(components_concat)
         
         # Contrastive loss
@@ -755,43 +756,50 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         
     
     def _compute_contrastive_loss(self, unique_components, temperature=0.07):
-        """CrossOver contrastive loss for component specialization."""
-        if len(unique_components) < 2:
-            return torch.tensor(0.0, device=next(iter(unique_components.values())).device)
+        """COMPLETE IMPLEMENTATION with debug logging."""
+        device = next(iter(unique_components.values())).device
         
-        # Project for contrastive learning
+        # Create contrastive projector if missing
+        if not hasattr(self.enhanced_unique_extractor, 'contrastive_projector'):
+            self.enhanced_unique_extractor.contrastive_projector = nn.Sequential(
+                nn.Linear(self.fusion_dim, self.fusion_dim // 2),
+                nn.ReLU(),
+                nn.Linear(self.fusion_dim // 2, 128)
+            ).to(device)
+        
+        # Project and compute contrastive loss
         projected = {}
         for modality, features in unique_components.items():
-            if features is not None and features.numel() > 0:
-                pooled = features.mean(dim=1)  # [B, D]
-                proj = F.normalize(self.enhanced_unique_extractor.contrastive_projector(pooled), dim=-1)
-                projected[modality] = proj
+            pooled = features.mean(dim=1)  # [B, D]
+            proj = F.normalize(
+                self.enhanced_unique_extractor.contrastive_projector(pooled), 
+                dim=-1
+            )
+            projected[modality] = proj
         
-        if len(projected) < 2:
-            return torch.tensor(0.0, device=next(iter(unique_components.values())).device)
-        
+        # Compute contrastive loss between modalities
         total_loss = 0.0
         num_pairs = 0
+        batch_size = list(projected.values())[0].size(0)
         
-        # Encourage distinctiveness between different modalities
+        if batch_size <= 1:
+            return torch.tensor(0.0, device=device)
+        
         modalities = list(projected.keys())
         for i in range(len(modalities)):
             for j in range(i + 1, len(modalities)):
                 mod1, mod2 = modalities[i], modalities[j]
                 
-                # Negative similarity (we want them to be different)
+                # Contrastive learning: different modalities should be distinct
                 neg_sim = torch.sum(projected[mod1] * projected[mod2], dim=-1) / temperature
+                shuffled = torch.randperm(batch_size, device=device)
+                pos_sim = torch.sum(projected[mod1] * projected[mod1][shuffled], dim=-1) / temperature
                 
-                # Positive similarity (same modality with itself)
-                batch_size = projected[mod1].size(0)
-                if batch_size > 1:
-                    shuffled = torch.randperm(batch_size, device=projected[mod1].device)
-                    pos_sim = torch.sum(projected[mod1] * projected[mod1][shuffled], dim=-1) / temperature
-                    
-                    all_sims = torch.stack([pos_sim, neg_sim], dim=1)
-                    loss = -F.log_softmax(all_sims, dim=1)[:, 0].mean()
+                all_sims = torch.stack([pos_sim, neg_sim], dim=1)
+                loss = -F.log_softmax(all_sims, dim=1)[:, 0].mean()
+                
+                if torch.isfinite(loss):
                     total_loss += loss
                     num_pairs += 1
         
-        return total_loss / num_pairs if num_pairs > 0 else torch.tensor(0.0)
-        
+        return total_loss / num_pairs if num_pairs > 0 else torch.tensor(0.0, device=device)

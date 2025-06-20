@@ -350,7 +350,7 @@ class EnhancedLossComputation(nn.Module):
             total_loss += self.balance_weight * pid_losses['component_balance_loss']
             total_loss += self.orthogonality_weight * pid_losses['orthogonality_loss']
             
-            crossover_contrastive_loss = component_dict.get('crossover_contrastive_loss', torch.tensor(0.0))
+            crossover_contrastive_loss = component_dict.get('crossover_contrastive_loss', None)
             if crossover_contrastive_loss.numel() > 0 and not torch.isnan(crossover_contrastive_loss):
                 total_loss += self.crossover_contrastive_weight * crossover_contrastive_loss
                 loss_dict['crossover_contrastive_loss'] = crossover_contrastive_loss
