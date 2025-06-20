@@ -165,21 +165,34 @@ class CrossOverEnhancedUniqueExtractor(nn.Module):
         unified = self.unified_projector(encoded)
         
         # STEP 3: Enhanced orthogonalization against synergies
-        if synergy_features_list:
-            # Encode synergies in same unified space
-            encoded_synergies = [self.unified_projector(syn) for syn in synergy_features_list]
-            synergy_stack = torch.stack(encoded_synergies, dim=1)  # [B, num_syn, N, D]
-            B, num_syn, N, D = synergy_stack.shape
-            synergy_combined = synergy_stack.view(B, num_syn * N, D)
+        if synergy_features_list and len(synergy_features_list) > 0:
+            encoded_synergies = []
+            for i, synergy in enumerate(synergy_features_list):
+                if synergy is not None and synergy.numel() > 0:
+                    if synergy.shape == unified.shape:  # Shape validation
+                        encoded_synergy = self.unified_projector(synergy)
+                        encoded_synergies.append(encoded_synergy)
             
-            # Attention-based orthogonalization (better than simple subtraction)
-            modality_flat = unified.view(B, N, D)
-            attended_synergy, _ = self.synergy_attention(
-                query=modality_flat, key=synergy_combined, value=synergy_combined
-            )
-            
-            # Extract unique by removing synergy overlap
-            unique_features = unified - attended_synergy
+            if encoded_synergies:
+                # FIXED: Use .reshape() instead of .view()
+                synergy_stack = torch.stack(encoded_synergies, dim=1)  # [B, num_syn, N, D]
+                B, num_syn, N, D = synergy_stack.shape
+                synergy_combined = synergy_stack.reshape(B, num_syn * N, D) 
+                
+                # Attention-based orthogonalization
+                modality_flat = unified.reshape(B, N, D)
+                try:
+                    attended_synergy, _ = self.synergy_attention(
+                        query=modality_flat, key=synergy_combined, value=synergy_combined
+                    )
+                    unique_features = unified - attended_synergy
+                except Exception as e:
+                    print(f"Attention failed: {e}")
+                    # Fallback: simple average subtraction
+                    avg_synergy = torch.stack(encoded_synergies, dim=0).mean(dim=0)
+                    unique_features = unified - avg_synergy
+            else:
+                unique_features = unified
         else:
             unique_features = unified
             
@@ -347,12 +360,15 @@ class CrossOverEnhancedHigherOrderExtractor(nn.Module):
         
         # STEP 3: Cross-modal attention for interaction modeling
         synergy_stack = torch.stack([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=2)  # [B, N, 3, D]
-        synergy_flat = synergy_stack.view(B, N * 3, D)  # [B, N*3, D]
+        synergy_for_attention = synergy_stack.reshape(B * N, 3, D)  # [B*N, 3, D]
         
         attended_synergies, _ = self.trimodal_attention(
-            query=synergy_flat, key=synergy_flat, value=synergy_flat
-        )
-        attended_combined = attended_synergies.view(B, N, 3 * D)
+            query=synergy_for_attention,
+            key=synergy_for_attention, 
+            value=synergy_for_attention
+        )  # [B*N, 3, D]
+        attended_synergies = attended_synergies.reshape(B, N, 3, D)  # [B, N, 3, D]
+        attended_combined = attended_synergies.reshape(B, N, 3 * D)  # [B, N, 3D] 
         
         # STEP 4: Extract higher-order synergy (emergent information)
         Z_higher_synergy = self.higher_synergy_network(attended_combined)
@@ -697,42 +713,38 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         
         Z_T_expanded = Z_T.unsqueeze(1).expand(B, N, D) if Z_T.dim() == 2 else Z_T
         
-        # ENHANCED: Extract components with CrossOver encoding
+        # Extract components (now using fixed extractors)
         Z_P_unique = self.enhanced_unique_extractor(Z_P, [Z_PV, Z_PT], 'point')
         Z_V_unique = self.enhanced_unique_extractor(Z_V, [Z_PV, Z_TV], 'view')
         Z_T_unique = self.enhanced_unique_extractor(Z_T_expanded, [Z_TV, Z_PT], 'text')
         
         Z_redundant, Z_higher_synergy = self.enhanced_higher_order_extractor(Z_TV, Z_PV, Z_PT)
-        
-        # NEW: CrossOver contrastive loss for component specialization
         unique_components = {'point': Z_P_unique, 'view': Z_V_unique, 'text': Z_T_unique}
-        crossover_loss = self._compute_contrastive_loss(unique_components)
         
-        # Component dictionary
         component_dict = {
             'Z_P_unique': Z_P_unique, 'Z_V_unique': Z_V_unique, 'Z_T_unique': Z_T_unique,
             'Z_PV_synergy': Z_PV, 'Z_TV_synergy': Z_TV, 'Z_PT_synergy': Z_PT,
             'Z_redundant': Z_redundant, 'Z_higher_synergy': Z_higher_synergy
         }
+        # Component weighting
+        component_importance = self.component_importance_predictor(question_features)
         
-        # NEW: CrossOver-inspired component weighting
-        component_importance = self.component_importance_predictor(question_features)  # [B, 8]
-        
-        # KEEP: Your geometric integration
+        # Geometric integration
         enhanced_components, spatial_weights = self.geometric_integrator(
             component_dict, geometric_context, spatial_info, question_features
         )
         
-        # ENHANCED: Combine question-adaptive and spatial weights
         combined_weights = 0.7 * component_importance.unsqueeze(1) + 0.3 * spatial_weights.unsqueeze(1)
         
-        # ENHANCED: Final fusion
         all_components = torch.stack(enhanced_components, dim=-1)  # [B, N, D, 8]
-        weighted_components = all_components * combined_weights.unsqueeze(-2)  # [B, N, D, 8]
-        components_concat = weighted_components.view(B, N, D * 8)  # [B, N, 8D]
-        Z_final = self.unified_final_fusion(components_concat)  # [B, N, D]
+        weighted_components = all_components * combined_weights.unsqueeze(-2)
+        components_concat = weighted_components.reshape(B, N, D * 8)  # ✅ FIXED: Use .reshape()
+        Z_final = self.unified_final_fusion(components_concat)
         
-        # NEW: Add CrossOver losses to component dict
+        # Contrastive loss
+        unique_components = {'point': Z_P_unique, 'view': Z_V_unique, 'text': Z_T_unique}
+        crossover_loss = self._compute_contrastive_loss(unique_components)
+        
         component_dict.update({
             'crossover_contrastive_loss': crossover_loss,
             'component_importance': component_importance,
@@ -740,6 +752,7 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         })
         
         return Z_final, component_importance, component_dict
+        
     
     def _compute_contrastive_loss(self, unique_components, temperature=0.07):
         """CrossOver contrastive loss for component specialization."""
@@ -749,9 +762,13 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         # Project for contrastive learning
         projected = {}
         for modality, features in unique_components.items():
-            pooled = features.mean(dim=1)  # [B, D]
-            proj = F.normalize(self.enhanced_unique_extractor.contrastive_projector(pooled), dim=-1)
-            projected[modality] = proj
+            if features is not None and features.numel() > 0:
+                pooled = features.mean(dim=1)  # [B, D]
+                proj = F.normalize(self.enhanced_unique_extractor.contrastive_projector(pooled), dim=-1)
+                projected[modality] = proj
+        
+        if len(projected) < 2:
+            return torch.tensor(0.0, device=next(iter(unique_components.values())).device)
         
         total_loss = 0.0
         num_pairs = 0
@@ -762,13 +779,13 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
             for j in range(i + 1, len(modalities)):
                 mod1, mod2 = modalities[i], modalities[j]
                 
-                # We want different modalities to be distinct (negative similarity)
+                # Negative similarity (we want them to be different)
                 neg_sim = torch.sum(projected[mod1] * projected[mod2], dim=-1) / temperature
                 
-                # Positive similarity (same modality with itself - should be high)
+                # Positive similarity (same modality with itself)
                 batch_size = projected[mod1].size(0)
                 if batch_size > 1:
-                    shuffled = torch.randperm(batch_size)
+                    shuffled = torch.randperm(batch_size, device=projected[mod1].device)
                     pos_sim = torch.sum(projected[mod1] * projected[mod1][shuffled], dim=-1) / temperature
                     
                     all_sims = torch.stack([pos_sim, neg_sim], dim=1)
@@ -777,3 +794,4 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
                     num_pairs += 1
         
         return total_loss / num_pairs if num_pairs > 0 else torch.tensor(0.0)
+        
