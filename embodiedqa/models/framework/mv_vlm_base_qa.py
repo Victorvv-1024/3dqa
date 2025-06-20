@@ -29,8 +29,7 @@ from .text_view_fusion import TextViewFusion
 from .unified_pid_fusion import UnifiedAdaptivePIDFusion, CrossOverEnhancedUnifiedPIDFusion
 from .spatial_reason import SpatialReason
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
-from embodiedqa.models.losses import EnhancedLossComputation
-
+from embodiedqa.models.losses import LossComputation
 import traceback
 
 
@@ -167,25 +166,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_dim=self.D_fus,  # 768
         )
         
-        # Composition of all three modalities
-        # self.adaptive_fusion = AdaptiveTrimodalFusion(
-        #     fusion_dim=self.D_fus,
-        #     hidden_dim=256,
-        #     dropout=0.1,
-        #     # Specify input dimensions based on your encoders
-        #     text_input_dim=self.text_encoder.config.hidden_size,  # 768 for sentence-bert
-        #     view_input_dim=self.backbone.out_channels[-1],        # 1024 for swin
-        #     point_input_dim=self.backbone_lidar.fp_channels[-1][-1],  # 256 for pointnet++
-        #     # Bi-modal input dimensions (existing)
-        #     tv_input_dim=self.backbone.out_channels[-1],  # 1024
-        #     pv_input_dim=self.D_fus,  # 768
-        #     pt_input_dim=self.D_fus   # 768
-        # )
-            
-
-        # # PID Enhancement
-        # self.pid_enhancement = PIDEnhancement(self.D_fus)
-        
         # Spatial Reasoning
         self.spatial_reason = SpatialReason(
             fusion_dim=self.D_fus,      # 768
@@ -215,7 +195,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Enhanced loss computation, includes spatial losses and PID regularization
-        self.enhanced_loss_computation = EnhancedLossComputation()
+        self.loss_computation = LossComputation()
          
     @property
     def with_qa_head(self):
@@ -520,12 +500,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         questions = [sample.question for sample in batch_data_samples]
         
         # ============ Step 5: Compute Enhanced Loss with Spatial Reasoning ============
-        total_loss, loss_dict = self.enhanced_loss_computation(
+        total_loss, loss_dict = self.loss_computation(
             qa_loss=standard_qa_loss,
             component_dict=feat_dict['component_dict'],
             component_weights=feat_dict['fusion_weights'],
-            spatial_info=feat_dict['spatial_info'],
-            Z_final=feat_dict['Z_final'],
+            # spatial_info=feat_dict['spatial_info'],
+            # Z_final=feat_dict['Z_final'],
         )
         
         # ============ Step 6: Add Other Standard Losses ============ 

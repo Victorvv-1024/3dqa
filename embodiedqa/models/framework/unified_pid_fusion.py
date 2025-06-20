@@ -718,12 +718,16 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         Z_T_unique = self.enhanced_unique_extractor(Z_T_expanded, [Z_TV, Z_PT], 'text')
         
         Z_redundant, Z_higher_synergy = self.enhanced_higher_order_extractor(Z_TV, Z_PV, Z_PT)
-        unique_components = {'point': Z_P_unique, 'view': Z_V_unique, 'text': Z_T_unique}
-        
+        # Component dictionary
         component_dict = {
-            'Z_P_unique': Z_P_unique, 'Z_V_unique': Z_V_unique, 'Z_T_unique': Z_T_unique,
-            'Z_PV_synergy': Z_PV, 'Z_TV_synergy': Z_TV, 'Z_PT_synergy': Z_PT,
-            'Z_redundant': Z_redundant, 'Z_higher_synergy': Z_higher_synergy
+            'Z_P_unique': Z_P_unique,
+            'Z_V_unique': Z_V_unique, 
+            'Z_T_unique': Z_T_unique,
+            'Z_PV_synergy': Z_PV,
+            'Z_TV_synergy': Z_TV,
+            'Z_PT_synergy': Z_PT,
+            'Z_redundant': Z_redundant,
+            'Z_higher_synergy': Z_higher_synergy
         }
         # Component weighting
         component_importance = self.component_importance_predictor(question_features)
@@ -742,64 +746,4 @@ class CrossOverEnhancedUnifiedPIDFusion(nn.Module):
         components_concat = weighted_components.reshape(B, N, D * 8)
         Z_final = self.unified_final_fusion(components_concat)
         
-        # Contrastive loss
-        unique_components = {'point': Z_P_unique, 'view': Z_V_unique, 'text': Z_T_unique}
-        crossover_loss = self._compute_contrastive_loss(unique_components)
-        
-        component_dict.update({
-            'crossover_contrastive_loss': crossover_loss,
-            'component_importance': component_importance,
-            'combined_weights': combined_weights
-        })
-        
         return Z_final, component_importance, component_dict
-        
-    
-    def _compute_contrastive_loss(self, unique_components, temperature=0.07):
-        """COMPLETE IMPLEMENTATION with debug logging."""
-        device = next(iter(unique_components.values())).device
-        
-        # Create contrastive projector if missing
-        if not hasattr(self.enhanced_unique_extractor, 'contrastive_projector'):
-            self.enhanced_unique_extractor.contrastive_projector = nn.Sequential(
-                nn.Linear(self.fusion_dim, self.fusion_dim // 2),
-                nn.ReLU(),
-                nn.Linear(self.fusion_dim // 2, 128)
-            ).to(device)
-        
-        # Project and compute contrastive loss
-        projected = {}
-        for modality, features in unique_components.items():
-            pooled = features.mean(dim=1)  # [B, D]
-            proj = F.normalize(
-                self.enhanced_unique_extractor.contrastive_projector(pooled), 
-                dim=-1
-            )
-            projected[modality] = proj
-        
-        # Compute contrastive loss between modalities
-        total_loss = 0.0
-        num_pairs = 0
-        batch_size = list(projected.values())[0].size(0)
-        
-        if batch_size <= 1:
-            return torch.tensor(0.0, device=device)
-        
-        modalities = list(projected.keys())
-        for i in range(len(modalities)):
-            for j in range(i + 1, len(modalities)):
-                mod1, mod2 = modalities[i], modalities[j]
-                
-                # Contrastive learning: different modalities should be distinct
-                neg_sim = torch.sum(projected[mod1] * projected[mod2], dim=-1) / temperature
-                shuffled = torch.randperm(batch_size, device=device)
-                pos_sim = torch.sum(projected[mod1] * projected[mod1][shuffled], dim=-1) / temperature
-                
-                all_sims = torch.stack([pos_sim, neg_sim], dim=1)
-                loss = -F.log_softmax(all_sims, dim=1)[:, 0].mean()
-                
-                if torch.isfinite(loss):
-                    total_loss += loss
-                    num_pairs += 1
-        
-        return total_loss / num_pairs if num_pairs > 0 else torch.tensor(0.0, device=device)
