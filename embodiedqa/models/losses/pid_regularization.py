@@ -72,16 +72,31 @@ class MINENetwork(nn.Module):
             self._init_network(actual_input_dim, x.device)
         
         # Joint samples (positive pairs)
-        joint = torch.cat([x, y], dim=-1)  # [B, 2*feature_dim]
-        joint_scores = self.network(joint)  # [B, 1]
+        joint = torch.cat([x, y], dim=-1)
+        joint_scores = self.network(joint)
         
-        # Marginal samples (negative pairs) - shuffle y
-        y_shuffled = y[torch.randperm(y.size(0))]
-        marginal = torch.cat([x, y_shuffled], dim=-1)  # [B, 2*feature_dim]
-        marginal_scores = self.network(marginal)  # [B, 1]
+        # Better marginal sampling
+        batch_size = y.size(0)
+        if batch_size > 1:
+            y_shuffled = y[torch.randperm(batch_size)]
+        else:
+            # For single batch, create synthetic negatives
+            y_shuffled = y + 0.1 * torch.randn_like(y)
         
-        # MINE objective: E[T(x,y)] - log(E[exp(T(x,y'))])
-        mi_estimate = joint_scores.mean() - torch.log(torch.exp(marginal_scores).mean() + 1e-8)
+        marginal = torch.cat([x, y_shuffled], dim=-1)
+        marginal_scores = self.network(marginal)
+        
+        # NUMERICAL STABILITY FIX
+        # Stabilize computation to prevent exp overflow
+        marginal_max = marginal_scores.max().detach()
+        marginal_stable = marginal_scores - marginal_max
+        
+        mi_estimate = (joint_scores.mean() - 
+                      torch.log(torch.exp(marginal_stable).mean() + 1e-8) - 
+                      marginal_max)
+        
+        # CLAMP TO REASONABLE RANGE
+        mi_estimate = torch.clamp(mi_estimate, min=-5.0, max=5.0)
         
         return mi_estimate
 
@@ -187,7 +202,13 @@ class PIDRegularizationLoss(nn.Module):
             uniqueness_losses.append(I_T_unique)
         
         # Uniqueness loss: maximize unique information content
-        uniqueness_loss = -torch.stack(uniqueness_losses).mean() if uniqueness_losses else torch.tensor(0.0, device=device)
+        if uniqueness_losses:
+            uniqueness_clamped = [torch.clamp(loss, min=0.0) for loss in uniqueness_losses]
+            uniqueness_loss = -torch.stack(uniqueness_clamped).mean()  # Maximize MI
+        else:
+            uniqueness_loss = torch.tensor(0.0, device=device)
+        
+        # uniqueness_loss = -torch.stack(uniqueness_losses).mean() if uniqueness_losses else torch.tensor(0.0, device=device)
         losses['uniqueness_loss'] = uniqueness_loss
         
         # ==================== 2. SYNERGY LOSS ====================
@@ -213,9 +234,14 @@ class PIDRegularizationLoss(nn.Module):
             synergy_losses.append(I_PT_synergy)
         
         # Synergy loss: maximize synergistic information content
-        synergy_loss = -torch.stack(synergy_losses).mean() if synergy_losses else torch.tensor(0.0, device=device)
+        # synergy_loss = -torch.stack(synergy_losses).mean() if synergy_losses else torch.tensor(0.0, device=device)
+        if synergy_losses:
+            synergy_clamped = [torch.clamp(loss, min=0.0) for loss in synergy_losses]
+            synergy_loss = -torch.stack(synergy_clamped).mean()  # Maximize MI
+        else:
+            synergy_loss = torch.tensor(0.0, device=device)
         losses['synergy_loss'] = synergy_loss
-        
+
         # ==================== 3. REDUNDANCY CONTROL ====================
         # Control redundant information - should be minimal but present
         if Z_redundant is not None:
@@ -233,11 +259,16 @@ class PIDRegularizationLoss(nn.Module):
         # ==================== 4. COMPONENT BALANCE ====================
         # Ensure no single component dominates (entropy maximization)
         component_probs = F.softmax(component_weights.mean(dim=0), dim=0)  # [8]
-        balance_loss = -torch.sum(component_probs * torch.log(component_probs + 1e-8))
+        entropy = -torch.sum(component_probs * torch.log(component_probs + 1e-8))
+        # balance_loss = -torch.sum(component_probs * torch.log(component_probs + 1e-8))
         
         # Encourage balanced utilization (maximum entropy = log(8))
         max_entropy = math.log(8)
-        balance_loss = max_entropy - balance_loss
+        if torch.rand(1).item() < 0.01:  # Log 1% of the time
+            print(f"Component weights: {component_weights.mean(dim=0)}")
+            print(f"Component entropy: {entropy:.4f} / {max_entropy:.4f}")
+        # balance_loss = max_entropy - balance_loss
+        balance_loss = max_entropy - entropy  # Maximize entropy
         losses['component_balance_loss'] = balance_loss
         
         # ==================== 5. ORTHOGONALITY CONSTRAINT ====================
@@ -312,11 +343,24 @@ class EnhancedLossComputation(nn.Module):
             loss_dict = {'qa_loss': qa_loss}
             
             # Add PID components with standard weights
-            total_loss += 0.05 * pid_losses['uniqueness_loss']
-            total_loss += 0.08 * pid_losses['synergy_loss'] 
-            total_loss += 0.02 * pid_losses['redundancy_loss']
-            total_loss += 0.03 * pid_losses['component_balance_loss']
-            total_loss += 0.04 * pid_losses['orthogonality_loss']
+            # total_loss += 0.05 * pid_losses['uniqueness_loss']
+            # total_loss += 0.08 * pid_losses['synergy_loss'] 
+            # total_loss += 0.02 * pid_losses['redundancy_loss']
+            # total_loss += 0.03 * pid_losses['component_balance_loss']
+            # total_loss += 0.04 * pid_losses['orthogonality_loss']
+            pid_contribution = (0.05 * pid_losses['uniqueness_loss'] +
+                          0.08 * pid_losses['synergy_loss'] + 
+                          0.02 * pid_losses['redundancy_loss'] +
+                          0.03 * pid_losses['component_balance_loss'] +
+                          0.04 * pid_losses['orthogonality_loss'])
+            if torch.rand(1).item() < 0.01:  # Debug 1% of time
+                print(f"QA Loss: {qa_loss:.4f}")
+                print(f"PID Losses: {pid_losses}")
+                print(f"PID Contribution: {pid_contribution:.4f}")
+            
+            total_loss += pid_contribution
+    
+            assert abs(total_loss - qa_loss) > 1e-6, f"PID losses not being added! {total_loss} == {qa_loss}"
             
             loss_dict.update(pid_losses)
             loss_dict['total_loss'] = total_loss
