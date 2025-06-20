@@ -303,6 +303,25 @@ class EnhancedLossComputation(nn.Module):
                 spatial_info: Dict = None,
                 Z_final: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Enhanced loss computation with proper PID regularization."""
+        # Check if spatial reasoning is disabled
+        if spatial_info['num_spatial_questions'] == 0:
+            # Spatial reasoning disabled - only use PID losses
+            pid_losses = self.pid_regularization(component_dict, component_weights, Z_final)
+            
+            total_loss = qa_loss
+            loss_dict = {'qa_loss': qa_loss}
+            
+            # Add PID components with standard weights
+            total_loss += 0.05 * pid_losses['uniqueness_loss']
+            total_loss += 0.08 * pid_losses['synergy_loss'] 
+            total_loss += 0.02 * pid_losses['redundancy_loss']
+            total_loss += 0.03 * pid_losses['component_balance_loss']
+            total_loss += 0.04 * pid_losses['orthogonality_loss']
+            
+            loss_dict.update(pid_losses)
+            loss_dict['total_loss'] = total_loss
+            
+            return total_loss, loss_dict
         
         # Core PID regularization (no question-adaptive components)
         pid_losses = self.pid_regularization(component_dict, component_weights, target_features)

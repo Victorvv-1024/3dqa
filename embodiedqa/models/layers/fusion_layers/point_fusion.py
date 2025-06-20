@@ -85,9 +85,12 @@ def apply_3d_transformation(pcd: Tensor,
     dtype = pcd.dtype
     device = pcd.device
 
-    pcd_rotate_mat = (torch.tensor(img_meta['pcd_rotation'],
-                                   dtype=dtype,
-                                   device=device) if 'pcd_rotation' in img_meta
+    # pcd_rotate_mat = (torch.tensor(img_meta['pcd_rotation'],
+    #                                dtype=dtype,
+    #                                device=device) if 'pcd_rotation' in img_meta
+    #                   else torch.eye(3, dtype=dtype, device=device))
+    pcd_rotate_mat = (img_meta['pcd_rotation'].clone().detach().to(dtype=dtype, device=device)
+                      if 'pcd_rotation' in img_meta
                       else torch.eye(3, dtype=dtype, device=device))
 
     pcd_scale_factor = (img_meta['pcd_scale_factor']

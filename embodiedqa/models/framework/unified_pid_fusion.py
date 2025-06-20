@@ -270,6 +270,20 @@ class GeometricContextIntegrator(nn.Module):
             enhanced_components: List of spatially-enhanced PID components
             adaptive_weights: [B, 8] - Spatial-aware component weights
         """
+        # Check if spatial reasoning is disabled
+        if torch.allclose(geometric_context, torch.zeros_like(geometric_context)):
+            # Spatial reasoning disabled - return components unchanged
+            enhanced_components = []
+            for key in ['Z_P_unique', 'Z_V_unique', 'Z_T_unique', 'Z_PV_synergy',
+                    'Z_TV_synergy', 'Z_PT_synergy', 'Z_redundant', 'Z_higher_synergy']:
+                enhanced_components.append(component_dict[key])
+            
+            # Create dummy adaptive weights (equal weighting)
+            B = component_dict['Z_P_unique'].shape[0]
+            adaptive_weights = torch.ones(B, 8, device=geometric_context.device) / 8.0
+            
+            return enhanced_components, adaptive_weights
+        
         B, N, D = geometric_context.shape
         
         # Extract spatial mask from spatial_info

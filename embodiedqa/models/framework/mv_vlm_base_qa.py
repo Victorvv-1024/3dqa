@@ -190,6 +190,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.spatial_reason = SpatialReason(
             fusion_dim=self.D_fus,      # 768
         )
+        if hasattr(self, 'spatial_reason'):
+            for param in self.spatial_reason.parameters():
+                param.requires_grad = False
+            print("🔧 Spatial reasoning module frozen for testing")
         
         # Unified Adaptive PID Fusion
         self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
@@ -381,11 +385,21 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict['Z_PT'] = Z_PT
         
         # 4. Spatial Reasoning
-        geometric_context, spatial_info = self.spatial_reason(
-            features=Z_PV,
-            coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
-            question_context=Z_T,  # [B, Np, D_fus]
-        )
+        # geometric_context, spatial_info = self.spatial_reason(
+        #     features=Z_PV,
+        #     coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
+        #     question_context=Z_T,  # [B, Np, D_fus]
+        # )
+        
+        # Create dummy/minimal spatial context
+        B, N, D = Z_PV.shape
+        geometric_context = torch.zeros(B, N, D, device=Z_PV.device, dtype=Z_PV.dtype)
+        spatial_info = {
+            'spatial_mask': torch.zeros(B, device=Z_PV.device, dtype=torch.bool),
+            'superpoint_labels': torch.zeros(B, N, device=Z_PV.device, dtype=torch.long),
+            'num_spatial_questions': 0,
+            'num_superpoints_per_sample': [0] * B
+        }
         
         # 5. Unified PID Fusion
         Z_final, fusion_weights, component_dict = self.unified_pid_fusion(
@@ -783,6 +797,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         return data_samples
     
     def forward_reasoning(self, feat_dict, text_dict):
+        # Check if spatial info is present and non-empty
+        spatial_info = feat_dict.get('spatial_info', {})
+        if spatial_info.get('num_spatial_questions', 0) != 0:
+            raise ValueError(" DEBUG: Forward reasoning should be with disabled spatial module")
         return self.reason(feat_dict, text_dict)
     
     def _log_spatial_analysis(self, spatial_info, questions):
