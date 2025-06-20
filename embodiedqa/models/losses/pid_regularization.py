@@ -313,18 +313,20 @@ class EnhancedLossComputation(nn.Module):
                  redundancy_weight=0.02,
                  balance_weight=0.03,
                  orthogonality_weight=0.04,
-                 superpoint_consistency_weight=0.05):
+                 superpoint_consistency_weight=0.05,
+                 crossover_contrastive_weight=0.05,
+                 component_balance_weight=0.02):
         super().__init__()
         
         self.pid_regularization = PIDRegularizationLoss()
-        
-        # Rebalanced weights for mathematically correct PID
         self.uniqueness_weight = uniqueness_weight
         self.synergy_weight = synergy_weight
         self.redundancy_weight = redundancy_weight
         self.balance_weight = balance_weight
         self.orthogonality_weight = orthogonality_weight
         self.superpoint_consistency_weight = superpoint_consistency_weight
+        self.crossover_contrastive_weight = crossover_contrastive_weight
+        self.component_balance_weight = component_balance_weight
         
     def forward(self, 
                 qa_loss: torch.Tensor,
@@ -342,30 +344,33 @@ class EnhancedLossComputation(nn.Module):
             total_loss = qa_loss
             loss_dict = {'qa_loss': qa_loss}
             
-            # Add PID components with standard weights
-            # total_loss += 0.05 * pid_losses['uniqueness_loss']
-            # total_loss += 0.08 * pid_losses['synergy_loss'] 
-            # total_loss += 0.02 * pid_losses['redundancy_loss']
-            # total_loss += 0.03 * pid_losses['component_balance_loss']
-            # total_loss += 0.04 * pid_losses['orthogonality_loss']
-            pid_contribution = (0.05 * pid_losses['uniqueness_loss'] +
-                          0.08 * pid_losses['synergy_loss'] + 
-                          0.02 * pid_losses['redundancy_loss'] +
-                          0.03 * pid_losses['component_balance_loss'] +
-                          0.04 * pid_losses['orthogonality_loss'])
-            if torch.rand(1).item() < 0.01:  # Debug 1% of time
-                print(f"QA Loss: {qa_loss:.4f}")
-                print(f"PID Losses: {pid_losses}")
-                print(f"PID Contribution: {pid_contribution:.4f}")
+            total_loss += self.uniqueness_weight * pid_losses['uniqueness_loss']
+            total_loss += self.synergy_weight * pid_losses['synergy_loss']
+            total_loss += self.redundancy_weight * pid_losses['redundancy_loss']
+            total_loss += self.balance_weight * pid_losses['component_balance_loss']
+            total_loss += self.orthogonality_weight * pid_losses['orthogonality_loss']
             
-            total_loss += pid_contribution
-    
-            assert abs(total_loss - qa_loss) > 1e-6, f"PID losses not being added! {total_loss} == {qa_loss}"
+            crossover_contrastive_loss = component_dict.get('crossover_contrastive_loss', torch.tensor(0.0))
+            if crossover_contrastive_loss.numel() > 0 and not torch.isnan(crossover_contrastive_loss):
+                total_loss += self.crossover_contrastive_weight * crossover_contrastive_loss
+                loss_dict['crossover_contrastive_loss'] = crossover_contrastive_loss
+
+            component_importance = component_dict.get('component_importance', None)
+            if component_importance is not None:
+                # Encourage component specialization (higher variance = better specialization)
+                weight_variance = component_importance.var(dim=-1).mean()
+                component_balance_loss = torch.relu(0.1 - weight_variance)  # Penalize low variance
+                total_loss += self.component_balance_weight * component_balance_loss
+                loss_dict['component_balance_loss'] = component_balance_loss
+                loss_dict['component_specialization_score'] = weight_variance
             
+            # Store all losses for monitoring
             loss_dict.update(pid_losses)
             loss_dict['total_loss'] = total_loss
             
             return total_loss, loss_dict
+        else:
+            raise ValueError("Spatial reasoning is NOW disabled.")
         
         # Core PID regularization (no question-adaptive components)
         pid_losses = self.pid_regularization(component_dict, component_weights, target_features)
@@ -396,7 +401,6 @@ class EnhancedLossComputation(nn.Module):
             loss_dict.update(spatial_losses)
         
         # Store all losses for monitoring
-        loss_dict.update(pid_losses)
         loss_dict['total_loss'] = total_loss
         
         return total_loss, loss_dict

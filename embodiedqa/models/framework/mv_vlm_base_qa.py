@@ -26,7 +26,7 @@ from .point_text_fusion import PointTextFusion
 from .text_view_fusion import TextViewFusion
 # from .pid import PIDEnhancement
 # from .adaptive_fusion import AdaptiveTrimodalFusion
-from .unified_pid_fusion import UnifiedAdaptivePIDFusion
+from .unified_pid_fusion import UnifiedAdaptivePIDFusion, CrossOverEnhancedUnifiedPIDFusion
 from .spatial_reason import SpatialReason
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from embodiedqa.models.losses import EnhancedLossComputation
@@ -196,11 +196,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             print("🔧 Spatial reasoning module frozen for testing")
         
         # Unified Adaptive PID Fusion
-        self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
+        # self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
+        #     fusion_dim=self.D_fus,  # 768
+        #     hidden_dim=256,
+        #     dropout=0.1
+        # )
+        self.unified_pid_fusion = CrossOverEnhancedUnifiedPIDFusion(
             fusion_dim=self.D_fus,  # 768
             hidden_dim=256,
             dropout=0.1
         )
+        print("✅ CrossOver enhanced PID fusion integrated")
         
         # Reasoning
         self.reason = FeatureRefinement(
