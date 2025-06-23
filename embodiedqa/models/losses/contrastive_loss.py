@@ -53,7 +53,6 @@ class ContrastiveRegularization(nn.Module):
         # Filter valid components
         valid_components = {k: v for k, v in unique_components.items() 
                           if v is not None and v.numel() > 0}
-        
         if len(valid_components) < 2:
             return torch.tensor(0.0, device=next(iter(component_dict.values())).device)
         
@@ -78,23 +77,24 @@ class ContrastiveRegularization(nn.Module):
             for j in range(i + 1, len(modalities)):
                 mod1, mod2 = modalities[i], modalities[j]
                 
-                # Negative similarity (different modalities should be far apart)
+                # Debug the similarity computations
                 neg_sim = torch.sum(projected[mod1] * projected[mod2], dim=-1) / self.temperature
-                
-                # Positive similarity (same modality, different samples)
                 shuffled = torch.randperm(batch_size, device=projected[mod1].device)
                 pos_sim = torch.sum(projected[mod1] * projected[mod1][shuffled], dim=-1) / self.temperature
                 
-                # InfoNCE loss
                 logits = torch.stack([pos_sim, neg_sim], dim=1)
                 loss = -F.log_softmax(logits, dim=1)[:, 0].mean()
                 
                 if torch.isfinite(loss):
                     total_loss += loss
                     num_pairs += 1
+                else:
+                    print(f"  WARNING: Non-finite loss!")
         
-        return total_loss / num_pairs if num_pairs > 0 else torch.tensor(0.0)
-    
+        final_loss = total_loss / num_pairs if num_pairs > 0 else torch.tensor(0.0)
+
+        return final_loss
+
     def compute_synergy_loss(self, component_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Contrastive synergy: Bi-modal synergies should be distinct from each other
@@ -233,12 +233,12 @@ class LossComputation(nn.Module):
     
     def __init__(self, 
                  # Contrastive PID weights
-                 uniqueness_weight=0.1,      # Increased for contrastive
-                 synergy_weight=0.1,         # Increased for contrastive  
-                 redundancy_weight=0.05,
-                 balance_weight=0.05,
+                 uniqueness_weight=1.0,      # Increased for contrastive
+                 synergy_weight=1.0,         # Increased for contrastive  
+                 redundancy_weight=1.0,
+                 balance_weight=1.0,
                  # Spatial weights
-                 superpoint_consistency_weight=0.05):
+                 superpoint_consistency_weight=0):
         super().__init__()
         
         # Unified contrastive-based PID regularization
