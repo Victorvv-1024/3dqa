@@ -354,6 +354,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
         Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, D_fus] = [12, 1024, 768]
         Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
+        # Store features in the dictionary
+        feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
+        feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 768]
+        feat_dict['Z_T'] = Z_T  # [B, D_fus] = [12, 768]
         
         # 3. Bi-modal representation space
         Z_TV = self.tv_fusion(Z_T, Z_V)  # [B, Np, Di] = [12, 1024, 768]
@@ -396,7 +400,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]
-        feat_dict['fusion_weights'] = fusion_weights # [B, 8], 8 PID components
+        feat_dict['component_weights'] = fusion_weights # [B, 8], 8 PID components
         feat_dict['component_dict'] = component_dict  # Dictionary of components
         feat_dict['spatial_info'] = spatial_info  # Spatial information
 
@@ -502,8 +506,9 @@ class MultiViewVLMBase3DQA(BaseModel):
         # ============ Step 5: Compute Enhanced Loss with Spatial Reasoning ============
         total_loss, loss_dict = self.loss_computation(
             qa_loss=standard_qa_loss,
-            component_dict=feat_dict['component_dict'],
-            component_weights=feat_dict['fusion_weights'],
+            feat_dict=feat_dict,
+            # component_dict=feat_dict['component_dict'],
+            # component_weights=feat_dict['fusion_weights'],
             # spatial_info=feat_dict['spatial_info'],
             # Z_final=feat_dict['Z_final'],
         )

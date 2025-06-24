@@ -16,6 +16,66 @@ class UniquenessLoss(nn.Module):
     def __init__(self):
         super().__init__()
         
+    def compute_raw_uniqueness_loss(self, uni_modal_representations):
+        """
+        Compute raw uniqueness loss for uni-modal representations.
+        
+        This encourages each modality (P, V, T) to maintain distinct and unique features
+        by maximizing orthogonality between their representations.
+        
+        Args:
+            uni_modal_representations: List of [Z_P, Z_V, Z_T] tensors
+                - Z_P: [B, Np, D_fus] Point features
+                - Z_V: [B, Np, D_fus] View features  
+                - Z_T: [B, D_fus] Text features
+                
+        Returns:
+            torch.Tensor: Raw uniqueness loss scalar
+        """
+        # Filter out None values and extract valid representations
+        valid_representations = []
+        modality_names = ['Point', 'View', 'Text']
+        
+        for i, (modality, repr_tensor) in enumerate(zip(modality_names, uni_modal_representations)):
+            if repr_tensor is not None:
+                # Handle different shapes: [B, Np, D] -> [B, D] and [B, D] -> [B, D]
+                if repr_tensor.dim() == 3:  # [B, Np, D] for Point and View
+                    pooled_repr = repr_tensor.mean(dim=1)  # Pool over spatial dimension
+                elif repr_tensor.dim() == 2:  # [B, D] for Text
+                    pooled_repr = repr_tensor
+                else:
+                    continue  # Skip invalid shapes
+                    
+                valid_representations.append(pooled_repr)
+        
+        # Need at least 2 modalities for uniqueness computation
+        if len(valid_representations) < 2:
+            device = uni_modal_representations[0].device if uni_modal_representations[0] is not None else torch.device('cpu')
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Stack representations: [B, num_modalities, D_fus]
+        stacked_representations = torch.stack(valid_representations, dim=1)  # [B, M, D]
+        B, M, D = stacked_representations.shape
+        
+        # Normalize for cosine similarity computation
+        normalized_reprs = F.normalize(stacked_representations, dim=-1)  # [B, M, D]
+        
+        # Compute pairwise cosine similarities: [B, M, M]
+        similarity_matrix = torch.bmm(normalized_reprs, normalized_reprs.transpose(-1, -2))
+        
+        # Create mask to exclude diagonal elements (self-similarity)
+        mask = ~torch.eye(M, dtype=torch.bool, device=similarity_matrix.device)
+        mask = mask.unsqueeze(0).expand(B, -1, -1)  # [B, M, M]
+        
+        # Extract off-diagonal similarities (cross-modal similarities)
+        cross_modal_similarities = similarity_matrix[mask]  # [B * M * (M-1)]
+        
+        # Raw uniqueness loss: minimize cross-modal similarities (encourage orthogonality)
+        # We want different modalities to be as orthogonal as possible
+        raw_uniqueness_loss = cross_modal_similarities.abs().mean()
+        
+        return raw_uniqueness_loss
+
     def compute_simple_pid_loss(self, component_dict, component_weights):
         """
         Simple PID loss: orthogonality.
@@ -61,23 +121,25 @@ class UniquenessLoss(nn.Module):
 
 class LossComputation(nn.Module):
     """
-    Enhanced loss computation with simple PID regularization.
+    Enhanced loss computation with simple PID regularization and raw uniqueness loss.
     """
     
     def __init__(self, 
-                 # Simple PID weights,
-                 orthogonality_weight=1.0,):
+                 # Simple PID weights
+                 orthogonality_weight=1.0,
+                 # Raw uniqueness weight
+                 raw_uniqueness_weight=0.2):
         super().__init__()
         
         self.pid_loss = UniquenessLoss()
         
         # Loss weights
         self.orthogonality_weight = orthogonality_weight
+        self.raw_uniqueness_weight = raw_uniqueness_weight
         
     def forward(self, 
                 qa_loss: torch.Tensor,
-                component_dict: dict,
-                component_weights: torch.Tensor,
+                feat_dict: dict,
                 **kwargs) -> tuple:
         """
         Simple loss computation with mathematically grounded PID regularization.
@@ -87,14 +149,39 @@ class LossComputation(nn.Module):
         total_loss = qa_loss
         loss_dict = {'qa_loss': qa_loss}
         
+        # PID components
+        if feat_dict.get('component_weights') is not None:
+            component_weights = feat_dict['component_weights']
+        else:
+            raise ValueError("component_weights must be provided in feat_dict")
+        
+        if feat_dict.get('component_dict') is not None:
+            component_dict = feat_dict['component_dict']
+        else:
+            raise ValueError("component_dict must be provided in feat_dict")
+        
         # Simple PID regularization
         pid_losses = self.pid_loss.compute_simple_pid_loss(component_dict, component_weights)
         
         # Add PID losses with weights
         total_loss += self.orthogonality_weight * pid_losses['uniqueness_loss']
 
+        # Uni-modal representations for raw uniqueness loss
+        uni_modal_representations = [
+            feat_dict.get('Z_P', None),
+            feat_dict.get('Z_V', None),
+            feat_dict.get('Z_T', None)
+        ]
+        
+        # Compute raw uniqueness loss
+        raw_uniqueness_loss = self.pid_loss.compute_raw_uniqueness_loss(uni_modal_representations)
+        
+        # Add raw uniqueness loss with weight
+        total_loss += self.raw_uniqueness_weight * raw_uniqueness_loss
+
         # Add to loss dict for monitoring
         loss_dict.update(pid_losses)
+        loss_dict['raw_uniqueness_loss'] = raw_uniqueness_loss
         loss_dict['total_loss'] = total_loss
-        
+
         return total_loss, loss_dict
