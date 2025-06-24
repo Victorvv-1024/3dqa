@@ -181,12 +181,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         #     hidden_dim=256,
         #     dropout=0.1
         # )
-        self.unified_pid_fusion = CrossOverEnhancedUnifiedPIDFusion(
+        self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
             fusion_dim=self.D_fus,  # 768
             hidden_dim=256,
             dropout=0.1
         )
-        print("✅ CrossOver enhanced PID fusion integrated")
         
         # Reasoning
         self.reason = FeatureRefinement(
@@ -392,7 +391,8 @@ class MultiViewVLMBase3DQA(BaseModel):
             Z_T, Z_V, Z_P,
             Z_TV, Z_PV, Z_PT,
             geometric_context=geometric_context,
-            spatial_info=spatial_info
+            spatial_info=spatial_info,
+            question_features =text_dict['text_feats'],  # [B, L, D_fus]
         )
         
         feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]

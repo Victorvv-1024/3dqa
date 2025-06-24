@@ -7,7 +7,8 @@ from .geometry_guided_distillation import GeometryGuidedDistillationLoss
 from .uncertainty_weighting import UncertaintyWeightingLayer
 from .simple_distillation import SimpleDistillationLoss, AdaptiveDistillationLoss
 # from .pid_regularization import EnhancedLossComputation, PIDRegularizationLoss
-from .contrastive_loss import LossComputation
+# from .contrastive_loss import LossComputation
+from .uniqueness import LossComputation
 
 
 __all__ = [

@@ -23,16 +23,35 @@ class UniqueComponentExtractor(nn.Module):
         super().__init__()
         self.fusion_dim = fusion_dim
         
-        # Orthogonal projection networks
-        self.orthogonal_projector = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.ReLU(),
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
+        # Improved modality-specific processing
+        self.modality_processors = nn.ModuleDict({
+            'text': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim),
+                nn.GELU(),  # Better for text
+                nn.Dropout(0.1),
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim)
+            ),
+            'view': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim), 
+                nn.LayerNorm(fusion_dim),
+                nn.ReLU(),  # Better for visual
+                nn.Dropout(0.1),
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim)
+            ),
+            'point': nn.Sequential(
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim),
+                nn.ReLU(),
+                nn.Dropout(0.05),  # Lower dropout for geometry
+                nn.Linear(fusion_dim, fusion_dim),
+                nn.LayerNorm(fusion_dim)
+            )
+        })
         
-        # Attention mechanism to identify synergy components
+        # Enhanced attention for synergy identification
         self.synergy_attention = nn.MultiheadAttention(
             embed_dim=fusion_dim,
             num_heads=num_heads,
@@ -40,55 +59,55 @@ class UniqueComponentExtractor(nn.Module):
             batch_first=True
         )
         
-        # Unique information extractor
+        # Improved unique information extractor
         self.unique_extractor = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim),
             nn.LayerNorm(fusion_dim), 
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(fusion_dim, fusion_dim)
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         
-    def forward(self, modality_features, synergy_features_list):
-        """
-        Extract unique information from modality that's orthogonal to synergies.
+    def forward(self, modality_features, synergy_features_list, modality_type):
+        """Enhanced unique extraction with better orthogonalization."""
+        # Handle different input shapes for different modalities
+        original_shape = modality_features.shape
+        is_text_modality = (modality_type == 'text' and len(original_shape) == 2)
         
-        Args:
-            modality_features: [B, N, D] - Single modality features
-            synergy_features_list: List of [B, N, D] - Bi-modal synergy features
-            
-        Returns:
-            unique_features: [B, N, D] - Unique information for this modality
-        """
-        # Concatenate all synergy features
+        if is_text_modality:
+            # Text features: [B, D] -> expand to [B, N, D] using synergy features as reference
+            B, D = modality_features.shape
+            if synergy_features_list:
+                N = synergy_features_list[0].shape[1]  # Get N from synergy features
+            else:
+                N = 1  # Fallback
+            modality_features = modality_features.unsqueeze(1).expand(B, N, D)
+        
+        # Apply modality-specific processing
+        processed_features = self.modality_processors[modality_type](modality_features)
+        
+        # Stack synergy features for attention
         if synergy_features_list:
-            synergy_stack = torch.stack(synergy_features_list, dim=1)  # [B, num_synergies, N, D]
-            B, num_syn, N, D = synergy_stack.shape
-            synergy_combined = synergy_stack.view(B, num_syn * N, D)  # [B, num_syn*N, D]
+            synergy_stack = torch.stack(synergy_features_list, dim=2)  # [B, N, K, D]
+            B, N, K, D = synergy_stack.shape
+            synergy_flat = synergy_stack.reshape(B * N, K, D)
+            
+            # Use attention to identify synergy patterns
+            query = processed_features.reshape(B * N, 1, D)
+            attended_synergies, _ = self.synergy_attention(
+                query=query, key=synergy_flat, value=synergy_flat
+            )  # [B*N, 1, D]
+            attended_synergies = attended_synergies.reshape(B, N, D)
+            
+            # Extract unique by removing synergy components
+            unique_features = processed_features - 0.3 * attended_synergies
         else:
-            # No synergies to orthogonalize against
-            return self.unique_extractor(modality_features)
+            unique_features = processed_features
         
-        # Use attention to find what parts of modality are explained by synergies
-        modality_flat = modality_features.view(modality_features.size(0), -1, modality_features.size(-1))
-        
-        # Attention: query=modality, key=value=synergies
-        attended_synergy, attention_weights = self.synergy_attention(
-            query=modality_flat,
-            key=synergy_combined,
-            value=synergy_combined
-        )  # [B, N, D], [B, N, num_syn*N]
-        
-        # Reshape back to original spatial structure
-        attended_synergy = attended_synergy.view_as(modality_features)
-        
-        # Orthogonalize: remove synergy components from modality
-        residual = modality_features - attended_synergy
-        
-        # Extract unique information from residual
-        unique_features = self.unique_extractor(residual)
-        
-        return unique_features
+        # Final unique extraction
+        Z_unique = self.unique_extractor(unique_features)
+        return Z_unique
 
 class HigherOrderExtractor(nn.Module):
     """
@@ -103,33 +122,42 @@ class HigherOrderExtractor(nn.Module):
         super().__init__()
         self.fusion_dim = fusion_dim
         
-        # Redundant information extractor (shared across all)
-        self.redundant_extractor = nn.Sequential(
-            nn.Linear(fusion_dim * 3, fusion_dim),  # Takes all 3 bi-modal synergies
+        # Multi-scale synergy encoders
+        self.synergy_encoder = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
             nn.LayerNorm(fusion_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(fusion_dim, fusion_dim),
             nn.LayerNorm(fusion_dim)
         )
         
-        # Higher-order synergy extractor (tri-modal emergent)
-        self.higher_synergy_network = nn.Sequential(
+        # Enhanced redundancy extraction
+        self.redundancy_extractor = nn.Sequential(
             nn.Linear(fusion_dim * 3, fusion_dim * 2),
             nn.LayerNorm(fusion_dim * 2),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Linear(fusion_dim, fusion_dim)
+            nn.LayerNorm(fusion_dim)
         )
         
-        # Cross-modal attention for higher-order interactions
+        # Improved higher-order synergy network
+        self.higher_synergy_network = nn.Sequential(
+            nn.Linear(fusion_dim * 3, fusion_dim * 2),
+            nn.LayerNorm(fusion_dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.15),
+            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.GELU(),
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        
+        # Cross-modal attention for interactions
         self.trimodal_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=8,
-            dropout=0.1,
-            batch_first=True
+            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
         )
         
     def forward(self, Z_TV, Z_PV, Z_PT):
@@ -145,35 +173,31 @@ class HigherOrderExtractor(nn.Module):
         """
         B, N, D = Z_TV.shape
         
-        # ==================== REDUNDANT INFORMATION ====================
-        # Find information common to all three bi-modal synergies
-        concatenated = torch.cat([Z_TV, Z_PV, Z_PT], dim=-1)  # [B, N, 3*D]
-        Z_redundant = self.redundant_extractor(concatenated)   # [B, N, D]
+        # Apply synergy encoding
+        encoded_synergies = []
+        for synergy in [Z_TV, Z_PV, Z_PT]:
+            encoded = self.synergy_encoder(synergy)
+            encoded_synergies.append(encoded)
+        Z_TV_enc, Z_PV_enc, Z_PT_enc = encoded_synergies
         
-        # ==================== HIGHER-ORDER SYNERGY ====================
-        # Tri-modal interaction that's not captured by bi-modal synergies
+        # Extract redundant information
+        combined = torch.cat([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=-1)
+        Z_redundant = self.redundancy_extractor(combined)
         
-        # Method 1: Nonlinear combination
-        higher_synergy_raw = self.higher_synergy_network(concatenated)  # [B, N, D]
+        # Enhanced cross-modal attention
+        synergy_stack = torch.stack([Z_TV_enc, Z_PV_enc, Z_PT_enc], dim=2)
+        synergy_for_attention = synergy_stack.reshape(B * N, 3, D)
         
-        # Method 2: Cross-attention between bi-modal synergies
-        # Stack synergies for attention
-        synergy_stack = torch.stack([Z_TV, Z_PV, Z_PT], dim=2)  # [B, N, 3, D]
-        synergy_flat = synergy_stack.view(B, N * 3, D)  # [B, N*3, D]
+        attended_synergies, _ = self.trimodal_attention(
+            query=synergy_for_attention,
+            key=synergy_for_attention, 
+            value=synergy_for_attention
+        )
+        attended_synergies = attended_synergies.reshape(B, N, 3, D)
+        attended_combined = attended_synergies.reshape(B, N, 3 * D)
         
-        # Self-attention to capture interactions
-        attended_synergy, _ = self.trimodal_attention(
-            query=synergy_flat,
-            key=synergy_flat, 
-            value=synergy_flat
-        )  # [B, N*3, D]
-        
-        # Reshape and aggregate
-        attended_synergy = attended_synergy.view(B, N, 3, D)  # [B, N, 3, D]
-        attended_mean = attended_synergy.mean(dim=2)  # [B, N, D]
-        
-        # Combine both methods
-        Z_higher_synergy = 0.6 * higher_synergy_raw + 0.4 * attended_mean
+        # Extract higher-order synergy
+        Z_higher_synergy = self.higher_synergy_network(attended_combined)
         
         return Z_redundant, Z_higher_synergy
 
@@ -355,24 +379,35 @@ class UnifiedAdaptivePIDFusion(nn.Module):
         super().__init__()
         self.fusion_dim = fusion_dim
         
-        # ==================== PID COMPONENT EXTRACTORS (UNCHANGED) ====================
-        self.unique_extractor = UniqueComponentExtractor(fusion_dim)
-        self.higher_order_extractor = HigherOrderExtractor(fusion_dim)
+        # Enhanced component extractors (NO CrossOver dependency)
+        self.enhanced_unique_extractor = UniqueComponentExtractor(fusion_dim)
+        self.enhanced_higher_order_extractor = HigherOrderExtractor(fusion_dim)
         
-        # ==================== GEOMETRIC CONTEXT INTEGRATION (NEW) ====================
-        # Replaces the old spatial processing with geometric context integration
-        self.geometric_integrator = GeometricContextIntegrator(fusion_dim)
+        # Improved question-adaptive weighting
+        self.component_importance_predictor = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 8),  # 8 PID components
+            nn.Softmax(dim=-1)
+        )
         
-        # ==================== FINAL FUSION (UNCHANGED) ====================
+        # Enhanced final fusion architecture
         self.final_fusion = nn.Sequential(
-            nn.Linear(fusion_dim * 8, fusion_dim * 2),
-            nn.LayerNorm(fusion_dim * 2),
+            nn.Linear(fusion_dim * 8, fusion_dim * 4),
+            nn.LayerNorm(fusion_dim * 4),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim * 4, fusion_dim * 2),
+            nn.LayerNorm(fusion_dim * 2),
             nn.GELU(),
-            nn.Linear(fusion_dim, fusion_dim)
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         
     def forward(self, 
@@ -383,6 +418,7 @@ class UnifiedAdaptivePIDFusion(nn.Module):
                 # Pre-computed geometric context from SimplifiedSpatialReasoning
                 geometric_context: torch.Tensor,
                 spatial_info: Dict,
+                question_features: torch.Tensor = None
                 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Updated unified PID fusion with geometric context integration.
@@ -400,20 +436,32 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             fusion_weights: [B, 8] - Adaptive PID component weights
             component_dict: Dict - All 8 PID components for loss computation
         """
-        # ==================== STEP 1: PID COMPONENT EXTRACTION ====================
-        # Expand Z_T to match spatial dimensions for unique extraction
-        B, N, D = Z_V.shape
-        Z_T_expanded = Z_T.unsqueeze(1).expand(B, N, D) if Z_T.dim() == 2 else Z_T
+        # ==================== STEP 1: ENHANCED UNIQUE EXTRACTION ====================
+        # Extract unique information with improved methods
+        Z_P_unique = self.enhanced_unique_extractor(Z_P, [Z_PV, Z_PT], 'point')
+        Z_V_unique = self.enhanced_unique_extractor(Z_V, [Z_PV, Z_TV], 'view')
+        Z_T_unique = self.enhanced_unique_extractor(Z_T, [Z_TV, Z_PT], 'text')
         
-        # Extract unique components (orthogonal to bi-modal synergies)
-        Z_P_unique = self.unique_extractor(Z_P, [Z_PV, Z_PT])
-        Z_V_unique = self.unique_extractor(Z_V, [Z_PV, Z_TV])
-        Z_T_unique = self.unique_extractor(Z_T_expanded, [Z_TV, Z_PT])
+        # ==================== STEP 2: ENHANCED HIGHER-ORDER EXTRACTION ====================
+        Z_redundant, Z_higher_synergy = self.enhanced_higher_order_extractor(Z_TV, Z_PV, Z_PT)
         
-        # Extract higher-order components
-        Z_redundant, Z_higher_synergy = self.higher_order_extractor(Z_TV, Z_PV, Z_PT)
+        # ==================== STEP 3: IMPROVED COMPONENT WEIGHTING ====================
+        if question_features is not None:
+            question_context = question_features.mean(dim=1) if question_features.dim() > 2 else question_features
+        else:
+            # Fallback: use average of all components
+            all_comp_avg = torch.stack([
+                Z_P_unique.mean(dim=1), Z_V_unique.mean(dim=1), Z_T_unique.mean(dim=1),
+                Z_TV.mean(dim=1), Z_PV.mean(dim=1), Z_PT.mean(dim=1),
+                Z_redundant.mean(dim=1), Z_higher_synergy.mean(dim=1)
+            ], dim=1).mean(dim=1)
+            question_context = all_comp_avg
         
-        # ==================== COMPONENT DICTIONARY ====================
+        # Predict component importance
+        fusion_weights = self.component_importance_predictor(question_context)  # [B, 8]
+        
+        # ==================== STEP 4: ENHANCED FINAL FUSION ====================
+        # Prepare component dictionary
         component_dict = {
             'Z_P_unique': Z_P_unique,
             'Z_V_unique': Z_V_unique,
@@ -422,42 +470,40 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             'Z_TV_synergy': Z_TV,
             'Z_PT_synergy': Z_PT,
             'Z_redundant': Z_redundant,
-            'Z_higher_synergy': Z_higher_synergy
+            'Z_higher_synergy': Z_higher_synergy,
+            'component_importance': fusion_weights  # For loss computation
         }
         
-        # ==================== STEP 2: GEOMETRIC CONTEXT INTEGRATION ====================
-        # This is the KEY integration point with SimplifiedSpatialReasoning
-        enhanced_components, fusion_weights = self.geometric_integrator(
-            component_dict=component_dict,
-            geometric_context=geometric_context,  # From spatial reasoning
-            spatial_info=spatial_info,            # From spatial reasoning
-            question_features=Z_T
-        )
+        # Stack all components for weighted fusion
+        all_components = torch.stack([
+            Z_P_unique, Z_V_unique, Z_T_unique,
+            Z_PV, Z_TV, Z_PT,
+            Z_redundant, Z_higher_synergy
+        ], dim=1)  # [B, 8, N, D]
         
-        # ==================== STEP 3: WEIGHTED FUSION ====================
-        # Stack all enhanced components
-        # all_components = torch.stack(enhanced_components, dim=2)  # [B, N, 8, D]
+        # Apply question-adaptive weights
+        weighted_components = torch.sum(
+            fusion_weights.unsqueeze(-1).unsqueeze(-1) * all_components, 
+            dim=1
+        )  # [B, N, D]
         
-        # Apply adaptive weights (learned from geometric + question context)
-        # weighted_components = torch.sum(
-        #     fusion_weights.unsqueeze(1).unsqueeze(-1) * all_components,
-        #     dim=2
-        # )  # [B, N, D]
+        # Concatenate all components for final processing
+        components_concat = torch.cat([
+            Z_P_unique, Z_V_unique, Z_T_unique,
+            Z_PV, Z_TV, Z_PT,
+            Z_redundant, Z_higher_synergy
+        ], dim=-1)  # [B, N, 8*D]
         
-        # ==================== STEP 4: FINAL FUSION ====================
-        # Concatenate all enhanced components for final processing
-        components_concat = torch.cat(enhanced_components, dim=-1)  # [B, N, 8*D]
         Z_final = self.final_fusion(components_concat)  # [B, N, D]
         
         # Residual connection with weighted combination
-        # Z_final = 0.7 * Z_final + 0.3 * weighted_components
+        Z_final = 0.7 * Z_final + 0.3 * weighted_components
         
         # ==================== STEP 5: PREPARE OUTPUT ====================
-        # Add fusion weights and spatial info to component dict for loss computation
         component_dict.update({
             'fusion_weights': fusion_weights,
             'spatial_info': spatial_info,
-            'geometric_context': geometric_context  # Pass through for potential loss usage
+            'geometric_context': geometric_context
         })
         
         return Z_final, fusion_weights, component_dict
