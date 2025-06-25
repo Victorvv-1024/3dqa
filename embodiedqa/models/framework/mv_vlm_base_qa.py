@@ -76,7 +76,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                  backbone: ConfigType,
                  backbone_text: ConfigType,
                  backbone_lidar: ConfigType,
-                #  backbone_fusion: ConfigType,
+                 backbone_fusion: ConfigType,
                  qa_head: ConfigType,
                  target_bbox_head: ConfigType = None,
                  target_cls_head: ConfigType = None,
@@ -100,19 +100,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         if self.use_2d:
             self.backbone = MODELS.build(backbone)
-            #for TGMF
-            # This projects Z_t to G_t
-            # self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.D_fus),
-            #                                         nn.LayerNorm(self.D_fus))
-            # This projects U_i to G_i
-            # self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.D_fus),
-            #                                 nn.LayerNorm(self.D_fus))
 
         self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size, self.D_fus),
                                            nn.LayerNorm(self.D_fus)
                                            )
-        
-        # self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)
 
         
         self.text_max_length = text_max_length
@@ -188,10 +179,25 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Reasoning
-        self.reason = FeatureRefinement(
-            hidden_dim=self.D_fus,
-            vision_num_queries=256,
+        self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
+        self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
+        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
+        self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
+        self.reason_visual_pre_norm = nn.Sequential(
+            nn.LayerNorm(self.D_fus),
+            nn.Dropout(0.1)
         )
+        self.reason_full_visual_pre_norm = nn.Sequential(
+            nn.LayerNorm(self.D_fus),
+            nn.Dropout(0.1)
+        )
+        
+        self.reason = MODELS.build(backbone_fusion)
+        
+        # self.reason = FeatureRefinement(
+        #     hidden_dim=self.D_fus,
+        #     vision_num_queries=256,
+        # )
         
         # Enhanced loss computation, includes spatial losses and PID regularization
         self.loss_computation = LossComputation()
@@ -486,81 +492,135 @@ class MultiViewVLMBase3DQA(BaseModel):
         Returns:
             dict: A dictionary of loss components.
         """
-        # ============ Step 1: Extract Features ============
+        # 1. Feature extraction
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
         
-        # ============ Step 2: Enhanced Forward Fusion ============
-        head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
+        # 2. Original MCGR reasoning
+        # This step is to prepare the features for the downstream heads
+        points = batch_inputs_dict['points']
+        B = len(points) # batch size
+        losses = {}
         
-        # ============ Step 3: Standard QA Loss ============
-        qa_losses = self.qa_head.loss(**head_inputs_dict,
-                                    ret_fusion_feat=True,
-                                    batch_data_samples=batch_data_samples)
+        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
+        # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
+        point_mask = None
         
-        standard_qa_loss = qa_losses['qa_cls_loss']
+        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
         
-        # ============ Step 4: Extract Information for Enhanced Loss ============
-        questions = [sample.question for sample in batch_data_samples]
+        # gather_points expects [B, C, N] format, so we need to transpose
+        # full_point_feats: [B, Np, D_fus] -> [B, D_fus, Np] -> gather -> [B, D_fus, Nq] -> [B, Nq, D_fus]
+        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
         
-        # ============ Step 5: Compute Enhanced Loss with Spatial Reasoning ============
-        total_loss, loss_dict = self.loss_computation(
-            qa_loss=standard_qa_loss,
-            feat_dict=feat_dict,
-            # component_dict=feat_dict['component_dict'],
-            # component_weights=feat_dict['fusion_weights'],
-            # spatial_info=feat_dict['spatial_info'],
-            # Z_final=feat_dict['Z_final'],
+        # full_point_pos: [B, Np, 3] -> [B, 3, Np] -> gather -> [B, 3, Nq] -> [B, Nq, 3]
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        # print(f'point_feats shape: {point_feats.shape}') # [B, Nq, D_fus] = [12, 256, 768]
+        # print(f'point_pos shape: {point_pos.shape}') # [B, Nq, 3] = [12, 256, 3]
+        
+        head_inputs_dict = self.forward_reasoning(
+            point_feats=point_feats,
+            point_pos=point_pos,
+            point_mask=point_mask,
+            text_dict=text_dict,
+            full_point_feats=full_point_feats,
+            full_point_pos=full_point_pos,
         )
+        qa_losses = self.qa_head.loss(**head_inputs_dict,
+                                     ret_fusion_feat=True,
+                                     batch_data_samples=batch_data_samples)
         
-        # ============ Step 6: Add Other Standard Losses ============ 
-        losses = {'loss': total_loss}  # Main loss for backprop
+        losses.update(qa_losses)
         
-        # Add individual loss components for monitoring
-        losses.update(loss_dict)
-        
-        # Target classification loss  
+        if self.with_target_bbox_head:
+            ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
+                                                    points=points, 
+                                                    aggregated_points=point_pos, 
+                                                    batch_data_samples=batch_data_samples)
+            losses.update(ref_loc_losses)
+            
         if self.with_target_cls_head:
             fusion_feat = qa_losses['fusion_feat']
-            ref_cls_loss = self.target_cls_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
-            
-            cls_loss_value = ref_cls_loss['ref_cls_loss']
-            total_loss += cls_loss_value
-            losses['loss'] = total_loss
-            
+            ref_cls_loss = self.target_cls_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
             losses.update(ref_cls_loss)
-        
-        # Target bbox loss
-        if self.with_target_bbox_head:
-            proposal_coordinates = head_inputs_dict['sampled_coordinates']
-            
-            ref_loc_losses = self.target_bbox_head.loss(
-                **{k: v for k, v in head_inputs_dict.items() 
-                    if k not in ['fps_indices', 'sampled_coordinates']},
-                points=batch_inputs_dict['points'],
-                aggregated_points=proposal_coordinates,
-                batch_data_samples=batch_data_samples
-            )
-            
-            bbox_loss_value = ref_loc_losses['ref_loc_loss']
-            total_loss += bbox_loss_value
-            losses['loss'] = total_loss
-            
-            losses.update(ref_loc_losses)
-        
-        # Situation prediction loss
         if self.with_situation_predict_head:
             fusion_feat = qa_losses['fusion_feat']
-            situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
-            
-            situation_loss_value = situation_predict_loss['situation_predict_loss']
-            total_loss += situation_loss_value
-            losses['loss'] = total_loss
-            
-            losses.update(situation_predict_loss)
-            
-        # ============ Step 8: Final Loss Collection ============
+            situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
+            losses.update(situation_predict_loss)  
         losses = self.loss_collect(losses)
+        return losses
+        
+        # head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
+        
+        # # ============ Step 3: Standard QA Loss ============
+        # qa_losses = self.qa_head.loss(**head_inputs_dict,
+        #                             ret_fusion_feat=True,
+        #                             batch_data_samples=batch_data_samples)
+        
+        # standard_qa_loss = qa_losses['qa_cls_loss']
+        
+        # # ============ Step 4: Extract Information for Enhanced Loss ============
+        # questions = [sample.question for sample in batch_data_samples]
+        
+        # # ============ Step 5: Compute Enhanced Loss with Spatial Reasoning ============
+        # total_loss, loss_dict = self.loss_computation(
+        #     qa_loss=standard_qa_loss,
+        #     feat_dict=feat_dict,
+        #     # component_dict=feat_dict['component_dict'],
+        #     # component_weights=feat_dict['fusion_weights'],
+        #     # spatial_info=feat_dict['spatial_info'],
+        #     # Z_final=feat_dict['Z_final'],
+        # )
+        
+        # # ============ Step 6: Add Other Standard Losses ============ 
+        # losses = {'loss': total_loss}  # Main loss for backprop
+        
+        # # Add individual loss components for monitoring
+        # losses.update(loss_dict)
+        
+        # # Target classification loss  
+        # if self.with_target_cls_head:
+        #     fusion_feat = qa_losses['fusion_feat']
+        #     ref_cls_loss = self.target_cls_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
+            
+        #     cls_loss_value = ref_cls_loss['ref_cls_loss']
+        #     total_loss += cls_loss_value
+        #     losses['loss'] = total_loss
+            
+        #     losses.update(ref_cls_loss)
+        
+        # # Target bbox loss
+        # if self.with_target_bbox_head:
+        #     proposal_coordinates = head_inputs_dict['sampled_coordinates']
+            
+        #     ref_loc_losses = self.target_bbox_head.loss(
+        #         **{k: v for k, v in head_inputs_dict.items() 
+        #             if k not in ['fps_indices', 'sampled_coordinates']},
+        #         points=batch_inputs_dict['points'],
+        #         aggregated_points=proposal_coordinates,
+        #         batch_data_samples=batch_data_samples
+        #     )
+            
+        #     bbox_loss_value = ref_loc_losses['ref_loc_loss']
+        #     total_loss += bbox_loss_value
+        #     losses['loss'] = total_loss
+            
+        #     losses.update(ref_loc_losses)
+        
+        # # Situation prediction loss
+        # if self.with_situation_predict_head:
+        #     fusion_feat = qa_losses['fusion_feat']
+        #     situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
+            
+        #     situation_loss_value = situation_predict_loss['situation_predict_loss']
+        #     total_loss += situation_loss_value
+        #     losses['loss'] = total_loss
+            
+        #     losses.update(situation_predict_loss)
+            
+        # # ============ Step 8: Final Loss Collection ============
+        # losses = self.loss_collect(losses)
         
         
         # ============ Step 7: Spatial Analysis (Optional, for debugging) ============
@@ -600,7 +660,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         #                   f"sizes: {sp_sizes[:5]}{'...' if len(sp_sizes) > 5 else ''}")
                     
         
-        return losses
+        # return losses
 
         
     def loss_collect(self, losses_dict):
@@ -651,22 +711,48 @@ class MultiViewVLMBase3DQA(BaseModel):
         2. Ensure spatial alignment for all downstream heads
         3. Handle both QA and bbox predictions properly
         """
-        # ============ Step 1: Extract Features (Same as Training) ============
+        # 1: Extract Features (Same as Training)
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
         
+        # 2. Preparation for reasoning
+        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        point_mask = None
+        B = full_point_feats.shape[0]  # batch size
+        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        
+        head_inputs_dict = self.forward_reasoning(
+            point_feats=point_feats,
+            point_pos=point_pos,
+            point_mask=point_mask,
+            text_dict=text_dict,
+            full_point_feats=full_point_feats,
+            full_point_pos=full_point_pos,
+        )
+        results_list = self.qa_head.predict(**head_inputs_dict,
+                                     batch_data_samples=batch_data_samples)
+        for data_sample, pred_scores in zip(batch_data_samples,
+                                                  results_list):
+            data_sample.pred_scores = pred_scores
+            
+        return batch_data_samples 
+        
+        
         # ============ Step 2: Use Same Feature Refinement as Training ============
         # CRITICAL: Use the same forward_reasoning pipeline as in loss()
-        head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
+        # head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
         
         # ============ Step 3: QA Predictions ============
-        qa_predictions = self.qa_head.predict(**head_inputs_dict, batch_data_samples=batch_data_samples)
+        # qa_predictions = self.qa_head.predict(**head_inputs_dict, batch_data_samples=batch_data_samples)
         
-        for data_sample, pred_scores in zip(batch_data_samples, qa_predictions):
-            data_sample.pred_scores = pred_scores
+        # for data_sample, pred_scores in zip(batch_data_samples, qa_predictions):
+        #     data_sample.pred_scores = pred_scores
 
         
-        return batch_data_samples
+        # return batch_data_samples
         
     def forward(self,
                 inputs: Union[dict, List[dict]],
@@ -787,12 +873,54 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
     
-    def forward_reasoning(self, feat_dict, text_dict):
-        # Check if spatial info is present and non-empty
-        spatial_info = feat_dict.get('spatial_info', {})
-        if spatial_info.get('num_spatial_questions', 0) != 0:
-            raise ValueError(" DEBUG: Forward reasoning should be with disabled spatial module")
-        return self.reason(feat_dict, text_dict)
+    
+    def forward_reasoning(self,
+                            point_feats: Tensor,
+                            point_pos: Tensor,
+                            point_mask: Tensor,
+                            text_dict: Dict,
+                            full_point_feats: Optional[Tensor] = None,
+                            full_point_pos: Optional[Tensor] = None,
+                            full_point_mask: Optional[Tensor] = None) -> Dict:
+        # visual feats mapping and positional encoding
+        point_feats = self.visual_feat_map(point_feats)  # [B, Np, D_fus]
+        point_feats += self.pos_embedding(point_pos)  # [B, Np, D_fus]
+        point_feats = self.reason_visual_pre_norm(point_feats)  # [B, Np, D_fus]
+        
+        if full_point_feats is not None:
+            full_point_feats = self.full_visual_feat_map(full_point_feats)
+            full_point_feats += self.full_pos_embedding(full_point_pos)
+            full_point_feats = self.reason_full_visual_pre_norm(full_point_feats)
+        else:
+            raise ValueError("NOT IMPLEMENTED: full_point_feats is None")
+        
+        reason_inputs_dict = dict(
+            lang_feats = text_dict['text_feats'],  # [B, L, D_fus]
+            lang_attention_mask = text_dict['text_token_mask'],  # [B, L]
+            visual_feats = point_feats,  # [B, Np, D_fus]
+            visual_attention_mask = point_mask,  # [B, Np]
+            full_visual_feats = full_point_feats,  # [B, Np, D_f
+            full_visual_attention_mask = full_point_mask,  # [B, Np]
+        )
+        
+        reason_output = self.reason(**reason_inputs_dict)
+        head_inputs_dict = dict(fusion_feat_visual=reason_output['visual_feats'],
+                                visual_mask=reason_inputs_dict['visual_attention_mask'], 
+                                fusion_feat_language=reason_output['lang_feats'], 
+                                language_mask=reason_inputs_dict['lang_attention_mask'],
+                                fusion_feat_pooler=reason_output.get('pooler_feat',None)
+                                )
+        
+        return head_inputs_dict
+        
+    
+    
+    # def forward_reasoning(self, feat_dict, text_dict):
+    #     # Check if spatial info is present and non-empty
+    #     spatial_info = feat_dict.get('spatial_info', {})
+    #     if spatial_info.get('num_spatial_questions', 0) != 0:
+    #         raise ValueError(" DEBUG: Forward reasoning should be with disabled spatial module")
+    #     return self.reason(feat_dict, text_dict)
     
     def _log_spatial_analysis(self, spatial_info, questions):
         """Log spatial reasoning analysis for debugging."""

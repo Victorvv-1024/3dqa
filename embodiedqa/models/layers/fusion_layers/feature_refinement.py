@@ -117,7 +117,6 @@ class FeatureRefinement(nn.Module):
         
         # ============ Step 2: CRITICAL - Use FPS for Spatial Sampling ============
         # This ensures consistency with downstream bbox head
-        
         fps_indices = furthest_point_sample(points_xyz, self.vision_num_queries)  # [B, K]
         
         # Sample coordinates (same as bbox head will use)
@@ -137,7 +136,6 @@ class FeatureRefinement(nn.Module):
         
         # ============ Step 3: Dense-to-Sparse PID Guidance ============
         # Use your rich dense PID features to enhance sparse features
-        
         # Add positional encoding
         pos_embeddings = self.pos_embedding(sampled_xyz)  # [B, K, D]
         sparse_features_with_pos = pid_sampled_features + pos_embeddings

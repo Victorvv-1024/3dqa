@@ -76,6 +76,7 @@ class CrossModalityEncoder(BaseModule):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
+                
 class FusionBlock(nn.Module):
     def __init__(self, hidden_size, num_attention_heads,hidden_dropout_prob=0.1, use_full_visual_feat=True):
         super().__init__()

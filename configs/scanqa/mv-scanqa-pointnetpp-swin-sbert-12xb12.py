@@ -47,11 +47,11 @@ model = dict(
     #                      name='facebook/bart-base', 
     #                      frozen=False),
 
-    # backbone_fusion = dict(type='CrossModalityEncoder',
-    #                        hidden_size=768, 
-    #                        num_attention_heads=12,
-    #                        num_hidden_layers = 4,
-    #                        ),
+    backbone_fusion = dict(type='CrossModalityEncoder',
+                           hidden_size=768, 
+                           num_attention_heads=12,
+                           num_hidden_layers = 4,
+                           ),
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -167,10 +167,10 @@ test_pipeline = [
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels'])
 ]
 
-
+BATCH_SIZE = 6 # 12
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
-    batch_size=12, # 12
+    batch_size=BATCH_SIZE,
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -190,7 +190,7 @@ train_dataloader = dict(
                               box_type_3d='Depth',
                               remove_dontcare=True)))
 
-val_dataloader = dict(batch_size=12, # 12
+val_dataloader = dict(batch_size=BATCH_SIZE,
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,
@@ -207,7 +207,7 @@ val_dataloader = dict(batch_size=12, # 12
                                    filter_empty_gt=True,
                                    box_type_3d='Depth',
                                    remove_dontcare=True))
-test_dataloader = dict(batch_size=12, # 12
+test_dataloader = dict(batch_size=BATCH_SIZE,
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,
@@ -240,7 +240,7 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 # optimizer
-lr = 1e-4
+lr = 5e-5 # 1e-4
 optim_wrapper = dict(
                      type='OptimWrapper',
                      optimizer=dict(type='AdamW', lr=lr, weight_decay=1e-5),
@@ -250,7 +250,7 @@ optim_wrapper = dict(
                             'text_encoder': dict(lr_mult=0.1),
                          }),
                      clip_grad=dict(max_norm=10, norm_type=2),
-                     accumulative_counts=1)
+                     accumulative_counts=1)  # 1
 # learning rate
 param_scheduler = [
     # 在 [0, max_epochs) Epoch时使用余弦学习率
