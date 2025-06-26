@@ -45,12 +45,11 @@ class TextViewFusion(nn.Module):
         
         B, Np, d_model = Z_V.shape
         
-        # Step 1: Expand text to view space (like expanding point features)
-        text_expanded = Z_T.unsqueeze(1).expand(B, Np, d_model)  # [B, Np, 768]
-        
-        # Step 2: Cross-attention (exactly like point-view)
+        # Cross-attention
         text_attended, _ = self.synergy_detector(
-            query=text_expanded, key=Z_V, value=Z_V
+            query=Z_V, 
+            key=Z_T, 
+            value=Z_T
         )  # [B, Np, 768]
         
         # Step 3: Synergy fusion (exactly like point-view)

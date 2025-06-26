@@ -27,7 +27,7 @@ class UniquenessLoss(nn.Module):
             uni_modal_representations: List of [Z_P, Z_V, Z_T] tensors
                 - Z_P: [B, Np, D_fus] Point features
                 - Z_V: [B, Np, D_fus] View features  
-                - Z_T: [B, D_fus] Text features
+                - Z_T: [B, L, D_fus] Text features
                 
         Returns:
             torch.Tensor: Raw uniqueness loss scalar
@@ -117,71 +117,3 @@ class UniquenessLoss(nn.Module):
         return {
             'uniqueness_loss': orthogonality_loss,
         }
-
-
-class LossComputation(nn.Module):
-    """
-    Enhanced loss computation with simple PID regularization and raw uniqueness loss.
-    """
-    
-    def __init__(self, 
-                 # Simple PID weights
-                 orthogonality_weight=1.0,
-                 # Raw uniqueness weight
-                 raw_uniqueness_weight=0.2):
-        super().__init__()
-        
-        self.pid_loss = UniquenessLoss()
-        
-        # Loss weights
-        self.orthogonality_weight = orthogonality_weight
-        self.raw_uniqueness_weight = raw_uniqueness_weight
-        
-    def forward(self, 
-                qa_loss: torch.Tensor,
-                feat_dict: dict,
-                **kwargs) -> tuple:
-        """
-        Simple loss computation with mathematically grounded PID regularization.
-        """
-        
-        # Base loss
-        total_loss = qa_loss
-        loss_dict = {'qa_loss': qa_loss}
-        
-        # PID components
-        if feat_dict.get('component_weights') is not None:
-            component_weights = feat_dict['component_weights']
-        else:
-            raise ValueError("component_weights must be provided in feat_dict")
-        
-        if feat_dict.get('component_dict') is not None:
-            component_dict = feat_dict['component_dict']
-        else:
-            raise ValueError("component_dict must be provided in feat_dict")
-        
-        # Simple PID regularization
-        pid_losses = self.pid_loss.compute_simple_pid_loss(component_dict, component_weights)
-        
-        # Add PID losses with weights
-        total_loss += self.orthogonality_weight * pid_losses['uniqueness_loss']
-
-        # Uni-modal representations for raw uniqueness loss
-        uni_modal_representations = [
-            feat_dict.get('Z_P', None),
-            feat_dict.get('Z_V', None),
-            feat_dict.get('Z_T', None)
-        ]
-        
-        # Compute raw uniqueness loss
-        raw_uniqueness_loss = self.pid_loss.compute_raw_uniqueness_loss(uni_modal_representations)
-        
-        # Add raw uniqueness loss with weight
-        total_loss += self.raw_uniqueness_weight * raw_uniqueness_loss
-
-        # Add to loss dict for monitoring
-        loss_dict.update(pid_losses)
-        loss_dict['raw_uniqueness_loss'] = raw_uniqueness_loss
-        loss_dict['total_loss'] = total_loss
-
-        return total_loss, loss_dict

@@ -352,12 +352,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
         raw_view_feats = visible_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
-        raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
+        # raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
+        raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
         
         # 2. Uni-modal representation space
         Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
         Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, D_fus] = [12, 1024, 768]
-        Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
+        # Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
+        Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
         # Store features in the dictionary
         feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 768]
