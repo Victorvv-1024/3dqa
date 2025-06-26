@@ -397,7 +397,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # }
         
         # 5. Unified PID Fusion
-        Z_final, fusion_weights, component_dict = self.unified_pid_fusion(
+        Z_final, component_dict = self.unified_pid_fusion(
             Z_T, Z_V, Z_P,
             Z_TV, Z_PV, Z_PT,
             # geometric_context=geometric_context,
@@ -406,7 +406,6 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]
-        feat_dict['component_weights'] = fusion_weights # [B, 8], 8 PID components
         feat_dict['component_dict'] = component_dict  # Dictionary of components
         # feat_dict['spatial_info'] = spatial_info  # Spatial information
 
@@ -549,22 +548,24 @@ class MultiViewVLMBase3DQA(BaseModel):
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
             losses.update(situation_predict_loss)
             
-        if feat_dict.get('component_weights') is not None:
-            component_weights = feat_dict['component_weights']
-        if feat_dict.get('component_dict') is not None:
-            component_dict = feat_dict['component_dict']
+        # if feat_dict.get('component_weights') is not None:
+        #     component_weights = feat_dict['component_weights']
+        # if feat_dict.get('component_dict') is not None:
+        #     component_dict = feat_dict['component_dict']
+            
         # Simple PID regularization
-        pid_losses = self.uniq_loss.compute_simple_pid_loss(component_dict, component_weights)
-        losses.update(pid_losses)  # This adds all individual loss components from the dictionary
-        # Uni-modal representations for raw uniqueness loss
-        uni_modal_representations = [
-            feat_dict.get('Z_P', None),
-            feat_dict.get('Z_V', None),
-            feat_dict.get('Z_T', None)
-        ]
-        # Compute raw uniqueness loss
-        raw_uniqueness_loss = 0.2 * self.uniq_loss.compute_raw_uniqueness_loss(uni_modal_representations)
-        losses['raw_uniqueness_loss'] = raw_uniqueness_loss
+        # pid_losses = self.uniq_loss.compute_simple_pid_loss(component_dict, component_weights)
+        # losses.update(pid_losses)  # This adds all individual loss components from the dictionary
+        # # Uni-modal representations for raw uniqueness loss
+        # uni_modal_representations = [
+        #     feat_dict.get('Z_P', None),
+        #     feat_dict.get('Z_V', None),
+        #     feat_dict.get('Z_T', None)
+        # ]
+        # # Compute raw uniqueness loss
+        # raw_uniqueness_loss = 0.2 * self.uniq_loss.compute_raw_uniqueness_loss(uni_modal_representations)
+        # losses['raw_uniqueness_loss'] = raw_uniqueness_loss
+        
         losses = self.loss_collect(losses)
         return losses
         

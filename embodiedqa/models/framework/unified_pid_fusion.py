@@ -69,6 +69,8 @@ class UniqueComponentExtractor(nn.Module):
             nn.LayerNorm(fusion_dim)
         )
         
+        self.synergy_removal_strength = nn.Parameter(torch.tensor(0.3))
+        
     def forward(self, modality_features, synergy_features_list, modality_type):
         """ unique extraction with orthogonalization."""
         if modality_type == 'text':
@@ -99,7 +101,8 @@ class UniqueComponentExtractor(nn.Module):
             attended_synergies = attended_synergies.reshape(B, N, D)
             
             # Extract unique by removing synergy components
-            unique_features = processed_features - 0.3 * attended_synergies
+            alpha = torch.sigmoid(self.synergy_removal_strength)  # ∈ [0, 1]
+            unique_features = processed_features - alpha * attended_synergies
         else:
             unique_features = processed_features
         
@@ -215,8 +218,8 @@ class UnifiedAdaptivePIDFusion(nn.Module):
         self.fusion_dim = fusion_dim
         
         # component extractors
-        self.enhanced_unique_extractor = UniqueComponentExtractor(fusion_dim)
-        self.enhanced_higher_order_extractor = HigherOrderExtractor(fusion_dim)
+        self.unique_extractor = UniqueComponentExtractor(fusion_dim)
+        self.higher_order_extractor = HigherOrderExtractor(fusion_dim)
         
         # Improved question-adaptive weighting
         self.component_importance_predictor = nn.Sequential(
@@ -273,25 +276,28 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             component_dict: Dict - All 8 PID components for loss computation
         """
         # Extract unique information
-        Z_P_unique = self.enhanced_unique_extractor(Z_P, [Z_PV, Z_PT], 'point')
-        Z_V_unique = self.enhanced_unique_extractor(Z_V, [Z_PV, Z_TV], 'view')
-        Z_T_unique = self.enhanced_unique_extractor(Z_T, [Z_TV, Z_PT], 'text')
+        Z_P_unique = self.unique_extractor(Z_P, [Z_PV, Z_PT], 'point')
+        Z_V_unique = self.unique_extractor(Z_V, [Z_PV, Z_TV], 'view')
+        Z_T_unique = self.unique_extractor(Z_T, [Z_TV, Z_PT], 'text')
 
         # HIGHER-ORDER EXTRACTION
-        Z_redundant, Z_higher_synergy = self.enhanced_higher_order_extractor(Z_TV, Z_PV, Z_PT)
+        Z_redundant, Z_higher_synergy = self.higher_order_extractor(Z_TV, Z_PV, Z_PT)
         
         # COMPONENT WEIGHTING
         if question_features is not None:
             if question_features.dim() == 3:  # [B, L, D] - sequence features
                 # Use attention pooling instead of mean pooling
                 question_context = self.question_pooler(question_features)  # [B, D]
-            else: # Already pooled [B, D]
+            else:  # Already pooled [B, D]
                 question_context = question_features
         else:
             raise ValueError("question_features must be provided for adaptive fusion.")
         
         # Predict component importance
         fusion_weights = self.component_importance_predictor(question_context)  # [B, 8]
+        component_dict.update({
+            'fusion_weights': fusion_weights
+        })
 
         # Prepare component dictionary
         component_dict = {
@@ -306,33 +312,15 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             'component_importance': fusion_weights  # For loss computation
         }
         
-        # Stack all components for weighted fusion
-        all_components = torch.stack([
-            Z_P_unique, Z_V_unique, Z_T_unique,
-            Z_PV, Z_TV, Z_PT,
-            Z_redundant, Z_higher_synergy
-        ], dim=1)  # [B, 8, N, D]
-        
-        # Apply question-adaptive weights
-        weighted_components = torch.sum(
-            fusion_weights.unsqueeze(-1).unsqueeze(-1) * all_components, 
-            dim=1
-        )  # [B, N, D]
-        
-        # Concatenate all components for final processing
-        components_concat = torch.cat([
-            Z_P_unique, Z_V_unique, Z_T_unique,
-            Z_PV, Z_TV, Z_PT,
-            Z_redundant, Z_higher_synergy
-        ], dim=-1)  # [B, N, 8*D]
+        weighted_components_list = []
+        for i, component in enumerate([Z_P_unique, Z_V_unique, Z_T_unique, Z_PV, Z_TV, Z_PT, Z_redundant, Z_higher_synergy]):
+            weight = fusion_weights[:, i:i+1].unsqueeze(-1)  # [B, 1, 1]
+            weighted_component = weight * component           # [B, N, D]
+            weighted_components_list.append(weighted_component)
+            
+        # Concatenate pre-weighted components
+        components_concat = torch.cat(weighted_components_list, dim=-1)  # [B, N, 8*D]
         
         Z_final = self.final_fusion(components_concat)  # [B, N, D]
-        
-        # Residual connection with weighted combination
-        Z_final = 0.7 * Z_final + 0.3 * weighted_components
-        
-        component_dict.update({
-            'fusion_weights': fusion_weights
-        })
-        
-        return Z_final, fusion_weights, component_dict
+
+        return Z_final, component_dict
