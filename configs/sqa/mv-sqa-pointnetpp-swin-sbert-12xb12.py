@@ -13,7 +13,8 @@ classes = ('cabinet', 'bed', 'chair', 'sofa', 'table', 'door',
             'window','bookshelf','picture', 'counter', 'desk', 'curtain',
             'refrigerator', 'shower curtain', 'toilet', 'sink', 'bathtub', 'others')
 model = dict(
-    type='MultiViewVLMBase3DQA',
+    # type='MultiViewVLMBase3DQA',
+    type='DSPNet3DQA',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM

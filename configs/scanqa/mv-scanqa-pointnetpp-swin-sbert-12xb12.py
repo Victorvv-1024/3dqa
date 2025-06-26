@@ -13,7 +13,11 @@ classes = ('cabinet', 'bed', 'chair', 'sofa', 'table', 'door',
             'window','bookshelf','picture', 'counter', 'desk', 'curtain',
             'refrigerator', 'shower curtain', 'toilet', 'sink', 'bathtub', 'others')
 model = dict(
-    type='MultiViewVLMBase3DQA',
+    # Model selection:
+    # 'MultiViewVLMBase3DQA' - Advanced framework with PID regularization and uniqueness loss
+    # 'DSPNet3DQA' - Baseline DSPNet model
+    # type='MultiViewVLMBase3DQA',
+    type='DSPNet3DQA',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM

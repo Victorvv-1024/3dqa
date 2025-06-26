@@ -29,7 +29,7 @@ from .text_view_fusion import TextViewFusion
 from .unified_pid_fusion import UnifiedAdaptivePIDFusion, CrossOverEnhancedUnifiedPIDFusion
 from .spatial_reason import SpatialReason
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
-from embodiedqa.models.losses import LossComputation
+from embodiedqa.models.losses import UniquenessLoss
 import traceback
 
 
@@ -194,13 +194,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         self.reason = MODELS.build(backbone_fusion)
         
+        self.uniq_loss = UniquenessLoss()  # Uniqueness loss for PID components
         # self.reason = FeatureRefinement(
         #     hidden_dim=self.D_fus,
         #     vision_num_queries=256,
         # )
-        
-        # Enhanced loss computation, includes spatial losses and PID regularization
-        self.loss_computation = LossComputation()
          
     @property
     def with_qa_head(self):
@@ -547,7 +545,24 @@ class MultiViewVLMBase3DQA(BaseModel):
         if self.with_situation_predict_head:
             fusion_feat = qa_losses['fusion_feat']
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
-            losses.update(situation_predict_loss)  
+            losses.update(situation_predict_loss)
+            
+        if feat_dict.get('component_weights') is not None:
+            component_weights = feat_dict['component_weights']
+        if feat_dict.get('component_dict') is not None:
+            component_dict = feat_dict['component_dict']
+        # Simple PID regularization
+        pid_losses = self.uniq_loss.compute_simple_pid_loss(component_dict, component_weights)
+        losses.update(pid_losses)  # This adds all individual loss components from the dictionary
+        # Uni-modal representations for raw uniqueness loss
+        uni_modal_representations = [
+            feat_dict.get('Z_P', None),
+            feat_dict.get('Z_V', None),
+            feat_dict.get('Z_T', None)
+        ]
+        # Compute raw uniqueness loss
+        raw_uniqueness_loss = 0.2 * self.uniq_loss.compute_raw_uniqueness_loss(uni_modal_representations)
+        losses['raw_uniqueness_loss'] = raw_uniqueness_loss
         losses = self.loss_collect(losses)
         return losses
         

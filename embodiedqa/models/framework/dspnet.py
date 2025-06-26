@@ -37,8 +37,8 @@ class PositionEmbeddingLearned(BaseModule):
         position_embedding = self.position_embedding_head(xyz)
         return position_embedding.transpose(1, 2).contiguous()
 @MODELS.register_module()
-class MultiViewVLMBase3DQA(BaseModel):
-    """MultiViewVLMBase3DQA.
+class DSPNet3DQA(BaseModel):
+    """DSPNet3DQA (Baseline model).
 
     Args:
         backbone (dict): Config dict of detector's backbone.
@@ -222,7 +222,7 @@ class MultiViewVLMBase3DQA(BaseModel):
                 projection.append(intrinsic @ extrinsic)
             all_extrinsics.append(img.new_tensor(proj_mat['extrinsic']))#n_views,4,4
             proj_mat = torch.stack(projection)#n_views,4,4
-            points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            _, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
                 img_meta,
                 img_features=img_features[-1][idx],
                 points=feat_dict['fp_xyz'][-1][idx],
