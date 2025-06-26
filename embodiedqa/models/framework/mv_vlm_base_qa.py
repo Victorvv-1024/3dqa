@@ -158,13 +158,13 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         
         # Spatial Reasoning
-        self.spatial_reason = SpatialReason(
-            fusion_dim=self.D_fus,      # 768
-        )
-        if hasattr(self, 'spatial_reason'):
-            for param in self.spatial_reason.parameters():
-                param.requires_grad = False
-            print("🔧 Spatial reasoning module frozen for testing")
+        # self.spatial_reason = SpatialReason(
+        #     fusion_dim=self.D_fus,      # 768
+        # )
+        # if hasattr(self, 'spatial_reason'):
+        #     for param in self.spatial_reason.parameters():
+        #         param.requires_grad = False
+        #     print("🔧 Spatial reasoning module frozen for testing")
         
         # Unified Adaptive PID Fusion
         # self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
@@ -363,7 +363,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Store features in the dictionary
         feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 768]
-        feat_dict['Z_T'] = Z_T  # [B, D_fus] = [12, 768]
+        feat_dict['Z_T'] = Z_T  # [B, L, D_fus] = [12, 14, 768]
         
         # 3. Bi-modal representation space
         Z_TV = self.tv_fusion(Z_T, Z_V)  # [B, Np, Di] = [12, 1024, 768]
@@ -387,28 +387,28 @@ class MultiViewVLMBase3DQA(BaseModel):
         # )
         
         # Create dummy/minimal spatial context
-        B, N, D = Z_PV.shape
-        geometric_context = torch.zeros(B, N, D, device=Z_PV.device, dtype=Z_PV.dtype)
-        spatial_info = {
-            'spatial_mask': torch.zeros(B, device=Z_PV.device, dtype=torch.bool),
-            'superpoint_labels': torch.zeros(B, N, device=Z_PV.device, dtype=torch.long),
-            'num_spatial_questions': 0,
-            'num_superpoints_per_sample': [0] * B
-        }
+        # B, N, D = Z_PV.shape
+        # geometric_context = torch.zeros(B, N, D, device=Z_PV.device, dtype=Z_PV.dtype)
+        # spatial_info = {
+        #     'spatial_mask': torch.zeros(B, device=Z_PV.device, dtype=torch.bool),
+        #     'superpoint_labels': torch.zeros(B, N, device=Z_PV.device, dtype=torch.long),
+        #     'num_spatial_questions': 0,
+        #     'num_superpoints_per_sample': [0] * B
+        # }
         
         # 5. Unified PID Fusion
         Z_final, fusion_weights, component_dict = self.unified_pid_fusion(
             Z_T, Z_V, Z_P,
             Z_TV, Z_PV, Z_PT,
-            geometric_context=geometric_context,
-            spatial_info=spatial_info,
-            question_features =text_dict['text_feats'],  # [B, L, D_fus]
+            # geometric_context=geometric_context,
+            # spatial_info=spatial_info,
+            question_features=text_dict['text_feats'],  # [B, L, D_fus]
         )
         
         feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['component_weights'] = fusion_weights # [B, 8], 8 PID components
         feat_dict['component_dict'] = component_dict  # Dictionary of components
-        feat_dict['spatial_info'] = spatial_info  # Spatial information
+        # feat_dict['spatial_info'] = spatial_info  # Spatial information
 
         return feat_dict
 

@@ -22,7 +22,7 @@ class TextViewFusion(nn.Module):
         # Exact same pattern as point-view
         self.synergy_detector = nn.MultiheadAttention(
             embed_dim=fusion_dim,
-            num_heads=8,
+            num_heads=12,
             batch_first=True
         )
         

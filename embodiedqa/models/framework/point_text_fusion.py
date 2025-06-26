@@ -26,11 +26,11 @@ class PointTextFusion(nn.Module):
         
         # Bidirectional attention for true P-T synergy
         self.point_to_text_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
+            embed_dim=fusion_dim, num_heads=12, dropout=0.1, batch_first=True
         )
         
         self.text_to_point_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim, num_heads=8, dropout=0.1, batch_first=True
+            embed_dim=fusion_dim, num_heads=12, dropout=0.1, batch_first=True
         )
         
         # View-mediated context integration

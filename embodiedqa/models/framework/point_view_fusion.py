@@ -9,7 +9,7 @@ class PointViewFusion(nn.Module):
         # Synergy detector (captures I(P,V) - I(P) - I(V))
         self.synergy_detector = nn.MultiheadAttention(
             embed_dim=fusion_dim,
-            num_heads=8,
+            num_heads=12,
             batch_first=True
         )
         
