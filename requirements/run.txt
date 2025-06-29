@@ -7,3 +7,14 @@ transformers
 numba
 tqdm
 einops
+
+# mmcv-full==2.2.0
+# mmdet>=3.0.0 
+# mmengine>=0.10.0
+# ninja
+# pytorch3d
+# transformers>=4.38.0 
+# numba
+# tqdm
+# einops
+# torch-scatter 

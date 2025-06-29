@@ -16,13 +16,21 @@ class TextViewFusion(nn.Module):
     Z_TV = I_synergy(T, V; Y) where T and V are in same representation space
     """
     
-    def __init__(self, fusion_dim=768):
+    def __init__(self, fusion_dim=768, dropout=0.1):
         super().__init__()
+        
+        # Convert text features to point-level representation
+        self.text_to_point_broadcaster = nn.Sequential(
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
         
         # Exact same pattern as point-view
         self.synergy_detector = nn.MultiheadAttention(
             embed_dim=fusion_dim,
-            num_heads=12,
+            num_heads=8,
             batch_first=True
         )
         
@@ -36,7 +44,7 @@ class TextViewFusion(nn.Module):
         Minimal implementation exactly like point-view fusion.
         
         Args:
-            Z_T: [B, L, 768] -  Text in representation space
+            Z_T: [B, 768] -  Text in representation space
             Z_V: [B, Np, 768] - View features in representation space
             
         Returns:
@@ -44,6 +52,8 @@ class TextViewFusion(nn.Module):
         """
         
         B, Np, d_model = Z_V.shape
+        
+        Z_T = self.text_to_point_broadcaster(Z_T).unsqueeze(1).expand(-1, Np, -1)  # [B, Np, 768]
         
         # Cross-attention
         text_attended, _ = self.synergy_detector(

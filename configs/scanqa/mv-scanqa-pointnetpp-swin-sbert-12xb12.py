@@ -16,8 +16,8 @@ model = dict(
     # Model selection:
     # 'MultiViewVLMBase3DQA' - Advanced framework with PID regularization and uniqueness loss
     # 'DSPNet3DQA' - Baseline DSPNet model
-    # type='MultiViewVLMBase3DQA',
-    type='DSPNet3DQA',
+    type='MultiViewVLMBase3DQA',
+    # type='DSPNet3DQA',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM
@@ -244,7 +244,7 @@ val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 # optimizer
-lr = 5e-5 # 1e-4
+lr = (1e-4) * (BATCH_SIZE / 12)  # 12 is the base batch size, scale lr according to batch size
 optim_wrapper = dict(
                      type='OptimWrapper',
                      optimizer=dict(type='AdamW', lr=lr, weight_decay=1e-5),

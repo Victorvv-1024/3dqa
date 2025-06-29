@@ -248,10 +248,10 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             nn.LayerNorm(fusion_dim)
         )
         
-        # question pooler
+        # Question pooler for attention-based pooling [B, L, D] -> [B, D]
         self.question_pooler = nn.Sequential(
-            nn.Linear(fusion_dim, 1),
-            nn.Softmax(dim=1) # Attention weights over sequence length
+            nn.Linear(fusion_dim, 1),  # [B, L, D] -> [B, L, 1]
+            nn.Softmax(dim=1)  # Attention weights over sequence length
         )
         
     def forward(self, 
@@ -286,18 +286,16 @@ class UnifiedAdaptivePIDFusion(nn.Module):
         # COMPONENT WEIGHTING
         if question_features is not None:
             if question_features.dim() == 3:  # [B, L, D] - sequence features
-                # Use attention pooling instead of mean pooling
-                question_context = self.question_pooler(question_features)  # [B, D]
+                # Use attention pooling: compute attention weights and weighted average
+                attention_weights = self.question_pooler(question_features)  # [B, L, 1]
+                question_context = torch.sum(question_features * attention_weights, dim=1)  # [B, D]
             else:  # Already pooled [B, D]
                 question_context = question_features
         else:
             raise ValueError("question_features must be provided for adaptive fusion.")
         
         # Predict component importance
-        fusion_weights = self.component_importance_predictor(question_context)  # [B, 8]
-        component_dict.update({
-            'fusion_weights': fusion_weights
-        })
+        # fusion_weights = self.component_importance_predictor(question_context)  # [B, 8]
 
         # Prepare component dictionary
         component_dict = {
@@ -309,17 +307,18 @@ class UnifiedAdaptivePIDFusion(nn.Module):
             'Z_PT_synergy': Z_PT,
             'Z_redundant': Z_redundant,
             'Z_higher_synergy': Z_higher_synergy,
-            'component_importance': fusion_weights  # For loss computation
+            # 'component_importance': fusion_weights  # For loss computation
         }
-        
-        weighted_components_list = []
-        for i, component in enumerate([Z_P_unique, Z_V_unique, Z_T_unique, Z_PV, Z_TV, Z_PT, Z_redundant, Z_higher_synergy]):
-            weight = fusion_weights[:, i:i+1].unsqueeze(-1)  # [B, 1, 1]
-            weighted_component = weight * component           # [B, N, D]
-            weighted_components_list.append(weighted_component)
+        component_list = list(component_dict.values())
+        components_concat = torch.cat(component_list, dim=-1)
+        # weighted_components_list = []
+        # for i, component in enumerate([Z_P_unique, Z_V_unique, Z_T_unique, Z_PV, Z_TV, Z_PT, Z_redundant, Z_higher_synergy]):
+        #     weight = fusion_weights[:, i:i+1].unsqueeze(-1)  # [B, 1, 1]
+        #     weighted_component = weight * component           # [B, N, D]
+        #     weighted_components_list.append(weighted_component)
             
         # Concatenate pre-weighted components
-        components_concat = torch.cat(weighted_components_list, dim=-1)  # [B, N, 8*D]
+        # components_concat = torch.cat(weighted_components_list, dim=-1)  # [B, N, 8*D]
         
         Z_final = self.final_fusion(components_concat)  # [B, N, D]
 

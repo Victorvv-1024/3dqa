@@ -7,33 +7,33 @@ from torch import Tensor
 from torch import nn as nn
 from torch.nn import functional as F
 import numpy as np
-import open3d as o3d
+# import open3d as o3d
 from embodiedqa.structures.bbox_3d import (batch_points_cam2img,
                                              points_cam2img, points_img2cam)
 from embodiedqa.structures.points import get_points_type
 import shutil
 visualization = False
-def save_point_cloud_with_visibility(points,  visibility_mask, visibility_mask_rgb, filename,views_points=None):
-    colors = np.zeros((points.shape[0], 3))
-    colors[visibility_mask_rgb.cpu()] = [1, 0, 0]# red for visible of camera points
-    colors[~visibility_mask_rgb.cpu()] = [1, 1, 1]  # White for invisible of camera points
-    colors[visibility_mask.cpu()] = [0, 0, 1]  # blue for visible points
-    colors[(visibility_mask&visibility_mask_rgb).cpu()] = [0, 1, 0]
+# def save_point_cloud_with_visibility(points,  visibility_mask, visibility_mask_rgb, filename,views_points=None):
+#     colors = np.zeros((points.shape[0], 3))
+#     colors[visibility_mask_rgb.cpu()] = [1, 0, 0]# red for visible of camera points
+#     colors[~visibility_mask_rgb.cpu()] = [1, 1, 1]  # White for invisible of camera points
+#     colors[visibility_mask.cpu()] = [0, 0, 1]  # blue for visible points
+#     colors[(visibility_mask&visibility_mask_rgb).cpu()] = [0, 1, 0]
 
-    if views_points is not None:
-        view_colors = np.tile([0.5, 0.5, 0], (views_points.shape[0], 1))  # view points
+#     if views_points is not None:
+#         view_colors = np.tile([0.5, 0.5, 0], (views_points.shape[0], 1))  # view points
 
-        all_points = np.vstack((points.cpu().numpy(), views_points[...,:3].cpu().numpy()))
-        all_colors = np.vstack((colors, view_colors))
-    else:
-        all_points = points.cpu().numpy()
-        all_colors = colors
+#         all_points = np.vstack((points.cpu().numpy(), views_points[...,:3].cpu().numpy()))
+#         all_colors = np.vstack((colors, view_colors))
+#     else:
+#         all_points = points.cpu().numpy()
+#         all_colors = colors
 
-    point_cloud = o3d.geometry.PointCloud()
-    point_cloud.points = o3d.utility.Vector3dVector(all_points)
-    point_cloud.colors = o3d.utility.Vector3dVector(all_colors)
+#     point_cloud = o3d.geometry.PointCloud()
+#     point_cloud.points = o3d.utility.Vector3dVector(all_points)
+#     point_cloud.colors = o3d.utility.Vector3dVector(all_colors)
 
-    o3d.io.write_point_cloud(filename, point_cloud)
+#     o3d.io.write_point_cloud(filename, point_cloud)
 
 
 def hash_coords(coords, grid_min, grid_max):

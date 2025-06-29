@@ -12,23 +12,23 @@ import matplotlib.pyplot as plt
 from mmengine.model import BaseModel,BaseModule
 from mmengine.structures import InstanceData
 from mmcv.ops import furthest_point_sample,gather_points
-from embodiedqa.models.layers.fusion_layers.point_fusion import (
-    batch_point_sample, point_sample, batch_point_sample_in_visible, visible_sample)
+from embodiedqa.models.layers.fusion_layers.point_fusion import visible_sample
 from embodiedqa.registry import MODELS
 from embodiedqa.structures.bbox_3d import get_proj_mat_by_coord_type
 from embodiedqa.utils import ConfigType, OptConfigType
 from embodiedqa.utils.typing_config import (ForwardResults, InstanceList,
                                               OptSampleList, SampleList)
-import open3d as o3d
+# import open3d as o3d
 import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .text_view_fusion import TextViewFusion
 # from .pid import PIDEnhancement
 # from .adaptive_fusion import AdaptiveTrimodalFusion
-from .unified_pid_fusion import UnifiedAdaptivePIDFusion, CrossOverEnhancedUnifiedPIDFusion
-from .spatial_reason import SpatialReason
+from .unified_pid_fusion import UnifiedAdaptivePIDFusion
+from .tri_modal_fusion import TrimodalFusion
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
+from .reason import SpatialFeatureEncoder
 from embodiedqa.models.losses import UniquenessLoss
 import traceback
 
@@ -157,25 +157,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_dim=self.D_fus,  # 768
         )
         
-        # Spatial Reasoning
-        # self.spatial_reason = SpatialReason(
-        #     fusion_dim=self.D_fus,      # 768
-        # )
-        # if hasattr(self, 'spatial_reason'):
-        #     for param in self.spatial_reason.parameters():
-        #         param.requires_grad = False
-        #     print("🔧 Spatial reasoning module frozen for testing")
-        
-        # Unified Adaptive PID Fusion
-        # self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
-        #     fusion_dim=self.D_fus,  # 768
-        #     hidden_dim=256,
-        #     dropout=0.1
-        # )
         self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
             fusion_dim=self.D_fus,  # 768
             hidden_dim=256,
             dropout=0.1
+        )
+        
+        # Tri-modal fusion
+        self.tri_modal_fusion = TrimodalFusion(
+            fusion_dim=self.D_fus, # 768
+            hidden_dim=256,  # Hidden dimension for intermediate layers
+            dropout=0.1,  # Dropout rate for regularization
         )
         
         # Reasoning
@@ -191,14 +183,14 @@ class MultiViewVLMBase3DQA(BaseModel):
             nn.LayerNorm(self.D_fus),
             nn.Dropout(0.1)
         )
-        
         self.reason = MODELS.build(backbone_fusion)
         
-        self.uniq_loss = UniquenessLoss()  # Uniqueness loss for PID components
-        # self.reason = FeatureRefinement(
-        #     hidden_dim=self.D_fus,
-        #     vision_num_queries=256,
-        # )
+        # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
+        #                                     vision_num_queries=self.vision_num_queries,
+        #                                     num_transformer_layers=4,
+        #                                     num_heads=12,
+        #                                     dropout=0.1,)
+
          
     @property
     def with_qa_head(self):
@@ -352,14 +344,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
         raw_view_feats = visible_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
-        # raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
-        raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
+        raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
+        # raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
         
         # 2. Uni-modal representation space
         Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
         Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, D_fus] = [12, 1024, 768]
-        # Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
-        Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
+        Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
+        # Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
         # Store features in the dictionary
         feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 768]
@@ -379,35 +371,17 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         feat_dict['Z_PT'] = Z_PT
         
-        # 4. Spatial Reasoning
-        # geometric_context, spatial_info = self.spatial_reason(
-        #     features=Z_PV,
-        #     coordinates=feat_dict['fp_xyz'][-1],  # [B, Np, 3]
-        #     question_context=Z_T,  # [B, Np, D_fus]
-        # )
-        
-        # Create dummy/minimal spatial context
-        # B, N, D = Z_PV.shape
-        # geometric_context = torch.zeros(B, N, D, device=Z_PV.device, dtype=Z_PV.dtype)
-        # spatial_info = {
-        #     'spatial_mask': torch.zeros(B, device=Z_PV.device, dtype=torch.bool),
-        #     'superpoint_labels': torch.zeros(B, N, device=Z_PV.device, dtype=torch.long),
-        #     'num_spatial_questions': 0,
-        #     'num_superpoints_per_sample': [0] * B
-        # }
-        
-        # 5. Unified PID Fusion
-        Z_final, component_dict = self.unified_pid_fusion(
-            Z_T, Z_V, Z_P,
+        # 4. Tri-modal fusion
+        Z_fused, component_weights, component_dict = self.tri_modal_fusion(
+            # Bi-modal representations
             Z_TV, Z_PV, Z_PT,
-            # geometric_context=geometric_context,
-            # spatial_info=spatial_info,
-            question_features=text_dict['text_feats'],  # [B, L, D_fus]
+            # Uni-modal representations
+            Z_T, Z_V, Z_P,
+            # question_features=text_dict['text_global_token'],  # [B, D_fus] = [12, 768]
         )
         
-        feat_dict['Z_final'] = Z_final  # [B, Np, D_fus] = [12, 1024, 768]
+        feat_dict['Z_final'] = Z_fused  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['component_dict'] = component_dict  # Dictionary of components
-        # feat_dict['spatial_info'] = spatial_info  # Spatial information
 
         return feat_dict
 
@@ -491,10 +465,15 @@ class MultiViewVLMBase3DQA(BaseModel):
         Returns:
             dict: A dictionary of loss components.
         """
-        # 1. Feature extraction
+        # Feature extraction
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
         
+        # #  Encodes features through multiple transformer layers
+        # head_inputs_dict, point_pos = self.reason(
+        #     feat_dict=feat_dict,
+        #     text_dict=text_dict,
+        # )
         # 2. Original MCGR reasoning
         # This step is to prepare the features for the downstream heads
         points = batch_inputs_dict['points']
@@ -526,6 +505,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             full_point_feats=full_point_feats,
             full_point_pos=full_point_pos,
         )
+        
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                      ret_fusion_feat=True,
                                      batch_data_samples=batch_data_samples)
@@ -733,6 +713,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
         
+        # head_inputs_dict, _ = self.reason(
+        #     feat_dict=feat_dict,
+        #     text_dict=text_dict,
+        # )
+        
         # 2. Preparation for reasoning
         full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
         full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
@@ -939,24 +924,3 @@ class MultiViewVLMBase3DQA(BaseModel):
     #     if spatial_info.get('num_spatial_questions', 0) != 0:
     #         raise ValueError(" DEBUG: Forward reasoning should be with disabled spatial module")
     #     return self.reason(feat_dict, text_dict)
-    
-    def _log_spatial_analysis(self, spatial_info, questions):
-        """Log spatial reasoning analysis for debugging."""
-        if 'spatial_mask' in spatial_info:
-            spatial_mask = spatial_info['spatial_mask']
-            num_spatial = spatial_mask.sum().item()
-            total_questions = len(spatial_mask)
-            
-            print(f"\n=== Spatial Reasoning Analysis ===")
-            print(f"Spatial questions: {num_spatial}/{total_questions}")
-            
-            if 'superpoint_counts' in spatial_info:
-                avg_superpoints = sum(spatial_info['superpoint_counts']) / len(spatial_info['superpoint_counts'])
-                print(f"Average superpoints per sample: {avg_superpoints:.1f}")
-            
-            # Log spatial vs non-spatial questions
-            for i, (is_spatial, question) in enumerate(zip(spatial_mask, questions)):
-                question_type = "SPATIAL" if is_spatial else "NON-SPATIAL"
-                print(f"  {question_type}: {question[:50]}...")
-            
-            print("=====================================\n")
