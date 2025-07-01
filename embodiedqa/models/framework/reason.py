@@ -254,6 +254,51 @@ class SpatialFeatureEncoder(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.Dropout(dropout)
         )
+        
+        # dense to sparse 
+        self.dense_to_sparse_attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=12,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        self.spatial_semantic_fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),  # PID features + spatial features
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
+        
+        self.text_guided_visual_attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=12,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        self.visual_grounded_text_attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=12,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        self.visual_refiner = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        self.text_refiner = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
     
     def forward(self, feat_dict: Dict, text_dict: Dict) -> Dict:
 
@@ -282,48 +327,118 @@ class SpatialFeatureEncoder(nn.Module):
         
         # Process sparse features
         point_feats = self.visual_feat_map(point_feats)  # [B, K, D]
-        point_feats += self.pos_embedding(point_pos)
-        point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
-        
+        point_feats_with_pos = point_feats + self.pos_embedding(point_pos)
+        point_feats_with_pos = self.fusion_encoder_visual_pre_norm(point_feats_with_pos)
+
         #  Extract Text Features
         text_feats = text_dict['text_feats']          # [B, Lt, D]
         text_global = text_dict['text_global_token']  # [B, D]
         text_mask = text_dict['text_token_mask']      # [B, Lt]
         
-        # Multi-Layer Transformer Processing
-        # Progressive dense-to-sparse refinement with multimodal interaction
-        enhanced_visual, enhanced_text = self.transformer_refinement(
-            sparse_visual_feats=point_feats,        # [B, K, D] - Sparse queries
-            dense_visual_feats=full_point_feats,    # [B, Np, D] - Dense context
-            text_feats=text_feats,                  # [B, Lt, D] - Text features
-            text_mask=text_mask                     # [B, Lt] - Text mask
-        )
+        # Initialize features for multi-layer refinement
+        current_visual = point_feats  # [B, K, D] - Start with FPS sampled features
+        current_text = text_feats     # [B, Lt, D] - Start with original text features
         
-        # Create Pooler Feature
-        visual_global = enhanced_visual.mean(dim=1)  # [B, D]
+        # Multi-layer refinement (L=4 layers)
+        num_refinement_layers = 4
+        for layer_idx in range(num_refinement_layers):
+            # dense to sparse attention
+            enhanced_sparse_visual, _ = self.dense_to_sparse_attention(
+                query=point_feats_with_pos,  # [B, K, D] - Keep using positional features as queries
+                key=full_point_feats,         # [B, Np, D]
+                value=full_point_feats         # [B, Np, D]
+            )
+            
+            # fuse enhanced sparse visual and spatial sampled features
+            spatial_semantic_input = torch.cat([
+                current_visual,               # Current refined PID features at FPS locations
+                enhanced_sparse_visual        # PID-guided enhanced features
+            ], dim=-1)  # [B, K, 2*D]
+            visual_feats = self.spatial_semantic_fusion(spatial_semantic_input)  # [B, K, D]
+            
+            # Text visual Interaction
+            text_guided_visual, _ = self.text_guided_visual_attention(
+                query=visual_feats,
+                key=current_text,
+                value=current_text,
+                key_padding_mask=~text_mask
+            )
+            
+            visual_grounded_text, _ = self.visual_grounded_text_attention(
+                query=current_text,
+                key=visual_feats,
+                value=visual_feats
+            )
+            
+            visual_refined = self.visual_refiner(text_guided_visual)
+            refined_visual = visual_feats + visual_refined  # [B, K, D]
+            
+            text_refined = self.text_refiner(visual_grounded_text)
+            refined_text = current_text + text_refined  # [B, Lt, D]
+            
+            # Update current features for next layer
+            current_visual = refined_visual
+            current_text = refined_text
         
+        # Final refined features
+        final_visual = current_visual  # [B, K, D]
+        final_text = current_text      # [B, Lt, D]
+        
+        # create global features
+        visual_global = final_visual.mean(dim=1)  # [B, D]
         # Question-guided text pooling
         text_attention_weights = F.softmax(
-            torch.bmm(text_global.unsqueeze(1), enhanced_text.transpose(1, 2)), dim=2
+            torch.bmm(text_global.unsqueeze(1), final_text.transpose(1, 2)), dim=2
         )
-        text_global_context = torch.bmm(text_attention_weights, enhanced_text).squeeze(1)
+        text_global_context = torch.bmm(text_attention_weights, final_text).squeeze(1)
         
         # Final pooler
         pooler_feat = self.final_pooler(
             torch.cat([visual_global, text_global_context], dim=-1)
         )
         
-        # mask
-        B, K = point_feats.shape[:2]
-        visual_mask = torch.ones(B, K, dtype=torch.bool, device=point_feats.device)
-        
-        # Enhanced Features for Heads
         head_inputs_dict = {
-            'fusion_feat_visual': enhanced_visual,    # [B, K, D] - Transformer-enhanced features
-            'visual_mask': visual_mask,               # [B, K] - All FPS points valid
-            'fusion_feat_language': enhanced_text,    # [B, Lt, D] - Transformer-enhanced text
-            'language_mask': text_mask,               # [B, Lt] - Original text mask
-            'fusion_feat_pooler': pooler_feat         # [B, D]
+            'fusion_feat_visual': final_visual,        # [B, K, D] - Refined sparse visual features
+            'visual_mask': torch.ones(final_visual.shape[:2], dtype=torch.bool, device=final_visual.device),  # [B, K] - All FPS points valid
+            'fusion_feat_language': final_text,        # [B, Lt, D] - Refined text features
+            'language_mask': text_mask,                # [B, Lt] - Original text mask
+            'fusion_feat_pooler': pooler_feat          # [B, D] - Pooler feature
         }
+        
+        # # Multi-Layer Transformer Processing
+        # # Progressive dense-to-sparse refinement with multimodal interaction
+        # enhanced_visual, enhanced_text = self.transformer_refinement(
+        #     sparse_visual_feats=point_feats,        # [B, K, D] - Sparse queries
+        #     dense_visual_feats=full_point_feats,    # [B, Np, D] - Dense context
+        #     text_feats=text_feats,                  # [B, Lt, D] - Text features
+        #     text_mask=text_mask                     # [B, Lt] - Text mask
+        # )
+        
+        # # Create Pooler Feature
+        # visual_global = enhanced_visual.mean(dim=1)  # [B, D]
+        
+        # # Question-guided text pooling
+        # text_attention_weights = F.softmax(
+        #     torch.bmm(text_global.unsqueeze(1), enhanced_text.transpose(1, 2)), dim=2
+        # )
+        # text_global_context = torch.bmm(text_attention_weights, enhanced_text).squeeze(1)
+        
+        # # Final pooler
+        # pooler_feat = self.final_pooler(
+        #     torch.cat([visual_global, text_global_context], dim=-1)
+        # )
+        
+        # # mask
+        # B, K = point_feats.shape[:2]
+        # visual_mask = torch.ones(B, K, dtype=torch.bool, device=point_feats.device)
+        
+        # # Enhanced Features for Heads
+        # head_inputs_dict = {
+        #     'fusion_feat_visual': enhanced_visual,    # [B, K, D] - Transformer-enhanced features
+        #     'visual_mask': visual_mask,               # [B, K] - All FPS points valid
+        #     'fusion_feat_language': enhanced_text,    # [B, Lt, D] - Transformer-enhanced text
+        #     'language_mask': text_mask,               # [B, Lt] - Original text mask
+        #     'fusion_feat_pooler': pooler_feat         # [B, D]
+        # }
         
         return head_inputs_dict, point_pos

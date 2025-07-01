@@ -23,12 +23,11 @@ import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .text_view_fusion import TextViewFusion
-# from .pid import PIDEnhancement
-# from .adaptive_fusion import AdaptiveTrimodalFusion
 from .unified_pid_fusion import UnifiedAdaptivePIDFusion
 from .tri_modal_fusion import TrimodalFusion
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from .reason import SpatialFeatureEncoder
+from .spatial import SpatialContextModule, integrate_spatial_context
 from embodiedqa.models.losses import UniquenessLoss
 import traceback
 
@@ -170,26 +169,43 @@ class MultiViewVLMBase3DQA(BaseModel):
             dropout=0.1,  # Dropout rate for regularization
         )
         
-        # Reasoning
-        self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
-        self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
-        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
-        self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
-        self.reason_visual_pre_norm = nn.Sequential(
-            nn.LayerNorm(self.D_fus),
-            nn.Dropout(0.1)
+        self.spatial_module = SpatialContextModule(
+            fusion_dim=self.D_fus,
+            num_scales=3,
+            k_neighbors=[8, 16, 32],
+            voxel_size=0.2,
+            max_superpoints=256,
+            dropout=0.1
         )
-        self.reason_full_visual_pre_norm = nn.Sequential(
-            nn.LayerNorm(self.D_fus),
-            nn.Dropout(0.1)
-        )
-        self.reason = MODELS.build(backbone_fusion)
+        self.use_spatial_enhancement = False
+        if self.use_spatial_enhancement:
+            self.spatial_alpha_pv = 0.3  # Weight for PV enhancement
+            self.spatial_alpha_pt = 0.15  # Weight for PT enhancement
+            print("Using spatial enhancement module")
+        else:
+            print("Not using spatial enhancement module")
         
-        # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
-        #                                     vision_num_queries=self.vision_num_queries,
-        #                                     num_transformer_layers=4,
-        #                                     num_heads=12,
-        #                                     dropout=0.1,)
+        # Reasoning (using original MCGR)
+        # self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
+        # self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
+        # self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
+        # self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
+        # self.reason_visual_pre_norm = nn.Sequential(
+        #     nn.LayerNorm(self.D_fus),
+        #     nn.Dropout(0.1)
+        # )
+        # self.reason_full_visual_pre_norm = nn.Sequential(
+        #     nn.LayerNorm(self.D_fus),
+        #     nn.Dropout(0.1)
+        # )
+        # self.reason = MODELS.build(backbone_fusion)
+        
+        """Try to Replace MCGR"""        
+        self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
+                                            vision_num_queries=self.vision_num_queries,
+                                            num_transformer_layers=4,
+                                            num_heads=12,
+                                            dropout=0.1,)
 
          
     @property
@@ -371,10 +387,28 @@ class MultiViewVLMBase3DQA(BaseModel):
         )
         feat_dict['Z_PT'] = Z_PT
         
+        if self.use_spatial_enhancement:
+            # 3.5 spatial context
+            coordinates = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+            question_features = text_dict['text_global_token']  # [B, D_fus] = [12, 768]
+            
+            spatial_results = self.spatial_module(
+                coordinates=coordinates,
+                question_features=question_features,
+            )
+            
+            # integrate spatial context into the bi-modal synergies
+            feat_dict = integrate_spatial_context(
+                feat_dict,
+                spatial_results,
+                alpha_pv=self.spatial_alpha_pv,  # Weight for PV enhancement
+                alpha_pt=self.spatial_alpha_pt,  # Weight for PT enhancement
+            )
+        
         # 4. Tri-modal fusion
         Z_fused, component_weights, component_dict = self.tri_modal_fusion(
-            # Bi-modal representations
-            Z_TV, Z_PV, Z_PT,
+            # Bi-modal representations (now with spatially enhanced features)
+            Z_TV, feat_dict['Z_PV'], feat_dict['Z_PT'],
             # Uni-modal representations
             Z_T, Z_V, Z_P,
             # question_features=text_dict['text_global_token'],  # [B, D_fus] = [12, 768]
@@ -469,42 +503,42 @@ class MultiViewVLMBase3DQA(BaseModel):
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
         
-        # #  Encodes features through multiple transformer layers
-        # head_inputs_dict, point_pos = self.reason(
-        #     feat_dict=feat_dict,
-        #     text_dict=text_dict,
-        # )
+        #  Encodes features through multiple transformer layers
+        head_inputs_dict, point_pos = self.reason(
+            feat_dict=feat_dict,
+            text_dict=text_dict,
+        )
         # 2. Original MCGR reasoning
         # This step is to prepare the features for the downstream heads
         points = batch_inputs_dict['points']
         B = len(points) # batch size
         losses = {}
         
-        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
-        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
-        # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
-        # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
-        point_mask = None
+        # full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        # full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        # # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
+        # # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
+        # point_mask = None
         
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
+        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
         
-        # gather_points expects [B, C, N] format, so we need to transpose
-        # full_point_feats: [B, Np, D_fus] -> [B, D_fus, Np] -> gather -> [B, D_fus, Nq] -> [B, Nq, D_fus]
-        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        # # gather_points expects [B, C, N] format, so we need to transpose
+        # # full_point_feats: [B, Np, D_fus] -> [B, D_fus, Np] -> gather -> [B, D_fus, Nq] -> [B, Nq, D_fus]
+        # point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
         
-        # full_point_pos: [B, Np, 3] -> [B, 3, Np] -> gather -> [B, 3, Nq] -> [B, Nq, 3]
-        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
-        # print(f'point_feats shape: {point_feats.shape}') # [B, Nq, D_fus] = [12, 256, 768]
-        # print(f'point_pos shape: {point_pos.shape}') # [B, Nq, 3] = [12, 256, 3]
+        # # full_point_pos: [B, Np, 3] -> [B, 3, Np] -> gather -> [B, 3, Nq] -> [B, Nq, 3]
+        # point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        # # print(f'point_feats shape: {point_feats.shape}') # [B, Nq, D_fus] = [12, 256, 768]
+        # # print(f'point_pos shape: {point_pos.shape}') # [B, Nq, 3] = [12, 256, 3]
         
-        head_inputs_dict = self.forward_reasoning(
-            point_feats=point_feats,
-            point_pos=point_pos,
-            point_mask=point_mask,
-            text_dict=text_dict,
-            full_point_feats=full_point_feats,
-            full_point_pos=full_point_pos,
-        )
+        # head_inputs_dict = self.forward_reasoning(
+        #     point_feats=point_feats,
+        #     point_pos=point_pos,
+        #     point_mask=point_mask,
+        #     text_dict=text_dict,
+        #     full_point_feats=full_point_feats,
+        #     full_point_pos=full_point_pos,
+        # )
         
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                      ret_fusion_feat=True,
@@ -528,138 +562,17 @@ class MultiViewVLMBase3DQA(BaseModel):
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
             losses.update(situation_predict_loss)
             
-        # if feat_dict.get('component_weights') is not None:
-        #     component_weights = feat_dict['component_weights']
-        # if feat_dict.get('component_dict') is not None:
-        #     component_dict = feat_dict['component_dict']
-            
-        # Simple PID regularization
-        # pid_losses = self.uniq_loss.compute_simple_pid_loss(component_dict, component_weights)
-        # losses.update(pid_losses)  # This adds all individual loss components from the dictionary
-        # # Uni-modal representations for raw uniqueness loss
-        # uni_modal_representations = [
-        #     feat_dict.get('Z_P', None),
-        #     feat_dict.get('Z_V', None),
-        #     feat_dict.get('Z_T', None)
-        # ]
-        # # Compute raw uniqueness loss
-        # raw_uniqueness_loss = 0.2 * self.uniq_loss.compute_raw_uniqueness_loss(uni_modal_representations)
-        # losses['raw_uniqueness_loss'] = raw_uniqueness_loss
+        # optioal spatial consistency loss
+        if self.use_spatial_enhancement and 'superpoint_labels' in feat_dict:
+            # Compute spatial consistency loss
+            spatial_consistency_loss = self.compute_spatial_consistency_loss(
+                feat_dict['Z_final'],
+                feat_dict['superpoint_labels']
+            )
+            losses['spatial_consistency_loss'] = spatial_consistency_loss
         
         losses = self.loss_collect(losses)
         return losses
-        
-        # head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
-        
-        # # ============ Step 3: Standard QA Loss ============
-        # qa_losses = self.qa_head.loss(**head_inputs_dict,
-        #                             ret_fusion_feat=True,
-        #                             batch_data_samples=batch_data_samples)
-        
-        # standard_qa_loss = qa_losses['qa_cls_loss']
-        
-        # # ============ Step 4: Extract Information for Enhanced Loss ============
-        # questions = [sample.question for sample in batch_data_samples]
-        
-        # # ============ Step 5: Compute Enhanced Loss with Spatial Reasoning ============
-        # total_loss, loss_dict = self.loss_computation(
-        #     qa_loss=standard_qa_loss,
-        #     feat_dict=feat_dict,
-        #     # component_dict=feat_dict['component_dict'],
-        #     # component_weights=feat_dict['fusion_weights'],
-        #     # spatial_info=feat_dict['spatial_info'],
-        #     # Z_final=feat_dict['Z_final'],
-        # )
-        
-        # # ============ Step 6: Add Other Standard Losses ============ 
-        # losses = {'loss': total_loss}  # Main loss for backprop
-        
-        # # Add individual loss components for monitoring
-        # losses.update(loss_dict)
-        
-        # # Target classification loss  
-        # if self.with_target_cls_head:
-        #     fusion_feat = qa_losses['fusion_feat']
-        #     ref_cls_loss = self.target_cls_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
-            
-        #     cls_loss_value = ref_cls_loss['ref_cls_loss']
-        #     total_loss += cls_loss_value
-        #     losses['loss'] = total_loss
-            
-        #     losses.update(ref_cls_loss)
-        
-        # # Target bbox loss
-        # if self.with_target_bbox_head:
-        #     proposal_coordinates = head_inputs_dict['sampled_coordinates']
-            
-        #     ref_loc_losses = self.target_bbox_head.loss(
-        #         **{k: v for k, v in head_inputs_dict.items() 
-        #             if k not in ['fps_indices', 'sampled_coordinates']},
-        #         points=batch_inputs_dict['points'],
-        #         aggregated_points=proposal_coordinates,
-        #         batch_data_samples=batch_data_samples
-        #     )
-            
-        #     bbox_loss_value = ref_loc_losses['ref_loc_loss']
-        #     total_loss += bbox_loss_value
-        #     losses['loss'] = total_loss
-            
-        #     losses.update(ref_loc_losses)
-        
-        # # Situation prediction loss
-        # if self.with_situation_predict_head:
-        #     fusion_feat = qa_losses['fusion_feat']
-        #     situation_predict_loss = self.situation_predict_head.loss(fusion_feat, batch_data_samples=batch_data_samples)
-            
-        #     situation_loss_value = situation_predict_loss['situation_predict_loss']
-        #     total_loss += situation_loss_value
-        #     losses['loss'] = total_loss
-            
-        #     losses.update(situation_predict_loss)
-            
-        # # ============ Step 8: Final Loss Collection ============
-        # losses = self.loss_collect(losses)
-        
-        
-        # ============ Step 7: Spatial Analysis (Optional, for debugging) ============
-        # if hasattr(self, 'training') and self.training and kwargs.get('step', 0) % 100 == 0:
-        #     spatial_info = feat_dict['spatial_info']
-        #     questions = [sample.question for sample in batch_data_samples]
-        #     analysis = {
-        #         'spatial_routing': spatial_info,
-        #         'questions': questions,
-        #         'superpoint_statistics': {},
-        #         'geometric_analysis': {}
-        #     }
-        #     self._log_spatial_analysis(feat_dict['spatial_info'], questions)
-        #     # Analyze superpoint quality
-        #     if 'superpoint_labels' in spatial_info:
-        #         superpoint_labels = spatial_info['superpoint_labels']
-        #         B, N = superpoint_labels.shape
-                
-        #         for b in range(B):
-        #             unique_sps = torch.unique(superpoint_labels[b])
-        #             sp_sizes = []
-        #             for sp_id in unique_sps:
-        #                 if sp_id != -1:
-        #                     sp_size = (superpoint_labels[b] == sp_id).sum().item()
-        #                     sp_sizes.append(sp_size)
-                    
-        #             stats = {
-        #                 'num_superpoints': len(sp_sizes),
-        #                 'avg_superpoint_size': sum(sp_sizes) / len(sp_sizes) if sp_sizes else 0,
-        #                 'superpoint_sizes': sp_sizes
-        #             }
-        #             analysis['superpoint_statistics'][f'sample_{b}'] = stats
-                    
-        #             # Print superpoint statistics
-        #             print(f"Sample {b}: {stats['num_superpoints']} superpoints, "
-        #                   f"avg size: {stats['avg_superpoint_size']:.1f}, "
-        #                   f"sizes: {sp_sizes[:5]}{'...' if len(sp_sizes) > 5 else ''}")
-                    
-        
-        # return losses
-
         
     def loss_collect(self, losses_dict):
         """
@@ -713,28 +626,28 @@ class MultiViewVLMBase3DQA(BaseModel):
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
         
-        # head_inputs_dict, _ = self.reason(
-        #     feat_dict=feat_dict,
-        #     text_dict=text_dict,
-        # )
+        head_inputs_dict, _ = self.reason(
+            feat_dict=feat_dict,
+            text_dict=text_dict,
+        )
         
         # 2. Preparation for reasoning
-        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
-        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
-        point_mask = None
-        B = full_point_feats.shape[0]  # batch size
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
-        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        # full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        # full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        # point_mask = None
+        # B = full_point_feats.shape[0]  # batch size
+        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+        # point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        # point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
         
-        head_inputs_dict = self.forward_reasoning(
-            point_feats=point_feats,
-            point_pos=point_pos,
-            point_mask=point_mask,
-            text_dict=text_dict,
-            full_point_feats=full_point_feats,
-            full_point_pos=full_point_pos,
-        )
+        # head_inputs_dict = self.forward_reasoning(
+        #     point_feats=point_feats,
+        #     point_pos=point_pos,
+        #     point_mask=point_mask,
+        #     text_dict=text_dict,
+        #     full_point_feats=full_point_feats,
+        #     full_point_pos=full_point_pos,
+        # )
         results_list = self.qa_head.predict(**head_inputs_dict,
                                      batch_data_samples=batch_data_samples)
         for data_sample, pred_scores in zip(batch_data_samples,
@@ -742,20 +655,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_scores = pred_scores
             
         return batch_data_samples 
-        
-        
-        # ============ Step 2: Use Same Feature Refinement as Training ============
-        # CRITICAL: Use the same forward_reasoning pipeline as in loss()
-        # head_inputs_dict = self.forward_reasoning(feat_dict, text_dict)
-        
-        # ============ Step 3: QA Predictions ============
-        # qa_predictions = self.qa_head.predict(**head_inputs_dict, batch_data_samples=batch_data_samples)
-        
-        # for data_sample, pred_scores in zip(batch_data_samples, qa_predictions):
-        #     data_sample.pred_scores = pred_scores
-
-        
-        # return batch_data_samples
         
     def forward(self,
                 inputs: Union[dict, List[dict]],
@@ -876,7 +775,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             data_sample.pred_instances = data_instances_2d[i]
         return data_samples
     
-    
     def forward_reasoning(self,
                             point_feats: Tensor,
                             point_pos: Tensor,
@@ -916,11 +814,80 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         return head_inputs_dict
         
-    
-    
-    # def forward_reasoning(self, feat_dict, text_dict):
-    #     # Check if spatial info is present and non-empty
-    #     spatial_info = feat_dict.get('spatial_info', {})
-    #     if spatial_info.get('num_spatial_questions', 0) != 0:
-    #         raise ValueError(" DEBUG: Forward reasoning should be with disabled spatial module")
-    #     return self.reason(feat_dict, text_dict)
+    def compute_spatial_consistency_loss(self, features, superpoint_labels):
+        """Vectorized spatial consistency loss computation."""
+        B, N, D = features.shape
+        device = features.device
+        
+        # Create a mask for valid superpoints (not -1)
+        valid_mask = (superpoint_labels != -1)  # [B, N]
+        
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        
+        total_loss = 0.0
+        valid_batches = 0
+        
+        # Process each batch (unavoidable due to different superpoint structures)
+        for b in range(B):
+            feat = features[b]  # [N, D]
+            labels = superpoint_labels[b]  # [N]
+            batch_valid_mask = valid_mask[b]  # [N]
+            
+            if not batch_valid_mask.any():
+                continue
+                
+            # Get valid labels and features
+            valid_labels = labels[batch_valid_mask]  # [N_valid]
+            valid_features = feat[batch_valid_mask]  # [N_valid, D]
+            
+            # Get unique superpoint IDs
+            unique_labels, inverse_indices = torch.unique(valid_labels, return_inverse=True)
+            num_superpoints = len(unique_labels)
+            
+            if num_superpoints == 0:
+                continue
+                
+            # Vectorized computation of superpoint means
+            # Create one-hot encoding for superpoints
+            sp_one_hot = F.one_hot(inverse_indices, num_classes=num_superpoints).float()  # [N_valid, num_sp]
+            
+            # Compute superpoint sizes
+            sp_sizes = sp_one_hot.sum(dim=0)  # [num_sp]
+            
+            # Filter out superpoints with size < 2
+            valid_sp_mask = (sp_sizes >= 2)
+            
+            if not valid_sp_mask.any():
+                continue
+                
+            # Keep only valid superpoints
+            sp_one_hot = sp_one_hot[:, valid_sp_mask]  # [N_valid, num_valid_sp]
+            sp_sizes = sp_sizes[valid_sp_mask]  # [num_valid_sp]
+            
+            # Vectorized mean computation
+            # sp_means: [num_valid_sp, D]
+            sp_means = torch.matmul(sp_one_hot.t(), valid_features) / sp_sizes.unsqueeze(1)
+            
+            # Vectorized variance computation
+            # Expand means to match point dimensions: [N_valid, num_valid_sp, D]
+            expanded_means = sp_means.unsqueeze(0).expand(valid_features.size(0), -1, -1)
+            
+            # Expand features: [N_valid, num_valid_sp, D]
+            expanded_features = valid_features.unsqueeze(1).expand(-1, sp_means.size(0), -1)
+            
+            # Expand membership mask: [N_valid, num_valid_sp]
+            membership_mask = sp_one_hot  # Already correct shape
+            
+            # Compute squared differences only for members
+            sq_diff = ((expanded_features - expanded_means) ** 2) * membership_mask.unsqueeze(2)  # [N_valid, num_valid_sp, D]
+            
+            # Sum over points and dimensions, then divide by superpoint sizes
+            sp_variances = sq_diff.sum(dim=[0, 2]) / sp_sizes  # [num_valid_sp]
+            
+            # Average variance across all valid superpoints
+            batch_loss = sp_variances.mean()
+            total_loss += batch_loss
+            valid_batches += 1
+        
+        return total_loss / max(valid_batches, 1)

@@ -171,7 +171,7 @@ test_pipeline = [
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels'])
 ]
 
-BATCH_SIZE = 6 # 12
+BATCH_SIZE = 8 # 12
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
     batch_size=BATCH_SIZE,
@@ -211,7 +211,7 @@ val_dataloader = dict(batch_size=BATCH_SIZE,
                                    filter_empty_gt=True,
                                    box_type_3d='Depth',
                                    remove_dontcare=True))
-test_dataloader = dict(batch_size=BATCH_SIZE,
+test_dataloader = dict(batch_size=12,
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,
@@ -219,8 +219,10 @@ test_dataloader = dict(batch_size=BATCH_SIZE,
                       sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
                       dataset=dict(type=dataset_type,
                                    data_root=data_root,
+                                   # test w object
                                    ann_file='mv_scannetv2_infos_val.pkl',
                                    qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+                                    # test w/o object
                                 #    ann_file='mv_scannetv2_infos_test.pkl',
                                 #    qa_file='qa/ScanQA_v1.0_test_wo_obj.json',
                                    metainfo = dict(classes=classes),
