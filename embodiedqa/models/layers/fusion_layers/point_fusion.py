@@ -753,7 +753,7 @@ def visible_sample(img_meta: dict,
     )  # Output: [Mp, Di, 1, Np]
     
     point_features = point_features.squeeze(2)  # [Mp, Di, Np]
-    
+   
     if valid_flag:
         # Step 7: Compute geometric validity masks
         
@@ -777,27 +777,24 @@ def visible_sample(img_meta: dict,
         # Zero out features for invalid points
         point_features_filtered = point_features * valid.float().unsqueeze(1)  # [Mp, Di, Np]
         
-        # Step 9: Multi-view aggregation via simple averaging
-        # Count valid views per point
+        # Step 9: Preserve multi-view structure instead of aggregation
+        # Transpose to get [Np, Mp, Di] format
+        clean_features = point_features_filtered.permute(2, 0, 1)  # [Np, Mp, Di]
+        raw_features = point_features.permute(2, 0, 1)  # [Np, Mp, Di] - before validity filtering
+        
+        # Create point validity mask - points visible in at least one view
         valid_num = valid.sum(dim=0)  # [Np] - number of valid views per point
-        
-        # Aggregate features across views (simple averaging, NO attention)
-        clean_features = point_features_filtered.sum(dim=0).t()  # [Np, Di]
-        raw_features = point_features.sum(dim=0).t()  # [Np, Di] - before validity filtering
-        
-        # Normalize by number of valid views
-        clean_features = clean_features / torch.clamp(valid_num[:, None], min=1)
-        
-        # Zero out features for points with no valid views
         point_valid = valid_num > 0  # [Np] - points visible in at least one view
-        clean_features[~point_valid, :] = 0.0
+        
+        # Zero out features for points with no valid views across all views
+        clean_features[~point_valid, :, :] = 0.0
         
         if return_valid_flag:
             return raw_features, clean_features, point_valid, valid  # Also return per-view validity
         else:
-            return clean_features  # [Np, Di]
+            return clean_features  # [Np, Mp, Di]
     
     else:
-        # No validity filtering - just aggregate across views
-        clean_features = point_features.sum(dim=0).t()  # [Np, Di]
+        # No validity filtering - just preserve multi-view structure
+        clean_features = point_features.permute(2, 0, 1)  # [Np, Mp, Di]
         return clean_features

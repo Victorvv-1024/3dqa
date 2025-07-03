@@ -18,61 +18,22 @@ class TrimodalFusion(nn.Module):
     2. Maintains bi-modal synergies (Z_TV, Z_PV, Z_PT) from existing pipeline
     3. Captures tri-modal redundancy and higher-order synergies
     4. Question-adaptive weighting of all PID components
-    5. Ensures mathematical consistency with PID theory
+    5. Learnable temperature for adaptive weighting
     """
     
-    def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1, 
-                 # Input dimensions for unimodal components
-                 text_input_dim=768,    # From text encoder (sentence-bert)
-                 view_input_dim=1024,   # From image encoder (swin)  
-                 point_input_dim=256,   # From 3D encoder (pointnet++)
-                 # Input dimensions for bi-modal components (existing)
-                 tv_input_dim=1024, pv_input_dim=768, pt_input_dim=768):
+    def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1):
         super().__init__()
         
         self.fusion_dim = fusion_dim
         self.hidden_dim = hidden_dim
         
-        # Text mapping
-        # self.text_global_att_proj = nn.Sequential(nn.Linear(fusion_dim,fusion_dim),
-        #                                             nn.LayerNorm(fusion_dim))
-
-        # ==================== UNIMODAL COMPONENT ALIGNMENT ====================
-        # Project unimodal features to common fusion space
-        # These capture I_unique(T), I_unique(V), I_unique(P)
         
-        # self.text_unimodal_proj = nn.Sequential(
-        #     nn.Linear(text_input_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout),
-        #     nn.Linear(fusion_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim)
-        # )
-        
-        # self.view_unimodal_proj = nn.Sequential(
-        #     nn.Linear(view_input_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout),
-        #     nn.Linear(fusion_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim)
-        # )
-        
-        # self.point_unimodal_proj = nn.Sequential(
-        #     nn.Linear(point_input_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout),
-        #     nn.Linear(fusion_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim)
-        # )
-        
-        # ==================== BI-MODAL COMPONENT ALIGNMENT (EXISTING) ====================
-        # Handle different input dimensions for bi-modal synergies
-        # self.tv_alignment = nn.Linear(tv_input_dim, fusion_dim)  # 1024 → 768
-        # self.pv_alignment = nn.Linear(pv_input_dim, fusion_dim)  # 768 → 768 (identity)
-        # self.pt_alignment = nn.Linear(pt_input_dim, fusion_dim)  # 768 → 768 (identity)
+        # unique information extraction
+        self.unique_extractors = nn.ModuleDict({
+            'point': self._build_unique_extractor(),
+            'view': self._build_unique_extractor(), 
+            'text': self._build_unique_extractor()
+        })
         
 
         # Convert text features to point-level representation
@@ -84,23 +45,23 @@ class TrimodalFusion(nn.Module):
         )
         
         # Querstion -> PID component weighting
-        # self.question_analyzer = nn.Sequential(
-        #     nn.Linear(fusion_dim, hidden_dim),
-        #     nn.LayerNorm(hidden_dim),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout),
-        #     nn.Linear(hidden_dim, hidden_dim),
-        #     nn.LayerNorm(hidden_dim)
-        # )
+        self.question_analyzer = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
         # Learn which PID patterns to emphasize based on question type
-        # self.pid_pattern_router = nn.Sequential(
-        #     nn.Linear(hidden_dim, hidden_dim // 2),
-        #     nn.LayerNorm(hidden_dim // 2),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout),
-        #     nn.Linear(hidden_dim // 2, 8),  # 8 weights: redundancy, uniqueness, synergy
-        #     nn.Softmax(dim=-1)
-        # )
+        self.pid_pattern_router = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 8),  # 8 weights: redundancy, uniqueness, synergy
+            nn.Softmax(dim=-1)
+        )
         
         
         # Learn importance of all 8 PID components:
@@ -206,33 +167,22 @@ class TrimodalFusion(nn.Module):
             component_dict: Dict with all PID components for analysis
         """
         B, Np, _ = Z_PV.shape
-        
-        # ==================== UNIMODAL COMPONENT PROCESSING ====================
-        # Extract unique information from each modality
-        
-        # Text unique information: I_unique(T)
-        Z_T_pointwise = self.text_to_point_broadcaster(Z_T).unsqueeze(1).expand(-1, Np, -1)  # [B, Np, fusion_dim]
-        
-        # View unique information: I_unique(V)
-        # Z_V contains the unique information
-        
-        # Point unique information: I_unique(P)
-        # Z_P contains the unique information
-        
-        # BI-MODAL COMPONENT MAPPING
-        # Process existing bi-modal synergies
-        # Z_TV_aligned = self.tv_alignment(Z_TV)  # [B, Np, fusion_dim]
-        # Z_PV_aligned = self.pv_alignment(Z_PV)  # [B, Np, fusion_dim]
-        # Z_PT_aligned = self.pt_alignment(Z_PT)  # [B, Np, fusion_dim]
+        # Unique Components
+        Z_P_unique = Z_P
+        # For Z_V_unique, we take the simple mean across views. This represents the
+        # general visual appearance at a point, without guidance from P or T.
+        Z_V_unique = Z_V.mean(dim=2)  # [B, D]
+        # Expand global text feature to match spatial dimensions
+        Z_T_unique = Z_T.unsqueeze(1).expand(-1, Np, -1)
         
         # REDUNDANCY AND HIGHER-ORDER SYNERGY
         # Detect information shared across all three modalities
-        trimodal_concat = torch.cat([Z_T_pointwise, Z_V, Z_P], dim=-1)  # [B, Np, 3*fusion_dim]
+        trimodal_concat = torch.cat([Z_T_unique, Z_V_unique, Z_P_unique], dim=-1)  # [B, Np, 3*fusion_dim]
         Z_redundant = self.redundancy_detector(trimodal_concat)  # [B, Np, fusion_dim]
         
         # Detect higher-order synergies beyond bi-modal interactions
         all_components_concat = torch.cat([
-            Z_T_pointwise, Z_V, Z_P, 
+            Z_T_unique, Z_V_unique, Z_P_unique, 
             Z_TV, Z_PV, Z_PT
         ], dim=-1)  # [B, Np, 6*fusion_dim]
         Z_higher_synergy = self.higher_synergy_detector(all_components_concat)  # [B, Np, fusion_dim]
@@ -367,3 +317,149 @@ class TrimodalFusion(nn.Module):
         analysis['trimodal_ratio'] = (avg_weights[6] + avg_weights[7]).item()
         
         return analysis
+
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# from mmengine.model import BaseModule
+# from embodiedqa.registry import MODELS
+# from torch import Tensor
+# from typing import Dict, Tuple
+
+# @MODELS.register_module()
+# class TrimodalFusion(BaseModule):
+#     """
+#     Fuses all modalities using a PID-inspired framework with adaptive weighting.
+
+#     This module correctly handles multi-view features [B, Np, M, D] and
+#     implements a complete, interpretable fusion strategy.
+
+#     Process:
+#     1.  **PID Component Assembly:** It assembles 8 components of information:
+#         - 3 Unique: Z_P, Z_V_unique (mean-pooled), Z_T
+#         - 3 Bi-modal Synergies: Z_PV, Z_TV, Z_PT (from previous modules)
+#         - 1 Redundancy & 1 Higher-Order Synergy (calculated from unique/synergies)
+#     2.  **Adaptive Weighting:** It uses the question (Z_T) to predict a set of 8
+#         weights, one for each PID component.
+#     3.  **Final Fusion:** It computes the final representation as a weighted sum
+#         of all 8 components, creating a robust and context-aware output.
+#     """
+
+#     def __init__(self,
+#                  fusion_dim: int = 768,
+#                  hidden_dim: int = 256,
+#                  dropout: float = 0.1,
+#                  init_cfg=None):
+#         super().__init__(init_cfg=init_cfg)
+#         self.fusion_dim = fusion_dim
+
+#         # --- Higher-Order Component Detectors ---
+#         self.redundancy_detector = nn.Sequential(
+#             nn.Linear(fusion_dim * 3, hidden_dim),  # T, V, P concatenated
+#             nn.LayerNorm(hidden_dim),
+#             nn.GELU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
+        
+#         self.higher_synergy_detector = nn.Sequential(
+#             nn.Linear(fusion_dim * 6, hidden_dim),  # All 6 components
+#             nn.LayerNorm(hidden_dim),
+#             nn.GELU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
+
+#         # --- Adaptive Weight Predictor ---
+#         self.weight_predictor = nn.Sequential(
+#             nn.Linear(fusion_dim, hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, 8)  # Predict 8 weights
+#         )
+#         self.temperature = nn.Parameter(torch.tensor(1.0)) # For sharpening weights
+
+#         # --- Final Fusion Layer ---
+#         self.final_proj = nn.Sequential(
+#             nn.Linear(fusion_dim, fusion_dim),
+#             nn.GELU(),
+#             nn.LayerNorm(fusion_dim)
+#         )
+
+#     def forward(self,
+#                 Z_TV: Tensor, Z_PV: Tensor, Z_PT: Tensor,
+#                 Z_T: Tensor, Z_V: Tensor, Z_P: Tensor,
+#                 question_features: Tensor
+#                 ) -> Tuple[Tensor, Tensor, Dict[str, Tensor]]:
+#         """
+#         Args:
+#             Z_TV (Tensor): Text-View synergy [B, Np, D].
+#             Z_PV (Tensor): Point-View synergy [B, Np, D].
+#             Z_PT (Tensor): Point-Text synergy [B, Np, D].
+#             Z_T (Tensor): Global text feature [B, D].
+#             Z_V (Tensor): Multi-view features [B, Np, M, D].
+#             Z_P (Tensor): Point features [B, Np, D].
+#             question_features (Tensor): The original question features [B, D] or [B, L, D]
+#                                         for adaptive weighting.
+
+#         Returns:
+#             Z_fused (Tensor): The final fused output [B, Np, D].
+#             pid_weights (Tensor): The learned weights for each component [B, 8].
+#             pid_components (Dict): A dictionary of all calculated PID components.
+#         """
+#         B, Np, M, D = Z_V.shape
+        
+#         # --- 1. PID Component Assembly ---
+        
+#         # Unique Components: Defined as the "purest" form of each modality.
+#         Z_P_unique = Z_P
+#         # For Z_V_unique, we take the simple mean across views. This represents the
+#         # general visual appearance at a point, without guidance from P or T.
+#         Z_V_unique = Z_V.mean(dim=2)
+#         # Expand global text feature to match spatial dimensions
+#         Z_T_unique = Z_T.unsqueeze(1).expand(-1, Np, -1)
+
+#         # Bi-modal Synergies are passed in directly: Z_TV, Z_PV, Z_PT
+
+#         # Higher-Order Components
+#         redundancy_input = torch.cat([Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
+#         Z_redundant = self.redundancy_detector(redundancy_input)
+
+#         higher_synergy_input = torch.cat([Z_PV, Z_TV, Z_PT, Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
+#         Z_higher_synergy = self.higher_synergy_detector(higher_synergy_input)
+
+#         # Assemble all 8 components into a single tensor for weighting
+#         pid_components_tensor = torch.stack([
+#             Z_T_unique, Z_V_unique, Z_P_unique,
+#             Z_TV, Z_PV, Z_PT,
+#             Z_redundant, Z_higher_synergy
+#         ], dim=2)  # Shape: [B, Np, 8, D]
+
+#         # --- 2. Adaptive Weighting ---
+#         if question_features.dim() == 3:
+#             question_global = question_features.mean(dim=1)
+#         else:
+#             question_global = question_features
+            
+#         raw_weights = self.weight_predictor(question_global)  # Shape: [B, 8]
+#         pid_weights = F.softmax(raw_weights / self.temperature, dim=-1) # Shape: [B, 8]
+
+#         # --- 3. Final Fusion ---
+#         weights_expanded = pid_weights.unsqueeze(1).unsqueeze(-1) # Shape: [B, 1, 8, 1]
+        
+#         # Perform the weighted sum of all components
+#         weighted_sum = (pid_components_tensor * weights_expanded).sum(dim=2) # Shape: [B, Np, D]
+
+#         # Final projection and residual connection for stability
+#         Z_fused = self.final_proj(weighted_sum) + Z_P # Residual from original points
+
+#         # --- Prepare output dictionary for analysis ---
+#         pid_components_dict = {
+#             'Z_T_unique': Z_T_unique, 'Z_V_unique': Z_V_unique, 'Z_P_unique': Z_P_unique,
+#             'Z_TV_synergy': Z_TV, 'Z_PV_synergy': Z_PV, 'Z_PT_synergy': Z_PT,
+#             'Z_redundant': Z_redundant, 'Z_higher_synergy': Z_higher_synergy
+#         }
+
+#         return Z_fused, pid_weights, pid_components_dict

@@ -156,12 +156,6 @@ class MultiViewVLMBase3DQA(BaseModel):
             fusion_dim=self.D_fus,  # 768
         )
         
-        self.unified_pid_fusion = UnifiedAdaptivePIDFusion(
-            fusion_dim=self.D_fus,  # 768
-            hidden_dim=256,
-            dropout=0.1
-        )
-        
         # Tri-modal fusion
         self.tri_modal_fusion = TrimodalFusion(
             fusion_dim=self.D_fus, # 768
@@ -186,26 +180,26 @@ class MultiViewVLMBase3DQA(BaseModel):
             print("Not using spatial enhancement module")
         
         # Reasoning (using original MCGR)
-        # self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
-        # self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
-        # self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
-        # self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
-        # self.reason_visual_pre_norm = nn.Sequential(
-        #     nn.LayerNorm(self.D_fus),
-        #     nn.Dropout(0.1)
-        # )
-        # self.reason_full_visual_pre_norm = nn.Sequential(
-        #     nn.LayerNorm(self.D_fus),
-        #     nn.Dropout(0.1)
-        # )
-        # self.reason = MODELS.build(backbone_fusion)
+        self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
+        self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
+        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
+        self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
+        self.reason_visual_pre_norm = nn.Sequential(
+            nn.LayerNorm(self.D_fus),
+            nn.Dropout(0.1)
+        )
+        self.reason_full_visual_pre_norm = nn.Sequential(
+            nn.LayerNorm(self.D_fus),
+            nn.Dropout(0.1)
+        )
+        self.reason = MODELS.build(backbone_fusion)
         
         """Try to Replace MCGR"""        
-        self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
-                                            vision_num_queries=self.vision_num_queries,
-                                            num_transformer_layers=4,
-                                            num_heads=12,
-                                            dropout=0.1,)
+        # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
+        #                                     vision_num_queries=self.vision_num_queries,
+        #                                     num_transformer_layers=4,
+        #                                     num_heads=12,
+        #                                     dropout=0.1,)
 
          
     @property
@@ -351,7 +345,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             
             visible_imgfeats.append(visible_imgfeat)  # still list of tensors
 
-        visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, Di
+        visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, M, Di
         all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
 
         """ 
@@ -359,18 +353,18 @@ class MultiViewVLMBase3DQA(BaseModel):
         """
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
-        raw_view_feats = visible_imgfeats  # [B, Np, Di] = [12, 1024, 1024]
+        raw_view_feats = visible_imgfeats  # [B, Np, M, Di] = [12, 1024, 20, 1024]
         raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
         # raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
         
         # 2. Uni-modal representation space
         Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
-        Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, D_fus] = [12, 1024, 768]
+        Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, M, D_fus] = [12, 1024, 20, 768]
         Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
         # Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
         # Store features in the dictionary
         feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
-        feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 768]
+        feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 20, 768]
         feat_dict['Z_T'] = Z_T  # [B, L, D_fus] = [12, 14, 768]
         
         # 3. Bi-modal representation space
@@ -411,7 +405,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             Z_TV, feat_dict['Z_PV'], feat_dict['Z_PT'],
             # Uni-modal representations
             Z_T, Z_V, Z_P,
-            # question_features=text_dict['text_global_token'],  # [B, D_fus] = [12, 768]
+            question_features=text_dict['text_global_token'],  # [B, D_fus] = [12, 768]
         )
         
         feat_dict['Z_final'] = Z_fused  # [B, Np, D_fus] = [12, 1024, 768]
@@ -504,41 +498,41 @@ class MultiViewVLMBase3DQA(BaseModel):
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
         
         #  Encodes features through multiple transformer layers
-        head_inputs_dict, point_pos = self.reason(
-            feat_dict=feat_dict,
-            text_dict=text_dict,
-        )
+        # head_inputs_dict, point_pos = self.reason(
+        #     feat_dict=feat_dict,
+        #     text_dict=text_dict,
+        # )
         # 2. Original MCGR reasoning
         # This step is to prepare the features for the downstream heads
         points = batch_inputs_dict['points']
         B = len(points) # batch size
         losses = {}
         
-        # full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
-        # full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
-        # # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
-        # # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
-        # point_mask = None
+        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
+        # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
+        point_mask = None
         
-        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
+        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
         
-        # # gather_points expects [B, C, N] format, so we need to transpose
-        # # full_point_feats: [B, Np, D_fus] -> [B, D_fus, Np] -> gather -> [B, D_fus, Nq] -> [B, Nq, D_fus]
-        # point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        # gather_points expects [B, C, N] format, so we need to transpose
+        # full_point_feats: [B, Np, D_fus] -> [B, D_fus, Np] -> gather -> [B, D_fus, Nq] -> [B, Nq, D_fus]
+        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
         
-        # # full_point_pos: [B, Np, 3] -> [B, 3, Np] -> gather -> [B, 3, Nq] -> [B, Nq, 3]
-        # point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
-        # # print(f'point_feats shape: {point_feats.shape}') # [B, Nq, D_fus] = [12, 256, 768]
-        # # print(f'point_pos shape: {point_pos.shape}') # [B, Nq, 3] = [12, 256, 3]
+        # full_point_pos: [B, Np, 3] -> [B, 3, Np] -> gather -> [B, 3, Nq] -> [B, Nq, 3]
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        # print(f'point_feats shape: {point_feats.shape}') # [B, Nq, D_fus] = [12, 256, 768]
+        # print(f'point_pos shape: {point_pos.shape}') # [B, Nq, 3] = [12, 256, 3]
         
-        # head_inputs_dict = self.forward_reasoning(
-        #     point_feats=point_feats,
-        #     point_pos=point_pos,
-        #     point_mask=point_mask,
-        #     text_dict=text_dict,
-        #     full_point_feats=full_point_feats,
-        #     full_point_pos=full_point_pos,
-        # )
+        head_inputs_dict = self.forward_reasoning(
+            point_feats=point_feats,
+            point_pos=point_pos,
+            point_mask=point_mask,
+            text_dict=text_dict,
+            full_point_feats=full_point_feats,
+            full_point_pos=full_point_pos,
+        )
         
         qa_losses = self.qa_head.loss(**head_inputs_dict,
                                      ret_fusion_feat=True,
@@ -626,28 +620,28 @@ class MultiViewVLMBase3DQA(BaseModel):
         text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
         feat_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict=text_dict)
         
-        head_inputs_dict, _ = self.reason(
-            feat_dict=feat_dict,
-            text_dict=text_dict,
-        )
+        # head_inputs_dict, _ = self.reason(
+        #     feat_dict=feat_dict,
+        #     text_dict=text_dict,
+        # )
         
         # 2. Preparation for reasoning
-        # full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
-        # full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
-        # point_mask = None
-        # B = full_point_feats.shape[0]  # batch size
-        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        # point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
-        # point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        point_mask = None
+        B = full_point_feats.shape[0]  # batch size
+        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
         
-        # head_inputs_dict = self.forward_reasoning(
-        #     point_feats=point_feats,
-        #     point_pos=point_pos,
-        #     point_mask=point_mask,
-        #     text_dict=text_dict,
-        #     full_point_feats=full_point_feats,
-        #     full_point_pos=full_point_pos,
-        # )
+        head_inputs_dict = self.forward_reasoning(
+            point_feats=point_feats,
+            point_pos=point_pos,
+            point_mask=point_mask,
+            text_dict=text_dict,
+            full_point_feats=full_point_feats,
+            full_point_pos=full_point_pos,
+        )
         results_list = self.qa_head.predict(**head_inputs_dict,
                                      batch_data_samples=batch_data_samples)
         for data_sample, pred_scores in zip(batch_data_samples,
