@@ -9,6 +9,7 @@ from .simple_distillation import SimpleDistillationLoss, AdaptiveDistillationLos
 # from .pid_regularization import EnhancedLossComputation, PIDRegularizationLoss
 # from .contrastive_loss import LossComputation
 from .uniqueness import UniquenessLoss
+from .pid_loss import PIDLosses
 
 
 __all__ = [
@@ -16,4 +17,4 @@ __all__ = [
     'BBox3DL1Cost', 'IoU3DCost', 'BinaryFocalLossCost',
     'ChamferDistance','chamfer_distance', 'GeometryGuidedDistillationLoss',
     'UncertaintyWeightingLayer', 'SimpleDistillationLoss', 'AdaptiveDistillationLoss',
-    'UniquenessLoss']
+    'UniquenessLoss', 'PIDLosses',]

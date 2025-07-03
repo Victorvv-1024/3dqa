@@ -28,7 +28,7 @@ from .tri_modal_fusion import TrimodalFusion
 from embodiedqa.models.layers.fusion_layers import FeatureRefinement
 from .reason import SpatialFeatureEncoder
 from .spatial import SpatialContextModule, integrate_spatial_context
-from embodiedqa.models.losses import UniquenessLoss
+from embodiedqa.models.losses import PIDLosses
 import traceback
 
 
@@ -193,6 +193,9 @@ class MultiViewVLMBase3DQA(BaseModel):
             nn.Dropout(0.1)
         )
         self.reason = MODELS.build(backbone_fusion)
+        
+        # loss module
+        self.pid_loss_module = PIDLosses(temperature=0.1)
         
         """Try to Replace MCGR"""        
         # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
@@ -556,14 +559,42 @@ class MultiViewVLMBase3DQA(BaseModel):
             situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
             losses.update(situation_predict_loss)
             
-        # optioal spatial consistency loss
-        if self.use_spatial_enhancement and 'superpoint_labels' in feat_dict:
-            # Compute spatial consistency loss
-            spatial_consistency_loss = self.compute_spatial_consistency_loss(
-                feat_dict['Z_final'],
-                feat_dict['superpoint_labels']
-            )
-            losses['spatial_consistency_loss'] = spatial_consistency_loss
+        # PID losses
+        # if 'component_dict' in feat_dict and hasattr(self, 'pid_loss_module'):
+        #     # Prepare target features for information bottleneck loss
+        #     # We can use different features depending on what's most relevant:
+            
+        #     # Option 1: Use the final fused features that go to QA head
+        #     target_features = point_feats  # [B, Nq, D_fus] - FPS sampled features
+            
+        #     # Option 2: Use the fusion features from QA head (if available)
+        #     # target_features = qa_losses.get('fusion_feat', point_feats)
+            
+        #     # Option 3: Use answer embeddings if your QA head provides them
+        #     # target_features = head_inputs_dict.get('answer_embeddings', point_feats)
+            
+        #     # Compute PID losses
+        #     pid_losses = self.pid_loss_module(
+        #         component_dict=feat_dict['component_dict'],
+        #         target_features=target_features,
+        #         loss_weights={
+        #             'uniqueness': 0.5,              # Enforce orthogonality between unique components
+        #             'redundancy_consistency': 0.5,   # Ensure redundancy is truly shared
+        #             'synergy_exclusivity': 0.3,      # Synergy should be exclusive to joint observation
+        #             'component_diversity': 0.3,      # Prevent component collapse
+        #             'information_bottleneck': 0.2,   # Components should be informative about task
+        #             'redundancy_gate': 0.1          # Regularize redundancy gates
+        #         }
+        #     )
+            
+        #     # Add individual PID losses to the loss dict for monitoring
+        #     for pid_loss_name, pid_loss_value in pid_losses.items():
+        #         if pid_loss_name != 'total_pid_loss':
+        #             losses[f'pid_{pid_loss_name}'] = pid_loss_value
+            
+        #     # Add weighted PID loss to total
+        #     # Adjust the weight (0.1) based on your needs - start small and increase if needed
+        #     losses['pid_total'] = pid_losses['total_pid_loss']
         
         losses = self.loss_collect(losses)
         return losses
