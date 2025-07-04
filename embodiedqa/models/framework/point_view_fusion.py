@@ -35,6 +35,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from mmengine.model import BaseModule
 from embodiedqa.registry import MODELS
 from torch import Tensor
@@ -42,126 +43,98 @@ from torch import Tensor
 @MODELS.register_module()
 class PointViewFusion(BaseModule):
     """
-    Fuses point cloud and multi-view features with a geometry-guided aggregation
-    and bidirectional synergy extraction.
+    Fuses raw point and multi-view features directly, preserving original feature
+    information by avoiding a unified projection layer before fusion.
 
-    This module correctly handles multi-view features of shape [B, Np, M, D].
+    This module is designed to handle inputs of different dimensions (point_dim, view_dim)
+    and fuse them into a common output dimension (fusion_dim).
 
-    Process:
-    1.  **Point-Guided View Aggregation:** For each of the Np points, its geometric
-        feature (Z_P) is used as a query to attend to its own set of M view
-        features (Z_V). This collapses the M views into a single, aggregated
-        view feature that is most relevant to that specific point's geometry.
-
-    2.  **Bidirectional Synergy Extraction:** The original point features (Z_P) and
-        the newly aggregated view features (Z_V_agg) are then fused using a
-        bidirectional cross-attention mechanism to extract the emergent,
-        synergistic information.
+    Architectural Steps:
+    1.  **Decoupled Projection for Attention:** Projects raw point and view features
+        to a common `hidden_dim` ONLY for calculating attention scores.
+    2.  **Point-Guided View Aggregation:** Uses the projected point features as a
+        query to aggregate the multi-view features. This step now uses a manual,
+        numerically stable dot-product attention to correctly handle the different
+        dimensions of the raw `value` features, preventing information loss.
+    3.  **Channel Attention for Synergy:** Concatenates the raw point features and
+        the aggregated view features. A channel attention mechanism then learns
+        to re-weight the combined feature channels.
+    4.  **Final Projection:** A final MLP fuses the re-weighted features into the
+        target output dimension.
     """
-    
     def __init__(self,
-                 fusion_dim: int = 768,
-                 num_heads: int = 8,
+                 point_dim: int,
+                 view_dim: int,
+                 fusion_dim: int,
+                 hidden_dim: int = 512,
                  dropout: float = 0.1,
                  init_cfg=None):
-        """
-        Args:
-            fusion_dim (int): The dimension of the feature space.
-            num_heads (int): Number of attention heads.
-            dropout (float): Dropout rate.
-            init_cfg (dict, optional): Initialization config dict.
-        """
         super().__init__(init_cfg=init_cfg)
-        self.fusion_dim = fusion_dim
         
-        # 1. Attention layer for Point-Guided View Aggregation
-        # This is the core of the efficient, vectorized aggregation.
-        self.view_aggregation_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.norm_agg = nn.LayerNorm(fusion_dim)
-
-        # 2. Bidirectional Cross-Attention layers for synergy
-        self.point_queries_view_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.norm1 = nn.LayerNorm(fusion_dim)
-
-        self.view_queries_point_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.norm2 = nn.LayerNorm(fusion_dim)
+        # Project raw features to a common hidden dimension for attention calculation
+        self.point_att_proj = nn.Linear(point_dim, hidden_dim)
+        self.view_att_proj = nn.Linear(view_dim, hidden_dim)
         
-        # 3. Final synergy fusion MLP
-        self.synergy_extractor = nn.Sequential(
-            nn.Linear(fusion_dim * 2, fusion_dim * 2),
-            nn.LayerNorm(fusion_dim * 2),
+        # Channel attention for fusing features of different raw dimensions
+        total_raw_dim = point_dim + view_dim
+        self.channel_attention = nn.Sequential(
+            nn.Linear(total_raw_dim, total_raw_dim // 16),
+            nn.ReLU(),
+            nn.Linear(total_raw_dim // 16, total_raw_dim),
+            nn.Sigmoid()
+        )
+        self.channel_norm = nn.LayerNorm(total_raw_dim)
+        
+        # Final synergy extractor and projection MLP
+        self.synergy_fusion = nn.Sequential(
+            nn.Linear(total_raw_dim, fusion_dim * 2),
             nn.GELU(),
+            nn.LayerNorm(fusion_dim * 2),
             nn.Dropout(dropout),
             nn.Linear(fusion_dim * 2, fusion_dim)
         )
         self.final_norm = nn.LayerNorm(fusion_dim)
         
-    def forward(self, Z_P: Tensor, Z_V: Tensor) -> Tensor:
+    def forward(self, point_features: Tensor, view_features: Tensor) -> Tensor:
         """
         Args:
-            Z_P (Tensor): Point cloud features. Shape: [B, Np, D].
-            Z_V (Tensor): Multi-view image features. Shape: [B, Np, M, D].
+            point_features (Tensor): Raw point features of shape [B, Np, Dp].
+            view_features (Tensor): Raw multi-view features of shape [B, Np, M, Dv].
             
         Returns:
-            Tensor: Fused point-view synergistic features. Shape: [B, Np, D].
+            Z_PV (Tensor): Fused point-view features of shape [B, Np, fusion_dim].
         """
-        B, Np, M, D = Z_V.shape
+        B, Np, M, Dv = view_features.shape
+        hidden_dim = self.point_att_proj.out_features
 
-        # --- Step 1: Point-Guided View Aggregation (Vectorized and Correct) ---
-        # Reshape for batched attention. We treat each of the Np points as a batch item.
-        # This avoids any slow Python for-loops.
-        # Query: Point features, shape [B, Np, D] -> [B*Np, 1, D]
-        # Key/Value: View features, shape [B, Np, M, D] -> [B*Np, M, D]
+        # --- Step 1: Point-Guided View Aggregation (Corrected Implementation) ---
         
-        query_p = Z_P.reshape(B * Np, 1, D)
-        key_v = Z_V.reshape(B * Np, M, D)
+        # Project features to a common space for attention score calculation
+        query_p_proj = self.point_att_proj(point_features).unsqueeze(2) # Shape: [B, Np, 1, hidden_dim]
+        key_v_proj = self.view_att_proj(view_features) # Shape: [B, Np, M, hidden_dim]
         
-        # Point query attends to its M views, correctly using geometry to guide selection.
-        aggregated_view_features, _ = self.view_aggregation_attention(
-            query=query_p, key=key_v, value=key_v
-        )
+        # Manually compute scaled dot-product attention scores.
+        # This correctly handles the different dimensions and avoids the previous error.
+        attention_scores = (query_p_proj * key_v_proj).sum(dim=-1) / (hidden_dim ** 0.5) # Shape: [B, Np, M]
         
-        # Reshape back to the original batch and point dimensions.
-        Z_V_agg = aggregated_view_features.view(B, Np, D)
-        Z_V_agg = self.norm_agg(Z_V_agg) # Apply normalization
-
-        # --- Step 2: Bidirectional Synergy Extraction ---
-        # Now we fuse the original Z_P with the properly aggregated Z_V_agg.
+        # Apply softmax to get attention weights
+        attention_weights = F.softmax(attention_scores, dim=-1) # Shape: [B, Np, M]
         
-        # a) Point features attend to aggregated view features
-        p_attended_by_v, _ = self.point_queries_view_attention(
-            query=Z_P, key=Z_V_agg, value=Z_V_agg
-        )
-        p_in_v_context = self.norm1(p_attended_by_v + Z_P)
-
-        # b) Aggregated view features attend to point features
-        v_attended_by_p, _ = self.view_queries_point_attention(
-            query=Z_V_agg, key=Z_P, value=Z_P
-        )
-        v_in_p_context = self.norm2(v_attended_by_p + Z_V_agg)
-
-        # --- Step 3: Fuse for Final Synergy ---
-        # We concatenate the two contextualized features to extract synergy.
-        fused_input = torch.cat([p_in_v_context, v_in_p_context], dim=-1)
+        # Use the weights to perform a weighted sum on the ORIGINAL view features
+        # This preserves the rich, high-dimensional view information.
+        # view_features: [B, Np, M, Dv]
+        # attention_weights.unsqueeze(-1): [B, Np, M, 1]
+        Z_V_agg = (view_features * attention_weights.unsqueeze(-1)).sum(dim=2) # Shape: [B, Np, Dv]
         
-        Z_PV = self.synergy_extractor(fused_input)
-
-        # Final residual connection for stable training
-        Z_PV = self.final_norm(Z_PV + v_in_p_context)
-
+        # --- Step 2: Concatenate Raw Features for Gating ---
+        fused_raw = torch.cat([point_features, Z_V_agg], dim=-1) # Shape: [B, Np, Dp + Dv]
+        
+        # --- Step 3: Channel Attention as Synergy Mechanism ---
+        channel_weights = self.channel_attention(fused_raw)
+        gated_features = self.channel_norm(fused_raw * channel_weights)
+        
+        # --- Step 4: Final Fusion and Projection ---
+        Z_PV = self.synergy_fusion(gated_features)
+        Z_PV = self.final_norm(Z_PV)
+        
         return Z_PV

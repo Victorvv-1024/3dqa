@@ -315,378 +315,546 @@
         
 #         return analysis
 
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# from typing import Tuple, Dict, Optional
+
+
+# class TrimodalFusion(nn.Module):
+#     """
+#     Trimodal Fusion with mathematically grounded PID decomposition.
+    
+#     Key Improvements:
+#     1. Information-theoretic redundancy detection based on PID principles
+#     2. Hybrid weight routing combining content and question guidance
+#     3. Component self-attention instead of higher-synergy attention
+#     4. Learnable residual connection with full PID features
+#     """
+    
+#     def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1):
+#         super().__init__()
+        
+#         self.fusion_dim = fusion_dim
+#         self.hidden_dim = hidden_dim
+        
+#         # REDUNDANCY DETECTOR
+#         # Based on PID: redundancy is information available from ANY single modality
+        
+#         # Project each modality to common redundancy space
+#         self.redundancy_projectors = nn.ModuleDict({
+#             'P': nn.Linear(fusion_dim, hidden_dim),
+#             'V': nn.Linear(fusion_dim, hidden_dim),
+#             'T': nn.Linear(fusion_dim, hidden_dim)
+#         })
+        
+#         # Compute redundancy gates based on similarity
+#         self.redundancy_gate_net = nn.Sequential(
+#             nn.Linear(3, hidden_dim),  # 3 pairwise similarities
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, 1),
+#             nn.Sigmoid()
+#         )
+        
+#         # Extract redundant features with gating
+#         self.redundancy_extractor = nn.Sequential(
+#             nn.Linear(fusion_dim * 3, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.GELU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
+        
+#         # HIGHER-ORDER SYNERGY
+#         # Synergy: information only available when ALL modalities are present
+        
+#         # Multiplicative interactions for true synergy
+#         self.synergy_interaction = nn.Sequential(
+#             nn.Linear(fusion_dim * 3, hidden_dim * 2),
+#             nn.LayerNorm(hidden_dim * 2),
+#             nn.GELU(),
+#             nn.Dropout(dropout)
+#         )
+        
+#         self.partial_synergy_networks = nn.ModuleDict({
+#             'pv_t': nn.Linear(fusion_dim * 2, hidden_dim * 2),  # PV synergy + T
+#             'pt_v': nn.Linear(fusion_dim * 2, hidden_dim * 2),  # PT synergy + V
+#             'tv_p': nn.Linear(fusion_dim * 2, hidden_dim * 2),  # TV synergy + P
+#         })
+        
+#         # Synergy refinement with cross-modal attention
+#         self.synergy_attention = nn.MultiheadAttention(
+#             embed_dim=hidden_dim * 2, 
+#             num_heads=8, 
+#             dropout=dropout, 
+#             batch_first=True
+#         )
+        
+#         self.synergy_output = nn.Sequential(
+#             nn.Linear(hidden_dim * 2, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
+        
+#         # HYBRID WEIGHT ROUTING
+#         # Combines content-based and question-based routing
+        
+#         # Global content analyzer
+#         self.global_context_proj = nn.Sequential(
+#             nn.Linear(fusion_dim * 6, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout)
+#         )
+        
+#         # Question analyzer
+#         self.question_analyzer = nn.Sequential(
+#             nn.Linear(fusion_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.ReLU(),
+#             nn.Dropout(dropout)
+#         )
+        
+#         # Context gating mechanism
+#         self.context_gate = nn.Sequential(
+#             nn.Linear(hidden_dim * 2, hidden_dim),
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, 1),
+#             nn.Sigmoid()
+#         )
+        
+#         # Unified component importance predictor
+#         self.component_importance_predictor = nn.Sequential(
+#             nn.Linear(hidden_dim, hidden_dim // 2),
+#             nn.LayerNorm(hidden_dim // 2),
+#             nn.ReLU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(hidden_dim // 2, 8),  # 8 PID components
+#             nn.Softmax(dim=-1)
+#         )
+        
+#         # COMPONENT SELF-ATTENTION
+#         # Let components attend to each other directly
+#         self.component_self_attention = nn.MultiheadAttention(
+#             embed_dim=fusion_dim,
+#             num_heads=8,
+#             dropout=dropout,
+#             batch_first=True
+#         )
+        
+#         # FINAL FUSION
+#         self.final_fusion = nn.Sequential(
+#             nn.Linear(fusion_dim * 3, fusion_dim * 2),
+#             nn.LayerNorm(fusion_dim * 2),
+#             nn.GELU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(fusion_dim * 2, fusion_dim),
+#             nn.LayerNorm(fusion_dim)
+#         )
+        
+#         # Learnable residual weight
+#         self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        
+#         # Text to point broadcaster
+#         # self.text_to_point_broadcaster = nn.Sequential(
+#         #     nn.Linear(fusion_dim, fusion_dim),
+#         #     nn.LayerNorm(fusion_dim),
+#         #     nn.ReLU(),
+#         #     nn.Dropout(dropout)
+#         # )
+        
+#     def compute_information_theoretic_redundancy(self, Z_P, Z_V, Z_T):
+#         """
+#         Compute redundancy based on PID principles.
+#         Redundancy is information shared across ALL modalities.
+#         """
+#         B, Np, D = Z_P.shape
+        
+#         # Project to common space
+#         P_proj = self.redundancy_projectors['P'](Z_P)  # [B, Np, hidden_dim]
+#         V_proj = self.redundancy_projectors['V'](Z_V)  # [B, Np, hidden_dim]
+#         T_proj = self.redundancy_projectors['T'](Z_T)  # [B, Np, hidden_dim]
+        
+#         # Normalize for similarity computation
+#         P_norm = F.normalize(P_proj, p=2, dim=-1)
+#         V_norm = F.normalize(V_proj, p=2, dim=-1)
+#         T_norm = F.normalize(T_proj, p=2, dim=-1)
+        
+#         # Compute pairwise similarities
+#         pv_sim = (P_norm * V_norm).sum(dim=-1, keepdim=True)  # [B, Np, 1]
+#         pt_sim = (P_norm * T_norm).sum(dim=-1, keepdim=True)  # [B, Np, 1]
+#         vt_sim = (V_norm * T_norm).sum(dim=-1, keepdim=True)  # [B, Np, 1]
+        
+#         # Stack similarities
+#         similarities = torch.cat([pv_sim, pt_sim, vt_sim], dim=-1)  # [B, Np, 3]
+        
+#         # Compute redundancy gate (high when all similarities are high)
+#         redundancy_gate = self.redundancy_gate_net(similarities)  # [B, Np, 1]
+        
+#         # Extract redundant features with gating
+#         trimodal_concat = torch.cat([Z_P, Z_V, Z_T], dim=-1)  # [B, Np, 3*D]
+#         redundant_features = self.redundancy_extractor(trimodal_concat)  # [B, Np, D]
+        
+#         # Apply gate
+#         Z_redundant = redundancy_gate * redundant_features  # [B, Np, D]
+        
+#         return Z_redundant, redundancy_gate
+    
+#     def compute_higher_order_synergy(self, Z_P, Z_V, Z_T, Z_PV, Z_PT, Z_TV):
+#         """
+#         Compute synergy that emerges only from tri-modal interaction.
+#         This captures information not present in any uni- or bi-modal components.
+#         """
+#         B, Np, D = Z_P.shape
+        
+#         # Main trimodal interaction - all three modalities together
+#         trimodal_concat = torch.cat([Z_P, Z_V, Z_T], dim=-1)  # [B, Np, 3*D]
+#         synergy_features = self.synergy_interaction(trimodal_concat)  # [B, Np, 2*hidden_dim]
+        
+#         # Partial synergies - how bi-modal synergies interact with the third modality
+#         pv_t_synergy = self.partial_synergy_networks['pv_t'](
+#             torch.cat([Z_PV, Z_T], dim=-1)  # [B, Np, 2*D]
+#         )  # [B, Np, 2*hidden_dim]
+        
+#         pt_v_synergy = self.partial_synergy_networks['pt_v'](
+#             torch.cat([Z_PT, Z_V], dim=-1)  # [B, Np, 2*D]
+#         )  # [B, Np, 2*hidden_dim]
+        
+#         tv_p_synergy = self.partial_synergy_networks['tv_p'](
+#             torch.cat([Z_TV, Z_P], dim=-1)  # [B, Np, 2*D]
+#         )  # [B, Np, 2*hidden_dim]
+        
+#         # Stack all synergy types for self-attention
+#         # Shape: [B, Np, 4, 2*hidden_dim]
+#         trimodal_stack = torch.stack([
+#             synergy_features,   # Full P-V-T interaction
+#             pv_t_synergy,      # PV synergy enhanced by T
+#             pt_v_synergy,      # PT synergy enhanced by V
+#             tv_p_synergy       # TV synergy enhanced by P
+#         ], dim=2)
+        
+#         # Reshape for attention: [B*Np, 4, 2*hidden_dim]
+#         trimodal_for_attn = trimodal_stack.reshape(B * Np, 4, -1)
+        
+#         # Self-attention to capture emergent patterns across different synergy types
+#         attended_synergy, _ = self.synergy_attention(
+#             query=trimodal_for_attn,
+#             key=trimodal_for_attn,
+#             value=trimodal_for_attn
+#         )
+        
+#         # Reshape back and aggregate: [B, Np, 2*hidden_dim]
+#         attended_synergy = attended_synergy.reshape(B, Np, 4, -1).mean(dim=2)
+        
+#         # Output projection
+#         Z_higher_synergy = self.synergy_output(attended_synergy)  # [B, Np, D]
+        
+#         return Z_higher_synergy
+    
+#     def forward(self, Z_TV, Z_PV, Z_PT, Z_T, Z_V, Z_P, question_features=None):
+#         """
+#         Args:
+#             Z_TV, Z_PV, Z_PT: [B, Np, D] - Bi-modal synergies
+#             Z_T: [B, D] - Global text features
+#             Z_V, Z_P: [B, Np, D] - Unimodal features
+#             question_features: [B, D] - Optional question features for routing
+#         """
+#         B, Np, _ = Z_PV.shape
+        
+#         # Broadcast text to point level
+#         Z_T_pointwise = Z_T.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, D]
+#         # Take simple mean across views for Z_V
+#         Z_V_mean = Z_V.mean(dim=2)  # [B, Np, D]
+        
+#         # ==================== PID COMPONENT COMPUTATION ====================
+        
+#         # 1. Compute redundancy with information-theoretic approach
+#         Z_redundant, redundancy_gate = self.compute_information_theoretic_redundancy(
+#             Z_P, Z_V_mean, Z_T_pointwise
+#         )
+        
+#         # 2. Compute higher-order synergy
+#         Z_higher_synergy = self.compute_higher_order_synergy(
+#             Z_P, Z_V_mean, Z_T_pointwise, Z_PV, Z_PT, Z_TV
+#         )
+        
+#         # ==================== HYBRID WEIGHT ROUTING ====================
+        
+#         # Extract global content context
+#         global_contexts = torch.cat([
+#             Z_T_pointwise.mean(dim=1),  # [B, D]
+#             Z_V_mean.mean(dim=1),            # [B, D]
+#             Z_P.mean(dim=1),            # [B, D]
+#             Z_TV.mean(dim=1),           # [B, D]
+#             Z_PV.mean(dim=1),           # [B, D]
+#             Z_PT.mean(dim=1)            # [B, D]
+#         ], dim=-1)  # [B, 6*D]
+        
+#         content_context = self.global_context_proj(global_contexts)  # [B, hidden_dim]
+        
+#         # Handle question context
+#         if question_features is not None:
+#             question_context = self.question_analyzer(question_features)  # [B, hidden_dim]
+            
+#             # Compute adaptive gate
+#             combined_context = torch.cat([content_context, question_context], dim=-1)
+#             gate = self.context_gate(combined_context)  # [B, 1]
+            
+#             # Hybrid context
+#             final_context = gate * content_context + (1 - gate) * question_context
+#         else:
+#             final_context = content_context
+        
+#         # Predict component weights
+#         component_weights = self.component_importance_predictor(final_context)  # [B, 8]
+        
+#         # Split and expand weights
+#         (w_t, w_v, w_p, w_tv, w_pv, w_pt, w_red, w_syn) = torch.split(component_weights, 1, dim=1)
+        
+#         # Expand to point level
+#         weights_expanded = {
+#             't': w_t.unsqueeze(1).expand(-1, Np, -1),
+#             'v': w_v.unsqueeze(1).expand(-1, Np, -1),
+#             'p': w_p.unsqueeze(1).expand(-1, Np, -1),
+#             'tv': w_tv.unsqueeze(1).expand(-1, Np, -1),
+#             'pv': w_pv.unsqueeze(1).expand(-1, Np, -1),
+#             'pt': w_pt.unsqueeze(1).expand(-1, Np, -1),
+#             'red': w_red.unsqueeze(1).expand(-1, Np, -1),
+#             'syn': w_syn.unsqueeze(1).expand(-1, Np, -1)
+#         }
+        
+#         # ==================== WEIGHTED PID COMBINATION ====================
+        
+#         pid_weighted = (
+#             weights_expanded['t'] * Z_T_pointwise +
+#             weights_expanded['v'] * Z_V_mean +
+#             weights_expanded['p'] * Z_P +
+#             weights_expanded['tv'] * Z_TV +
+#             weights_expanded['pv'] * Z_PV +
+#             weights_expanded['pt'] * Z_PT +
+#             weights_expanded['red'] * Z_redundant +
+#             weights_expanded['syn'] * Z_higher_synergy
+#         )  # [B, Np, D]
+        
+#         # ==================== COMPONENT SELF-ATTENTION ====================
+#         # Stack all components for self-attention
+#         components_stack = torch.stack([
+#             Z_T_pointwise, Z_V_mean, Z_P, Z_TV, Z_PV, Z_PT, Z_redundant, Z_higher_synergy
+#         ], dim=2)  # [B, Np, 8, D]
+        
+#         # Reshape for attention
+#         components_for_attn = components_stack.reshape(B * Np, 8, -1)
+        
+#         # Self-attention among components
+#         attended_components, attention_weights = self.component_self_attention(
+#             query=components_for_attn,
+#             key=components_for_attn,
+#             value=components_for_attn
+#         )
+        
+#         # Reshape and aggregate
+#         attended_components = attended_components.reshape(B, Np, 8, -1).mean(dim=2)  # [B, Np, D]
+        
+#         # ==================== FINAL FUSION ====================
+        
+#         # Combine weighted PID, attended components, and redundancy-aware features
+#         fusion_input = torch.cat([
+#             pid_weighted,           # Weighted PID combination
+#             attended_components,    # Self-attended components
+#             Z_redundant            # Explicit redundancy
+#         ], dim=-1)  # [B, Np, 3*D]
+        
+#         enhanced_features = self.final_fusion(fusion_input)  # [B, Np, D]
+        
+#         # ==================== RESIDUAL CONNECTION ====================
+#         # Instead of just bi-modal, use the full weighted PID as residual
+#         # This preserves all the information pathways
+#         Z_fused = (
+#             torch.sigmoid(self.residual_weight) * pid_weighted + 
+#             (1 - torch.sigmoid(self.residual_weight)) * enhanced_features
+#         )
+        
+#         # Prepare output dictionary
+#         component_dict = {
+#             'Z_T_unique': Z_T_pointwise,
+#             'Z_V_unique': Z_V_mean,
+#             'Z_P_unique': Z_P,
+#             'Z_TV_synergy': Z_TV,
+#             'Z_PV_synergy': Z_PV,
+#             'Z_PT_synergy': Z_PT,
+#             'Z_redundant': Z_redundant,
+#             'Z_higher_synergy': Z_higher_synergy,
+#             'attention_weights': attention_weights.reshape(B, Np, 8, 8),
+#             'component_weights': component_weights,
+#             'redundancy_gate': redundancy_gate
+#         }
+        
+#         return Z_fused, component_weights, component_dict
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Dict, Optional
+from typing import Dict, Tuple, Optional
+from mmengine.model import BaseModule
+from embodiedqa.registry import MODELS
+from torch import Tensor
 
-
-class TrimodalFusion(nn.Module):
+class UniquenessExtractor(nn.Module):
     """
-    Trimodal Fusion with mathematically grounded PID decomposition.
-    
-    Key Improvements:
-    1. Information-theoretic redundancy detection based on PID principles
-    2. Hybrid weight routing combining content and question guidance
-    3. Component self-attention instead of higher-synergy attention
-    4. Learnable residual connection with full PID features
+    A helper module to extract the unique information from a raw modality by
+    learning to subtract the influence of its bi-modal synergies. This is
+    based on the PID principle: Unique(X) ≈ Raw(X) - f(Synergy(X,Y), Synergy(X,Z)).
     """
-    
-    def __init__(self, fusion_dim=768, hidden_dim=256, dropout=0.1):
+    def __init__(self, raw_dim: int, synergy_dim: int, fusion_dim: int, hidden_dim: int):
         super().__init__()
-        
+        self.synergy_remover1 = nn.Linear(synergy_dim, raw_dim)
+        self.synergy_remover2 = nn.Linear(synergy_dim, raw_dim)
+        self.unique_proj = nn.Sequential(
+            nn.Linear(raw_dim, hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+
+    def forward(self, raw_features: Tensor, synergy1: Tensor, synergy2: Tensor) -> Tensor:
+        synergy1_influence = self.synergy_remover1(synergy1)
+        synergy2_influence = self.synergy_remover2(synergy2)
+        unique_raw = raw_features - synergy1_influence - synergy2_influence
+        return self.unique_proj(unique_raw)
+
+@MODELS.register_module()
+class TrimodalFusion(BaseModule):
+    """
+    Final Trimodal Fusion with Dynamic PID Weighting on Raw Features.
+    
+    This module works directly with raw features of varying dimensions and
+    implements a complete PID decomposition for robust, interpretable fusion.
+    """
+    
+    def __init__(self, 
+                 point_dim: int, view_dim: int, text_dim: int, 
+                 synergy_dim: int, fusion_dim: int, 
+                 hidden_dim: int = 256, num_heads: int = 8, dropout: float = 0.1,
+                 init_cfg=None):
+        super().__init__(init_cfg=init_cfg)
         self.fusion_dim = fusion_dim
-        self.hidden_dim = hidden_dim
-        
-        # REDUNDANCY DETECTOR
-        # Based on PID: redundancy is information available from ANY single modality
-        
-        # Project each modality to common redundancy space
-        self.redundancy_projectors = nn.ModuleDict({
-            'P': nn.Linear(fusion_dim, hidden_dim),
-            'V': nn.Linear(fusion_dim, hidden_dim),
-            'T': nn.Linear(fusion_dim, hidden_dim)
-        })
-        
-        # Compute redundancy gates based on similarity
-        self.redundancy_gate_net = nn.Sequential(
-            nn.Linear(3, hidden_dim),  # 3 pairwise similarities
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-        
-        # Extract redundant features with gating
-        self.redundancy_extractor = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
-        
-        # HIGHER-ORDER SYNERGY
-        # Synergy: information only available when ALL modalities are present
-        
-        # Multiplicative interactions for true synergy
-        self.synergy_interaction = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim * 2),
-            nn.LayerNorm(hidden_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout)
-        )
-        
-        self.partial_synergy_networks = nn.ModuleDict({
-            'pv_t': nn.Linear(fusion_dim * 2, hidden_dim * 2),  # PV synergy + T
-            'pt_v': nn.Linear(fusion_dim * 2, hidden_dim * 2),  # PT synergy + V
-            'tv_p': nn.Linear(fusion_dim * 2, hidden_dim * 2),  # TV synergy + P
-        })
-        
-        # Synergy refinement with cross-modal attention
-        self.synergy_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim * 2, 
-            num_heads=8, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        
-        self.synergy_output = nn.Sequential(
-            nn.Linear(hidden_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
-        
-        # HYBRID WEIGHT ROUTING
-        # Combines content-based and question-based routing
-        
-        # Global content analyzer
-        self.global_context_proj = nn.Sequential(
-            nn.Linear(fusion_dim * 6, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
-        
-        # Question analyzer
+
+        # --- 1. Modules for processing RAW features ---
+        # Projections for manual attention score calculation
+        self.point_query_proj = nn.Linear(point_dim, hidden_dim)
+        self.text_query_proj = nn.Linear(text_dim, hidden_dim)
+        self.view_key_proj = nn.Linear(view_dim, hidden_dim)
+        self.view_agg_norm = nn.LayerNorm(view_dim)
+
+        # Uniqueness Extractors for each modality
+        self.unique_extractor_P = UniquenessExtractor(point_dim, synergy_dim, fusion_dim, hidden_dim)
+        self.unique_extractor_V = UniquenessExtractor(view_dim, synergy_dim, fusion_dim, hidden_dim)
+        self.unique_extractor_T = UniquenessExtractor(text_dim, synergy_dim, fusion_dim, hidden_dim)
+
+        # --- 2. Modules for processing features in common FUSION_DIM ---
+        self.redundancy_detector = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, fusion_dim))
+        self.higher_synergy_detector = nn.Sequential(
+            nn.Linear(fusion_dim * 6, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, fusion_dim))
+
+        # --- 3. Dynamic Adaptive Weighting ---
         self.question_analyzer = nn.Sequential(
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+            nn.Linear(text_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, fusion_dim))
         
-        # Context gating mechanism
-        self.context_gate = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-        
-        # Unified component importance predictor
-        self.component_importance_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
+        self.question_pid_attention = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+
+        self.adaptive_weight_predictor = nn.Sequential(
+            nn.Linear(fusion_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 8),  # 8 PID components
-            nn.Softmax(dim=-1)
+            nn.Linear(hidden_dim, 8)
         )
-        
-        # COMPONENT SELF-ATTENTION
-        # Let components attend to each other directly
-        self.component_self_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=8,
-            dropout=dropout,
-            batch_first=True
-        )
-        
-        # FINAL FUSION
+        self.temperature = nn.Parameter(torch.tensor(1.0))
+
+        # --- 4. Final Fusion Layer ---
         self.final_fusion = nn.Sequential(
-            nn.Linear(fusion_dim * 3, fusion_dim * 2),
-            nn.LayerNorm(fusion_dim * 2),
+            nn.Linear(fusion_dim * 8, fusion_dim * 2),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim)
+            nn.LayerNorm(fusion_dim * 2),
+            nn.Linear(fusion_dim * 2, fusion_dim)
         )
-        
-        # Learnable residual weight
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))
-        
-        # Text to point broadcaster
-        # self.text_to_point_broadcaster = nn.Sequential(
-        #     nn.Linear(fusion_dim, fusion_dim),
-        #     nn.LayerNorm(fusion_dim),
-        #     nn.ReLU(),
-        #     nn.Dropout(dropout)
-        # )
-        
-    def compute_information_theoretic_redundancy(self, Z_P, Z_V, Z_T):
-        """
-        Compute redundancy based on PID principles.
-        Redundancy is information shared across ALL modalities.
-        """
-        B, Np, D = Z_P.shape
-        
-        # Project to common space
-        P_proj = self.redundancy_projectors['P'](Z_P)  # [B, Np, hidden_dim]
-        V_proj = self.redundancy_projectors['V'](Z_V)  # [B, Np, hidden_dim]
-        T_proj = self.redundancy_projectors['T'](Z_T)  # [B, Np, hidden_dim]
-        
-        # Normalize for similarity computation
-        P_norm = F.normalize(P_proj, p=2, dim=-1)
-        V_norm = F.normalize(V_proj, p=2, dim=-1)
-        T_norm = F.normalize(T_proj, p=2, dim=-1)
-        
-        # Compute pairwise similarities
-        pv_sim = (P_norm * V_norm).sum(dim=-1, keepdim=True)  # [B, Np, 1]
-        pt_sim = (P_norm * T_norm).sum(dim=-1, keepdim=True)  # [B, Np, 1]
-        vt_sim = (V_norm * T_norm).sum(dim=-1, keepdim=True)  # [B, Np, 1]
-        
-        # Stack similarities
-        similarities = torch.cat([pv_sim, pt_sim, vt_sim], dim=-1)  # [B, Np, 3]
-        
-        # Compute redundancy gate (high when all similarities are high)
-        redundancy_gate = self.redundancy_gate_net(similarities)  # [B, Np, 1]
-        
-        # Extract redundant features with gating
-        trimodal_concat = torch.cat([Z_P, Z_V, Z_T], dim=-1)  # [B, Np, 3*D]
-        redundant_features = self.redundancy_extractor(trimodal_concat)  # [B, Np, D]
-        
-        # Apply gate
-        Z_redundant = redundancy_gate * redundant_features  # [B, Np, D]
-        
-        return Z_redundant, redundancy_gate
-    
-    def compute_higher_order_synergy(self, Z_P, Z_V, Z_T, Z_PV, Z_PT, Z_TV):
-        """
-        Compute synergy that emerges only from tri-modal interaction.
-        This captures information not present in any uni- or bi-modal components.
-        """
-        B, Np, D = Z_P.shape
-        
-        # Main trimodal interaction - all three modalities together
-        trimodal_concat = torch.cat([Z_P, Z_V, Z_T], dim=-1)  # [B, Np, 3*D]
-        synergy_features = self.synergy_interaction(trimodal_concat)  # [B, Np, 2*hidden_dim]
-        
-        # Partial synergies - how bi-modal synergies interact with the third modality
-        pv_t_synergy = self.partial_synergy_networks['pv_t'](
-            torch.cat([Z_PV, Z_T], dim=-1)  # [B, Np, 2*D]
-        )  # [B, Np, 2*hidden_dim]
-        
-        pt_v_synergy = self.partial_synergy_networks['pt_v'](
-            torch.cat([Z_PT, Z_V], dim=-1)  # [B, Np, 2*D]
-        )  # [B, Np, 2*hidden_dim]
-        
-        tv_p_synergy = self.partial_synergy_networks['tv_p'](
-            torch.cat([Z_TV, Z_P], dim=-1)  # [B, Np, 2*D]
-        )  # [B, Np, 2*hidden_dim]
-        
-        # Stack all synergy types for self-attention
-        # Shape: [B, Np, 4, 2*hidden_dim]
-        trimodal_stack = torch.stack([
-            synergy_features,   # Full P-V-T interaction
-            pv_t_synergy,      # PV synergy enhanced by T
-            pt_v_synergy,      # PT synergy enhanced by V
-            tv_p_synergy       # TV synergy enhanced by P
-        ], dim=2)
-        
-        # Reshape for attention: [B*Np, 4, 2*hidden_dim]
-        trimodal_for_attn = trimodal_stack.reshape(B * Np, 4, -1)
-        
-        # Self-attention to capture emergent patterns across different synergy types
-        attended_synergy, _ = self.synergy_attention(
-            query=trimodal_for_attn,
-            key=trimodal_for_attn,
-            value=trimodal_for_attn
-        )
-        
-        # Reshape back and aggregate: [B, Np, 2*hidden_dim]
-        attended_synergy = attended_synergy.reshape(B, Np, 4, -1).mean(dim=2)
-        
-        # Output projection
-        Z_higher_synergy = self.synergy_output(attended_synergy)  # [B, Np, D]
-        
-        return Z_higher_synergy
-    
-    def forward(self, Z_TV, Z_PV, Z_PT, Z_T, Z_V, Z_P, question_features=None):
+        self.final_norm = nn.LayerNorm(fusion_dim)
+
+    def forward(self, 
+                point_feat: Tensor, view_feat: Tensor, text_feat: Tensor, 
+                z_pv: Tensor, z_tv: Tensor, z_pt: Tensor,
+                ) -> Tuple[Tensor, Tensor, Dict[str, Tensor]]:
         """
         Args:
-            Z_TV, Z_PV, Z_PT: [B, Np, D] - Bi-modal synergies
-            Z_T: [B, D] - Global text features
-            Z_V, Z_P: [B, Np, D] - Unimodal features
-            question_features: [B, D] - Optional question features for routing
+            point_feat, view_feat, text_feat: Raw features from backbones.
+            z_pv, z_tv, z_pt: Bi-modal synergy features.
+        Returns:
+            Z_fused, pid_weights, component_dict
         """
-        B, Np, _ = Z_PV.shape
+        B, Np, M, Dv = view_feat.shape
+        hidden_dim = self.point_query_proj.out_features
+
+        # --- Step 1: Intelligent View Aggregation (Corrected) ---
+        query_p_proj = self.point_query_proj(point_feat)
+        query_t_proj = self.text_query_proj(text_feat).unsqueeze(1).expand(-1, Np, -1)
+        combined_query = (query_p_proj + query_t_proj).unsqueeze(2) # Shape: [B, Np, 1, hidden_dim]
+
+        key_v_proj = self.view_key_proj(view_feat) # Shape: [B, Np, M, hidden_dim]
         
-        # Broadcast text to point level
-        Z_T_pointwise = Z_T.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, D]
-        # Take simple mean across views for Z_V
-        Z_V_mean = Z_V.mean(dim=2)  # [B, Np, D]
+        # Manual scaled dot-product attention
+        attention_scores = (combined_query * key_v_proj).sum(dim=-1) / (hidden_dim ** 0.5) # Shape: [B, Np, M]
+        attention_weights = F.softmax(attention_scores, dim=-1) # Shape: [B, Np, M]
         
-        # ==================== PID COMPONENT COMPUTATION ====================
+        # Weighted sum of original raw view features
+        raw_v_agg = (view_feat * attention_weights.unsqueeze(-1)).sum(dim=2) # Shape: [B, Np, Dv]
+        raw_v_agg = self.view_agg_norm(raw_v_agg)
+
+        # --- Step 2: PID Component Assembly ---
+        raw_t_expanded = text_feat.unsqueeze(1).expand(-1, Np, -1)
+        Z_P_unique = self.unique_extractor_P(point_feat, z_pv, z_pt)
+        Z_V_unique = self.unique_extractor_V(raw_v_agg, z_pv, z_tv)
+        Z_T_unique = self.unique_extractor_T(raw_t_expanded, z_tv, z_pt)
+
+        redundancy_input = torch.cat([Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
+        Z_redundant = self.redundancy_detector(redundancy_input)
+
+        higher_synergy_input = torch.cat([z_pv, z_tv, z_pt, Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
+        Z_higher_synergy = self.higher_synergy_detector(higher_synergy_input)
+
+        # --- Step 3: Dynamic Adaptive Weighting ---
+        question_analyzed = self.question_analyzer(text_feat)
+
+        pid_summary = torch.stack([
+            Z_T_unique.mean(1), Z_V_unique.mean(1), Z_P_unique.mean(1),
+            z_tv.mean(1), z_pv.mean(1), z_pt.mean(1),
+            Z_redundant.mean(1), Z_higher_synergy.mean(1)
+        ], dim=1)
+
+        pid_context, _ = self.question_pid_attention(
+            query=question_analyzed.unsqueeze(1), key=pid_summary, value=pid_summary)
+        pid_context = pid_context.squeeze(1)
+
+        weight_predictor_input = torch.cat([question_analyzed, pid_context], dim=-1)
+        raw_weights = self.adaptive_weight_predictor(weight_predictor_input)
+        pid_weights = F.softmax(raw_weights / self.temperature, dim=-1)
+
+        # --- Step 4: Final Weighted Fusion ---
+        all_components = torch.stack([
+            Z_T_unique, Z_V_unique, Z_P_unique, z_tv, z_pv, z_pt, Z_redundant, Z_higher_synergy
+        ], dim=2)
+
+        weights_expanded = pid_weights.unsqueeze(1).unsqueeze(-1)
+        weighted_components = all_components * weights_expanded
         
-        # 1. Compute redundancy with information-theoretic approach
-        Z_redundant, redundancy_gate = self.compute_information_theoretic_redundancy(
-            Z_P, Z_V_mean, Z_T_pointwise
-        )
-        
-        # 2. Compute higher-order synergy
-        Z_higher_synergy = self.compute_higher_order_synergy(
-            Z_P, Z_V_mean, Z_T_pointwise, Z_PV, Z_PT, Z_TV
-        )
-        
-        # ==================== HYBRID WEIGHT ROUTING ====================
-        
-        # Extract global content context
-        global_contexts = torch.cat([
-            Z_T_pointwise.mean(dim=1),  # [B, D]
-            Z_V_mean.mean(dim=1),            # [B, D]
-            Z_P.mean(dim=1),            # [B, D]
-            Z_TV.mean(dim=1),           # [B, D]
-            Z_PV.mean(dim=1),           # [B, D]
-            Z_PT.mean(dim=1)            # [B, D]
-        ], dim=-1)  # [B, 6*D]
-        
-        content_context = self.global_context_proj(global_contexts)  # [B, hidden_dim]
-        
-        # Handle question context
-        if question_features is not None:
-            question_context = self.question_analyzer(question_features)  # [B, hidden_dim]
-            
-            # Compute adaptive gate
-            combined_context = torch.cat([content_context, question_context], dim=-1)
-            gate = self.context_gate(combined_context)  # [B, 1]
-            
-            # Hybrid context
-            final_context = gate * content_context + (1 - gate) * question_context
-        else:
-            final_context = content_context
-        
-        # Predict component weights
-        component_weights = self.component_importance_predictor(final_context)  # [B, 8]
-        
-        # Split and expand weights
-        (w_t, w_v, w_p, w_tv, w_pv, w_pt, w_red, w_syn) = torch.split(component_weights, 1, dim=1)
-        
-        # Expand to point level
-        weights_expanded = {
-            't': w_t.unsqueeze(1).expand(-1, Np, -1),
-            'v': w_v.unsqueeze(1).expand(-1, Np, -1),
-            'p': w_p.unsqueeze(1).expand(-1, Np, -1),
-            'tv': w_tv.unsqueeze(1).expand(-1, Np, -1),
-            'pv': w_pv.unsqueeze(1).expand(-1, Np, -1),
-            'pt': w_pt.unsqueeze(1).expand(-1, Np, -1),
-            'red': w_red.unsqueeze(1).expand(-1, Np, -1),
-            'syn': w_syn.unsqueeze(1).expand(-1, Np, -1)
-        }
-        
-        # ==================== WEIGHTED PID COMBINATION ====================
-        
-        pid_weighted = (
-            weights_expanded['t'] * Z_T_pointwise +
-            weights_expanded['v'] * Z_V_mean +
-            weights_expanded['p'] * Z_P +
-            weights_expanded['tv'] * Z_TV +
-            weights_expanded['pv'] * Z_PV +
-            weights_expanded['pt'] * Z_PT +
-            weights_expanded['red'] * Z_redundant +
-            weights_expanded['syn'] * Z_higher_synergy
-        )  # [B, Np, D]
-        
-        # ==================== COMPONENT SELF-ATTENTION ====================
-        # Stack all components for self-attention
-        components_stack = torch.stack([
-            Z_T_pointwise, Z_V_mean, Z_P, Z_TV, Z_PV, Z_PT, Z_redundant, Z_higher_synergy
-        ], dim=2)  # [B, Np, 8, D]
-        
-        # Reshape for attention
-        components_for_attn = components_stack.reshape(B * Np, 8, -1)
-        
-        # Self-attention among components
-        attended_components, attention_weights = self.component_self_attention(
-            query=components_for_attn,
-            key=components_for_attn,
-            value=components_for_attn
-        )
-        
-        # Reshape and aggregate
-        attended_components = attended_components.reshape(B, Np, 8, -1).mean(dim=2)  # [B, Np, D]
-        
-        # ==================== FINAL FUSION ====================
-        
-        # Combine weighted PID, attended components, and redundancy-aware features
-        fusion_input = torch.cat([
-            pid_weighted,           # Weighted PID combination
-            attended_components,    # Self-attended components
-            Z_redundant            # Explicit redundancy
-        ], dim=-1)  # [B, Np, 3*D]
-        
-        enhanced_features = self.final_fusion(fusion_input)  # [B, Np, D]
-        
-        # ==================== RESIDUAL CONNECTION ====================
-        # Instead of just bi-modal, use the full weighted PID as residual
-        # This preserves all the information pathways
-        Z_fused = (
-            torch.sigmoid(self.residual_weight) * pid_weighted + 
-            (1 - torch.sigmoid(self.residual_weight)) * enhanced_features
-        )
-        
-        # Prepare output dictionary
+        Z_fused = self.final_fusion(weighted_components.reshape(B, Np, 8 * self.fusion_dim))
+        Z_fused = self.final_norm(Z_fused + Z_P_unique)
+
+        # --- Step 5: Prepare Full Component Dictionary for PIDLosses ---
         component_dict = {
-            'Z_T_unique': Z_T_pointwise,
-            'Z_V_unique': Z_V_mean,
-            'Z_P_unique': Z_P,
-            'Z_TV_synergy': Z_TV,
-            'Z_PV_synergy': Z_PV,
-            'Z_PT_synergy': Z_PT,
-            'Z_redundant': Z_redundant,
-            'Z_higher_synergy': Z_higher_synergy,
-            'attention_weights': attention_weights.reshape(B, Np, 8, 8),
-            'component_weights': component_weights,
-            'redundancy_gate': redundancy_gate
+            'Z_P_unique': Z_P_unique, 'Z_V_unique': Z_V_unique, 'Z_T_unique': Z_T_unique,
+            'Z_PV_synergy': z_pv, 'Z_TV_synergy': z_tv, 'Z_PT_synergy': z_pt,
+            'Z_redundant': Z_redundant, 'Z_higher_synergy': Z_higher_synergy,
         }
-        
-        return Z_fused, component_weights, component_dict
+
+        return Z_fused, pid_weights, component_dict

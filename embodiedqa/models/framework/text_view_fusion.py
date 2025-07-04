@@ -97,124 +97,75 @@ from mmengine.model import BaseModule
 from embodiedqa.registry import MODELS
 from torch import Tensor
 
+
 @MODELS.register_module()
 class TextViewFusion(BaseModule):
-    """
-    Text-View Fusion with Per-Point Guided Aggregation and Bidirectional Attention.
-
-    This module operates under the constraint of using a single global text vector.
-    
-    Process:
-    1.  **Per-Point Text-Guided View Aggregation:** Instead of averaging views globally,
-        this version uses the question to select the best views for EACH of the Np points
-        independently. This is a more precise and powerful form of aggregation.
-
-    2.  **Bidirectional Attention (with caveats):** It then performs bidirectional 
-        cross-attention. NOTE: Because the text input is a single vector repeated Np
-        times, the synergy learned will be limited. The model cannot learn fine-grained,
-        word-to-pixel relationships.
-    """
-    
     def __init__(self, 
-                 fusion_dim=768, 
-                 num_heads=8, 
-                 dropout=0.1,
-                 init_cfg=None):
-        super().__init__(init_cfg=init_cfg)
-        self.fusion_dim = fusion_dim
+                 text_dim=768,       # Raw text dimension
+                 view_dim=1024,      # Raw view dimension  
+                 fusion_dim=768,     # Output dimension
+                 hidden_dim=512,
+                 num_heads=8,
+                 dropout=0.1):
+        super().__init__()
         
-        # --- Bidirectional cross-attention for synergy ---
-        # These layers will attempt to find synergy between the aggregated view
-        # and the repeated global text vector.
-        self.text_queries_view_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
+        # For attention score computation only
+        self.text_query_proj = nn.Linear(text_dim, hidden_dim)
+        self.view_key_proj = nn.Linear(view_dim, hidden_dim)
+        
+        # Channel attention for different dimensions
+        total_dim = text_dim + view_dim
+        self.channel_attention = nn.Sequential(
+            nn.Linear(total_dim, total_dim // 16),
+            nn.LayerNorm(total_dim // 16),
+            nn.GELU(),
+            nn.Linear(total_dim // 16, total_dim),
+            nn.Sigmoid()
         )
         
-        self.view_queries_text_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True
-        )
-        
-        # --- Pure synergy extractor ---
-        # This MLP combines the outputs of the bidirectional attention.
+        # Synergy extraction
         self.synergy_extractor = nn.Sequential(
-            nn.Linear(fusion_dim * 4, fusion_dim * 2), # [text_att, view_att, interaction, difference]
+            nn.Linear(total_dim, fusion_dim * 2),
             nn.LayerNorm(fusion_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(fusion_dim * 2, fusion_dim)
+            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
-
-        self.final_norm = nn.LayerNorm(fusion_dim)
         
-    def forward(self, Z_T: Tensor, Z_V: Tensor) -> Tensor:
+    def forward(self, text_features: Tensor, view_features: Tensor) -> Tensor:
         """
         Args:
-            Z_T (Tensor): [B, D] - Global text features from your existing wrapper.
-            Z_V (Tensor): [B, Np, M, D] - Multi-view features.
-            
-        Returns:
-            Z_TV (Tensor): [B, Np, D] - Fused text-view features.
+            text_features: [B, Dt] - Global text features  
+            view_features: [B, Np, M, Dv] - Multi-view features
         """
-        B, Np, M, D = Z_V.shape
+        B, Np, M, Dv = view_features.shape
+        Dt = text_features.shape[-1]
+        hidden_dim = self.text_query_proj.out_features
         
-        # --- Step 1: Per-Point Text-Guided View Aggregation (Improved) ---
-        # This is a more effective way to aggregate views than your proposal.
-        # Query: Global text feature, expanded for broadcasting: [B, 1, 1, D]
-        question_query = Z_T.unsqueeze(1).unsqueeze(2)
-
-        # Calculate attention scores for each point independently.
-        # (B, Np, M, D) * (B, 1, 1, D) -> (B, Np, M)
-        view_attention_scores = (Z_V * question_query).sum(dim=-1) / (D ** 0.5)
+        # Step 1: Text-guided view aggregation
+        # Project only for attention scores
+        text_query = self.text_query_proj(text_features).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, hidden]
+        view_keys = self.view_key_proj(view_features)  # [B, Np, M, hidden]
         
-        # Softmax over the M views for each of the Np points.
-        view_weights = F.softmax(view_attention_scores, dim=-1) # Shape: [B, Np, M]
+        # Compute attention scores
+        view_attention_scores = (view_keys * text_query).sum(dim=-1) / (hidden_dim ** 0.5)
+        view_weights = F.softmax(view_attention_scores, dim=2)  # [B, Np, M]
         
-        # Apply weights to get a single, question-aware feature vector per point.
-        # (B, Np, M, D) * (B, Np, M, 1) -> sum over M -> (B, Np, D)
-        aggregated_view_features = (Z_V * view_weights.unsqueeze(-1)).sum(dim=2)
+        # Aggregate with original features
+        Z_V_weighted = (view_features * view_weights.unsqueeze(-1)).sum(dim=2)  # [B, Np, Dv]
         
-        # --- Step 2: Bidirectional Synergy Extraction (with limitations) ---
+        # Step 2: Expand text to spatial dimension
+        text_expanded = text_features.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Dt]
         
-        # Expand the single global text vector to match the spatial dimension Np.
-        # CRITICAL CAVEAT: Every vector along the Np dimension is identical.
-        Z_T_expanded = Z_T.unsqueeze(1).expand(-1, Np, -1) # Shape: [B, Np, D]
+        # Step 3: Concatenate raw features
+        combined = torch.cat([text_expanded, Z_V_weighted], dim=-1)  # [B, Np, Dt+Dv]
         
-        # 1. Text queries Views (T_attends_V)
-        # The Np identical text queries attend to the Np different view features.
-        text_attended_by_view, _ = self.text_queries_view_attention(
-            query=Z_T_expanded,
-            key=aggregated_view_features,
-            value=aggregated_view_features
-        )
+        # Step 4: Channel attention
+        channel_weights = self.channel_attention(combined)
+        combined = combined * channel_weights
         
-        # 2. Views query Text (V_attends_T)
-        # The Np different view features attend to the Np identical text features.
-        view_attended_by_text, _ = self.view_queries_text_attention(
-            query=aggregated_view_features,
-            key=Z_T_expanded,
-            value=Z_T_expanded
-        )
-        
-        # --- Step 3: Extract Synergistic Information ---
-        interaction = text_attended_by_view * view_attended_by_text
-        difference = torch.abs(text_attended_by_view - view_attended_by_text)
-        
-        fused_input = torch.cat([
-            text_attended_by_view, 
-            view_attended_by_text,
-            interaction,
-            difference
-        ], dim=-1)
-        
-        Z_TV = self.synergy_extractor(fused_input)
-
-        # Add a final residual connection for stability
-        Z_TV = self.final_norm(Z_TV + aggregated_view_features)
+        # Step 5: Extract synergy
+        Z_TV = self.synergy_extractor(combined)
         
         return Z_TV

@@ -95,7 +95,21 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
         self.use_2d = use_2d
-        self.D_fus = 768 # Fusion dimension, can be adjusted 
+        # Reasoning (using original MCGR)
+        self.reason = MODELS.build(backbone_fusion)
+        self.D_fus = self.reason.config.hidden_size # Fusion dimension, can be adjusted 
+        self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
+        self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
+        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
+        self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
+        self.reason_visual_pre_norm = nn.Sequential(
+            nn.LayerNorm(self.D_fus),
+            nn.Dropout(0.1)
+        )
+        self.reason_full_visual_pre_norm = nn.Sequential(
+            nn.LayerNorm(self.D_fus),
+            nn.Dropout(0.1)
+        )
         
         if self.use_2d:
             self.backbone = MODELS.build(backbone)
@@ -122,80 +136,94 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.voxel_size = voxel_size
         
         # Unified projection
-        self.unified_proj = nn.ModuleDict({
-            'point': nn.Sequential(
-                nn.Linear(self.backbone_lidar.fp_channels[-1][-1], self.D_fus), # Point: 256 -> 768
-                nn.LayerNorm(self.D_fus),
-                nn.ReLU(),
-                nn.Linear(self.D_fus, self.D_fus)
-            ),
-            'view': nn.Sequential(
-                nn.Linear(self.backbone.out_channels[-1], self.D_fus), # View: 1024 -> 768
-                nn.LayerNorm(self.D_fus),
-                nn.ReLU(),
-                nn.Linear(self.D_fus, self.D_fus)
-            ),
-            'text': nn.Sequential(
-                nn.Linear(self.text_encoder.config.hidden_size, self.D_fus), # Text: 768 -> 768
-                nn.LayerNorm(self.D_fus),
-                nn.ReLU(),
-                nn.Linear(self.D_fus, self.D_fus)
-            )
-        })
+        # self.unified_proj = nn.ModuleDict({
+        #     'point': nn.Sequential(
+        #         nn.Linear(self.backbone_lidar.fp_channels[-1][-1], self.D_fus), # Point: 256 -> 768
+        #         nn.LayerNorm(self.D_fus),
+        #         nn.ReLU(),
+        #         nn.Linear(self.D_fus, self.D_fus)
+        #     ),
+        #     'view': nn.Sequential(
+        #         nn.Linear(self.backbone.out_channels[-1], self.D_fus), # View: 1024 -> 768
+        #         nn.LayerNorm(self.D_fus),
+        #         nn.ReLU(),
+        #         nn.Linear(self.D_fus, self.D_fus)
+        #     ),
+        #     'text': nn.Sequential(
+        #         nn.Linear(self.text_encoder.config.hidden_size, self.D_fus), # Text: 768 -> 768
+        #         nn.LayerNorm(self.D_fus),
+        #         nn.ReLU(),
+        #         nn.Linear(self.D_fus, self.D_fus)
+        #     )
+        # })
 
         # Bi-Modal fusion
+        # self.pv_fusion = PointViewFusion(
+        #     fusion_dim=self.D_fus,  # Output dim = 768
+        # )
         self.pv_fusion = PointViewFusion(
-            fusion_dim=self.D_fus,  # Output dim = 768
-        )
-        
-        self.pt_fusion = PointTextFusion(
-            fusion_dim=self.D_fus,
-        )
-        
-        self.tv_fusion = TextViewFusion(
-            fusion_dim=self.D_fus,  # 768
-        )
-        
-        # Tri-modal fusion
-        self.tri_modal_fusion = TrimodalFusion(
-            fusion_dim=self.D_fus, # 768
-            hidden_dim=256,  # Hidden dimension for intermediate layers
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
+            view_dim=self.backbone.out_channels[-1],  # View feature dimension
+            fusion_dim=self.D_fus,  # Output dimension
+            hidden_dim=512,  # Hidden dimension for intermediate layers
             dropout=0.1,  # Dropout rate for regularization
         )
         
-        self.spatial_module = SpatialContextModule(
-            fusion_dim=self.D_fus,
-            num_scales=3,
-            k_neighbors=[8, 16, 32],
-            voxel_size=0.2,
-            max_superpoints=256,
-            dropout=0.1
+        # self.pt_fusion = PointTextFusion(
+        #     fusion_dim=self.D_fus,
+        # )
+        self.pt_fusion = PointTextFusion(
+            synergy_dim=self.D_fus,  # Synergy dimension
+            text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
+            fusion_dim=self.D_fus,  # Output dimension
+            hidden_dim=512,  # Hidden dimension for intermediate layers
+            dropout=0.1,  # Dropout rate for regularization
         )
-        self.use_spatial_enhancement = False
-        if self.use_spatial_enhancement:
-            self.spatial_alpha_pv = 0.3  # Weight for PV enhancement
-            self.spatial_alpha_pt = 0.15  # Weight for PT enhancement
-            print("Using spatial enhancement module")
-        else:
-            print("Not using spatial enhancement module")
         
-        # Reasoning (using original MCGR)
-        self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
-        self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
-        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
-        self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
-        self.reason_visual_pre_norm = nn.Sequential(
-            nn.LayerNorm(self.D_fus),
-            nn.Dropout(0.1)
+        # self.tv_fusion = TextViewFusion(
+        #     fusion_dim=self.D_fus,  # 768
+        # )
+        self.tv_fusion = TextViewFusion(
+            text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
+            view_dim=self.backbone.out_channels[-1],  # View feature dimension
+            fusion_dim=self.D_fus,  # Output dimension
+            hidden_dim=512,  # Hidden dimension for intermediate layers
         )
-        self.reason_full_visual_pre_norm = nn.Sequential(
-            nn.LayerNorm(self.D_fus),
-            nn.Dropout(0.1)
+        
+        # Tri-modal fusion
+        # self.tri_modal_fusion = TrimodalFusion(
+        #     fusion_dim=self.D_fus, # 768
+        #     hidden_dim=256,  # Hidden dimension for intermediate layers
+        #     dropout=0.1,  # Dropout rate for regularization
+        # )
+        self.tri_modal_fusion = TrimodalFusion(
+            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
+            view_dim=self.backbone.out_channels[-1],  # View feature dimension
+            text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
+            synergy_dim=self.D_fus,  # Synergy dimension
+            fusion_dim=self.D_fus,  # Output dimension
         )
-        self.reason = MODELS.build(backbone_fusion)
+        
+        # self.spatial_module = SpatialContextModule(
+        #     fusion_dim=self.D_fus,
+        #     num_scales=3,
+        #     k_neighbors=[8, 16, 32],
+        #     voxel_size=0.2,
+        #     max_superpoints=256,
+        #     dropout=0.1
+        # )
+        # self.use_spatial_enhancement = False
+        # if self.use_spatial_enhancement:
+        #     self.spatial_alpha_pv = 0.3  # Weight for PV enhancement
+        #     self.spatial_alpha_pt = 0.15  # Weight for PT enhancement
+        #     print("Using spatial enhancement module")
+        # else:
+        #     print("Not using spatial enhancement module")
+        
+        
         
         # loss module
-        self.pid_loss_module = PIDLosses(temperature=0.1)
+        self.pid_loss_module = PIDLosses(temperature=0.1, fusion_dim=self.D_fus)
         
         """Try to Replace MCGR"""        
         # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
@@ -361,58 +389,42 @@ class MultiViewVLMBase3DQA(BaseModel):
         # raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
         
         # 2. Uni-modal representation space
-        Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
-        Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, M, D_fus] = [12, 1024, 20, 768]
-        Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
+        # Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
+        # Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, M, D_fus] = [12, 1024, 20, 768]
+        # Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
         # Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
         # Store features in the dictionary
-        feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
-        feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 20, 768]
-        feat_dict['Z_T'] = Z_T  # [B, L, D_fus] = [12, 14, 768]
+        # feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
+        # feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 20, 768]
+        # feat_dict['Z_T'] = Z_T  # [B, L, D_fus] = [12, 14, 768]
         
         # 3. Bi-modal representation space
-        Z_TV = self.tv_fusion(Z_T, Z_V)  # [B, Np, Di] = [12, 1024, 768]
-        feat_dict['Z_VT'] = Z_TV
+        z_tv = self.tv_fusion(raw_global_text_feats, raw_view_feats)  # [B, Np, Di] = [12, 1024, 768]
+        feat_dict['z_tv'] = z_tv
         
-        Z_PV = self.pv_fusion(Z_P, Z_V)
-        feat_dict['Z_PV'] = Z_PV # [B, Np, D_fus] = [12, 1024, 768]
+        z_pv = self.pv_fusion(raw_point_feats, raw_view_feats)
+        feat_dict['z_pv'] = z_pv # [B, Np, D_fus] = [12, 1024, 768]
         
-        Z_PT = self.pt_fusion(
-            Z_PV,
-            Z_TV,
-            Z_T
+        z_pt = self.pt_fusion(
+            z_pv,
+            z_tv,
+            raw_global_text_feats
         )
-        feat_dict['Z_PT'] = Z_PT
-        
-        if self.use_spatial_enhancement:
-            # 3.5 spatial context
-            coordinates = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
-            question_features = text_dict['text_global_token']  # [B, D_fus] = [12, 768]
-            
-            spatial_results = self.spatial_module(
-                coordinates=coordinates,
-                question_features=question_features,
-            )
-            
-            # integrate spatial context into the bi-modal synergies
-            feat_dict = integrate_spatial_context(
-                feat_dict,
-                spatial_results,
-                alpha_pv=self.spatial_alpha_pv,  # Weight for PV enhancement
-                alpha_pt=self.spatial_alpha_pt,  # Weight for PT enhancement
-            )
+        feat_dict['z_pt'] = z_pt
         
         # 4. Tri-modal fusion
-        Z_fused, component_weights, component_dict = self.tri_modal_fusion(
-            # Bi-modal representations (now with spatially enhanced features)
-            Z_TV, feat_dict['Z_PV'], feat_dict['Z_PT'],
-            # Uni-modal representations
-            Z_T, Z_V, Z_P,
-            question_features=text_dict['text_global_token'],  # [B, D_fus] = [12, 768]
+        z_fused, component_weights, component_dict = self.tri_modal_fusion(
+            point_feat=raw_point_feats,
+            view_feat=raw_view_feats,
+            text_feat=raw_global_text_feats,
+            z_pv=z_pv,
+            z_tv=z_tv,
+            z_pt=z_pt,
         )
         
-        feat_dict['Z_final'] = Z_fused  # [B, Np, D_fus] = [12, 1024, 768]
+        feat_dict['z_final'] = z_fused  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['component_dict'] = component_dict  # Dictionary of components
+        feat_dict['component_weights'] = component_weights  # Weights for each component
 
         return feat_dict
 
@@ -511,7 +523,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         B = len(points) # batch size
         losses = {}
         
-        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        full_point_feats = feat_dict['z_final'] # [B, Np, D_fus] = [12, 1024, 768]
         full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
         # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
         # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
@@ -541,6 +553,8 @@ class MultiViewVLMBase3DQA(BaseModel):
                                      ret_fusion_feat=True,
                                      batch_data_samples=batch_data_samples)
         
+        fusion_feat = qa_losses['fusion_feat']
+        
         losses.update(qa_losses)
         
         if self.with_target_bbox_head:
@@ -560,43 +574,34 @@ class MultiViewVLMBase3DQA(BaseModel):
             losses.update(situation_predict_loss)
             
         # PID losses
-        # if 'component_dict' in feat_dict and hasattr(self, 'pid_loss_module'):
-        #     # Prepare target features for information bottleneck loss
-        #     # We can use different features depending on what's most relevant:
+        # print(f"DEBUG: Keys in feat_dict before PID loss calculation: {feat_dict.keys()}")
+        if 'component_dict' in feat_dict and hasattr(self, 'pid_loss_module'):
+            # Compute PID losses
+            pid_losses = self.pid_loss_module(
+                component_dict=feat_dict['component_dict'],
+                target_features=fusion_feat,
+                loss_weights={
+                    'uniqueness': 0.5,              # Enforce orthogonality between unique components
+                    'redundancy_consistency': 0.5,   # Ensure redundancy is truly shared
+                    'synergy_exclusivity': 0.3,      # Synergy should be exclusive to joint observation
+                    'component_diversity': 0.3,      # Prevent component collapse
+                    'information_bottleneck': 0.2,   # Components should be informative about task
+                    'redundancy_gate': 0.1          # Regularize redundancy gates
+                }
+            )
             
-        #     # Option 1: Use the final fused features that go to QA head
-        #     target_features = point_feats  # [B, Nq, D_fus] - FPS sampled features
+            # Add individual PID losses to the loss dict for monitoring
+            for pid_loss_name, pid_loss_value in pid_losses.items():
+                if pid_loss_name != 'total_pid_loss':
+                    losses[f'pid_{pid_loss_name}'] = pid_loss_value
             
-        #     # Option 2: Use the fusion features from QA head (if available)
-        #     # target_features = qa_losses.get('fusion_feat', point_feats)
-            
-        #     # Option 3: Use answer embeddings if your QA head provides them
-        #     # target_features = head_inputs_dict.get('answer_embeddings', point_feats)
-            
-        #     # Compute PID losses
-        #     pid_losses = self.pid_loss_module(
-        #         component_dict=feat_dict['component_dict'],
-        #         target_features=target_features,
-        #         loss_weights={
-        #             'uniqueness': 0.5,              # Enforce orthogonality between unique components
-        #             'redundancy_consistency': 0.5,   # Ensure redundancy is truly shared
-        #             'synergy_exclusivity': 0.3,      # Synergy should be exclusive to joint observation
-        #             'component_diversity': 0.3,      # Prevent component collapse
-        #             'information_bottleneck': 0.2,   # Components should be informative about task
-        #             'redundancy_gate': 0.1          # Regularize redundancy gates
-        #         }
-        #     )
-            
-        #     # Add individual PID losses to the loss dict for monitoring
-        #     for pid_loss_name, pid_loss_value in pid_losses.items():
-        #         if pid_loss_name != 'total_pid_loss':
-        #             losses[f'pid_{pid_loss_name}'] = pid_loss_value
-            
-        #     # Add weighted PID loss to total
-        #     # Adjust the weight (0.1) based on your needs - start small and increase if needed
-        #     losses['pid_total'] = pid_losses['total_pid_loss']
-        
+            # Add weighted PID loss to total
+            # Adjust the weight (0.1) based on your needs - start small and increase if needed
+            losses['pid_total_loss'] = pid_losses['total_pid_loss']
+
         losses = self.loss_collect(losses)
+        # print(f"DEBUG: Collected losses: {losses.keys()}")  # Debugging line to check collected losses
+        # exit(0)
         return losses
         
     def loss_collect(self, losses_dict):
@@ -657,7 +662,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # )
         
         # 2. Preparation for reasoning
-        full_point_feats = feat_dict['Z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        full_point_feats = feat_dict['z_final'] # [B, Np, D_fus] = [12, 1024, 768]
         full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
         point_mask = None
         B = full_point_feats.shape[0]  # batch size
