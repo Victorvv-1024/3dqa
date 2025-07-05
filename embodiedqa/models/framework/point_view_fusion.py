@@ -212,40 +212,25 @@ class PointViewFusion(BaseModule):
         """
         Args:
             point_features (Tensor): Raw point features of shape [B, Np, Dp].
-            view_features (Tensor): Raw multi-view features of shape [B, Np, M, Dv].
+            view_features (Tensor): Aggregated view features of shape [B, Np, Dv] 
+                                   (already aggregated by TextViewFusion).
             
         Returns:
             Z_PV (Tensor): Fused point-view features of shape [B, Np, fusion_dim].
         """
-        B, Np, M, Dv = view_features.shape
-        hidden_dim = self.point_att_proj.out_features
+        B, Np, Dv = view_features.shape  # No multi-view dimension anymore
 
-        # --- Step 1: Point-Guided View Aggregation (Manual Attention) ---
-        
-        # Project features to common space for attention score calculation
-        query_p_proj = self.point_att_proj(point_features).unsqueeze(2)  # [B, Np, 1, hidden_dim]
-        key_v_proj = self.view_att_proj(view_features)  # [B, Np, M, hidden_dim]
-        
-        # Manual scaled dot-product attention
-        attention_scores = torch.matmul(query_p_proj, key_v_proj.transpose(-2, -1))  # [B, Np, 1, M]
-        attention_scores = attention_scores / (hidden_dim ** 0.5)
-        attention_weights = F.softmax(attention_scores, dim=-1)  # [B, Np, 1, M]
-        
-        # Weighted aggregation of raw view features (not projected)
-        aggregated_views = torch.matmul(attention_weights, view_features)  # [B, Np, 1, Dv]
-        aggregated_views = aggregated_views.squeeze(2)  # [B, Np, Dv]
+        # --- Step 1: Direct Processing (No View Aggregation Needed) ---
+        # Since views are already aggregated by TextViewFusion, skip manual attention
         
         # --- Step 2: Process Features to Common Fusion Space ---
-        
         processed_points = self.point_processor(point_features)  # [B, Np, fusion_dim]
-        processed_views = self.view_processor(aggregated_views)   # [B, Np, fusion_dim]
+        processed_views = self.view_processor(view_features)     # [B, Np, fusion_dim]
         
         # --- Step 3: Extract Pure PID Synergy ---
-        
         Z_PV = self.synergy_extractor.extract_synergy(processed_points, processed_views)
         
         # --- Step 4: Final Processing ---
-        
         Z_PV = self.final_proj(Z_PV)
         
         return Z_PV

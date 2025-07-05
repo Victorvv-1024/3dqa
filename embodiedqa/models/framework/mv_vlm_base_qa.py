@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from mmengine.model import BaseModel,BaseModule
 from mmengine.structures import InstanceData
 from mmcv.ops import furthest_point_sample,gather_points
-from embodiedqa.models.layers.fusion_layers.point_fusion import visible_sample
+from embodiedqa.models.layers.fusion_layers.point_fusion import visible_sample, batch_point_sample_in_visible
 from embodiedqa.registry import MODELS
 from embodiedqa.structures.bbox_3d import get_proj_mat_by_coord_type
 from embodiedqa.utils import ConfigType, OptConfigType
@@ -117,6 +117,11 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         if self.use_2d:
             self.backbone = MODELS.build(backbone)
+            #for TGMF
+            self.text_global_att_proj = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size,self.reason.config.hidden_size),
+                                                    nn.LayerNorm(self.reason.config.hidden_size))
+            self.img_att_proj = nn.Sequential( nn.Linear(self.backbone.out_channels[-1],self.reason.config.hidden_size),
+                                            nn.LayerNorm(self.reason.config.hidden_size))
 
         self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size, self.D_fus),
                                            nn.LayerNorm(self.D_fus)
@@ -231,7 +236,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         
         
         # loss module
-        self.pid_loss_module = PIDLosses(temperature=0.1, fusion_dim=self.D_fus)
+        self.pid_loss_module = PIDLosses(temperature=0.1)
         
         """Try to Replace MCGR"""        
         # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
@@ -328,8 +333,16 @@ class MultiViewVLMBase3DQA(BaseModel):
             img_features_dict = self.backbone(img) # directly pass through the 2D Swin backbone 
             img_features, img_global_features = img_features_dict['layer_outputs'], img_features_dict['pooler_output']
             
-        visible_imgfeats = [] # list to store visible image features after lifting
-        all_extrinsics = [] # store camera extrinsic matrices for each sample in the batch
+        # visible_imgfeats = [] # list to store visible image features after lifting
+        # all_extrinsics = [] # store camera extrinsic matrices for each sample in the batch
+        img_feat_valid_flags = []
+        points_imgfeats = []
+        
+        text_global_token = text_dict.get('text_global_token', None)
+        text_global_features_for_att = self.text_global_att_proj(text_global_token)
+        
+        img_features_for_att = self.img_att_proj(img_features[-1].mean(dim=[-1,-2]))#B, n_views, C
+        all_extrinsics = []
         for idx in range(len(batch_img_metas)):
             img_meta = batch_img_metas[idx]
               
@@ -363,13 +376,33 @@ class MultiViewVLMBase3DQA(BaseModel):
             proj_mat = torch.stack(projection) # n_views, 4, 4
 
             """We make visible sampling here"""
-            visible_imgfeat = visible_sample(
+            # visible_imgfeat = visible_sample(
+            #     img_meta,
+            #     img_features=img_features[-1][idx], # sample the last feature level
+            #     points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
+            #     views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
+            #     voxel_size=self.voxel_size,
+            #     proj_mat=proj_mat, # projects 3D points to 2D image plane
+            #     coord_type=self.coord_type,
+            #     img_scale_factor=img_scale_factor,
+            #     img_crop_offset=img_crop_offset,
+            #     img_flip=img_flip,
+            #     img_pad_shape=img.shape[-2:],
+            #     img_shape=img_meta['img_shape'][:2],
+            #     aligned=False,
+            #     valid_flag=True,
+            #     return_valid_flag=False  # Simplified - just get clean features
+            #     # Note: Removed text_global_features_for_att and img_features_for_att
+            # )
+            
+            # visible_imgfeats.append(visible_imgfeat)  # still list of tensors
+            _, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
                 img_meta,
-                img_features=img_features[-1][idx], # sample the last feature level
-                points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
-                views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
-                voxel_size=self.voxel_size,
-                proj_mat=proj_mat, # projects 3D points to 2D image plane
+                img_features=img_features[-1][idx],
+                points=feat_dict['fp_xyz'][-1][idx],
+                views_points = batch_data_samples[idx].views_points,
+                voxel_size = self.voxel_size,
+                proj_mat=proj_mat,
                 coord_type=self.coord_type,
                 img_scale_factor=img_scale_factor,
                 img_crop_offset=img_crop_offset,
@@ -377,22 +410,26 @@ class MultiViewVLMBase3DQA(BaseModel):
                 img_pad_shape=img.shape[-2:],
                 img_shape=img_meta['img_shape'][:2],
                 aligned=False,
-                valid_flag=True,
-                return_valid_flag=False  # Simplified - just get clean features
-                # Note: Removed text_global_features_for_att and img_features_for_att
-            )
-            
-            visible_imgfeats.append(visible_imgfeat)  # still list of tensors
+                return_valid_flag=True,
+                text_global_features_for_att=text_global_features_for_att[idx],
+                img_features_for_att=img_features_for_att[idx])
+            points_imgfeats.append(
+                points_imgfeat)  # all sample
+            img_feat_valid_flags.append(img_feat_valid_flag)# last_level
 
-        visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, M, Di
-        all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
+
+        # visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, M, Di
+        # all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
+        points_imgfeats = torch.stack(points_imgfeats)#B,Np,D_fus
+        img_feat_valid_flags = torch.stack(img_feat_valid_flags)#B,N
+        all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device)#B,n_views,4,4
 
         """ 
         Our pipeline starts here 
         """
         # 1. Get basic features
         raw_point_feats = feat_dict['fp_features'][-1].transpose(1,2).contiguous()  # [B, Np, Dp] = [12, 1024, 256]
-        raw_view_feats = visible_imgfeats  # [B, Np, M, Di] = [12, 1024, 20, 1024]
+        # raw_view_feats = visible_imgfeats  # [B, Np, M, Di] = [12, 1024, 20, 1024]
         raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
         # raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
         
@@ -407,10 +444,10 @@ class MultiViewVLMBase3DQA(BaseModel):
         # feat_dict['Z_T'] = Z_T  # [B, L, D_fus] = [12, 14, 768]
         
         # 3. Bi-modal representation space
-        z_tv = self.tv_fusion(raw_global_text_feats, raw_view_feats)  # [B, Np, Di] = [12, 1024, 768]
+        z_tv = self.tv_fusion(raw_global_text_feats, points_imgfeats)  # [B, Np, Di] = [12, 1024, 768]
         feat_dict['z_tv'] = z_tv
         
-        z_pv = self.pv_fusion(raw_point_feats, raw_view_feats)
+        z_pv = self.pv_fusion(raw_point_feats, points_imgfeats)
         feat_dict['z_pv'] = z_pv # [B, Np, D_fus] = [12, 1024, 768]
         
         z_pt = self.pt_fusion(
@@ -423,7 +460,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # 4. Tri-modal fusion
         z_fused, component_weights, component_dict = self.tri_modal_fusion(
             point_feat=raw_point_feats,
-            view_feat=raw_view_feats,
+            view_feat=points_imgfeats,
             text_feat=raw_global_text_feats,
             z_pv=z_pv,
             z_tv=z_tv,
@@ -587,25 +624,26 @@ class MultiViewVLMBase3DQA(BaseModel):
             # Compute PID losses
             pid_losses = self.pid_loss_module(
                 component_dict=feat_dict['component_dict'],
-                target_features=fusion_feat,
-                loss_weights={
-                    'uniqueness': 0.5,              # Enforce orthogonality between unique components
-                    'redundancy_consistency': 0.5,   # Ensure redundancy is truly shared
-                    'synergy_exclusivity': 0.3,      # Synergy should be exclusive to joint observation
-                    'component_diversity': 0.3,      # Prevent component collapse
-                    'information_bottleneck': 0.2,   # Components should be informative about task
-                    'redundancy_gate': 0.1          # Regularize redundancy gates
-                }
+                # target_features=fusion_feat,
+                # loss_weights={
+                #     'uniqueness': 0.5,              # Enforce orthogonality between unique components
+                #     'redundancy_consistency': 0.5,   # Ensure redundancy is truly shared
+                #     'synergy_exclusivity': 0.3,      # Synergy should be exclusive to joint observation
+                #     'component_diversity': 0.3,      # Prevent component collapse
+                #     'information_bottleneck': 0.2,   # Components should be informative about task
+                #     'redundancy_gate': 0.1          # Regularize redundancy gates
+                # }
             )
+            losses['pid_loss'] = pid_losses
             
             # Add individual PID losses to the loss dict for monitoring
-            for pid_loss_name, pid_loss_value in pid_losses.items():
-                if pid_loss_name != 'total_pid_loss':
-                    losses[f'pid_{pid_loss_name}'] = pid_loss_value
+            # for pid_loss_name, pid_loss_value in pid_losses.items():
+            #     if pid_loss_name != 'total_pid_loss':
+            #         losses[f'pid_{pid_loss_name}'] = pid_loss_value
             
             # Add weighted PID loss to total
             # Adjust the weight (0.1) based on your needs - start small and increase if needed
-            losses['pid_total_loss'] = pid_losses['total_pid_loss']
+            # losses['pid_total_loss'] = pid_losses['total_pid_loss']
 
         losses = self.loss_collect(losses)
         # print(f"DEBUG: Collected losses: {losses.keys()}")  # Debugging line to check collected losses

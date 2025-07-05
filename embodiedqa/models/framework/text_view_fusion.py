@@ -184,85 +184,85 @@ from embodiedqa.registry import MODELS
 from .pse import BasePairwiseFusion
 
 
-class TextGuidedViewAggregation(nn.Module):
-    """
-    DSPNet-inspired text-guided view aggregation (PRE-PID processing).
+# class TextGuidedViewAggregation(nn.Module):
+#     """
+#     DSPNet-inspired text-guided view aggregation (PRE-PID processing).
     
-    Purpose: Select and weight views based on question relevance.
-    This is NOT synergy extraction - it's intelligent view selection.
+#     Purpose: Select and weight views based on question relevance.
+#     This is NOT synergy extraction - it's intelligent view selection.
     
-    Mathematical Foundation:
-    V_aggregated = Σ_m w_m(T) * V_m where w_m(T) are text-dependent weights
-    """
+#     Mathematical Foundation:
+#     V_aggregated = Σ_m w_m(T) * V_m where w_m(T) are text-dependent weights
+#     """
     
-    def __init__(self, text_dim=768, view_dim=768, hidden_dim=256):
-        super().__init__()
+#     def __init__(self, text_dim=768, view_dim=768, hidden_dim=256):
+#         super().__init__()
         
-        # Text-guided attention for view selection
-        self.text_query_proj = nn.Linear(text_dim, hidden_dim)
-        self.view_key_proj = nn.Linear(view_dim, hidden_dim)
+#         # Text-guided attention for view selection
+#         self.text_query_proj = nn.Linear(text_dim, hidden_dim)
+#         self.view_key_proj = nn.Linear(view_dim, hidden_dim)
         
-        # Global context extractors for attention computation
-        self.text_global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(text_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU()
-        )
+#         # Global context extractors for attention computation
+#         self.text_global_pool = nn.Sequential(
+#             nn.AdaptiveAvgPool1d(1),
+#             nn.Flatten(),
+#             nn.Linear(text_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.ReLU()
+#         )
         
-        self.view_global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(start_dim=2),  # Keep [B, M, hidden]
-            nn.Linear(view_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU()
-        )
+#         self.view_global_pool = nn.Sequential(
+#             nn.AdaptiveAvgPool2d(1),
+#             nn.Flatten(start_dim=2),  # Keep [B, M, hidden]
+#             nn.Linear(view_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim),
+#             nn.ReLU()
+#         )
         
-        # Temperature parameter for attention sharpness
-        self.temperature = nn.Parameter(torch.tensor(1.0))
+#         # Temperature parameter for attention sharpness
+#         self.temperature = nn.Parameter(torch.tensor(1.0))
         
-    def forward(self, text_features: torch.Tensor, view_features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            text_features: [B, L, text_dim] - Sequential text features
-            view_features: [B, Np, M, view_dim] - Multi-view features
+#     def forward(self, text_features: torch.Tensor, view_features: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             text_features: [B, L, text_dim] - Sequential text features
+#             view_features: [B, Np, M, view_dim] - Multi-view features
             
-        Returns:
-            aggregated_views: [B, Np, view_dim] - Question-relevant view representation
-        """
-        B, Np, M, view_dim = view_features.shape
+#         Returns:
+#             aggregated_views: [B, Np, view_dim] - Question-relevant view representation
+#         """
+#         B, Np, M, view_dim = view_features.shape
         
-        # Extract global context for attention computation
-        if text_features.dim() == 3:  # [B, L, D]
-            text_global = self.text_global_pool(text_features.transpose(1, 2))  # [B, hidden]
-        else:  # [B, D]
-            text_global = self.text_query_proj(text_features)  # [B, hidden]
+#         # Extract global context for attention computation
+#         if text_features.dim() == 3:  # [B, L, D]
+#             text_global = self.text_global_pool(text_features.transpose(1, 2))  # [B, hidden]
+#         else:  # [B, D]
+#             text_global = self.text_query_proj(text_features)  # [B, hidden]
         
-        # Global view features for attention keys
-        view_global_input = view_features.mean(dim=1)
-        view_global = self.view_global_pool(view_global_input)  # [B, M, hidden]
+#         # Global view features for attention keys
+#         view_global_input = view_features.mean(dim=1)
+#         view_global = self.view_global_pool(view_global_input)  # [B, M, hidden]
         
-        # Compute view importance weights based on text-view alignment
-        text_query = text_global.unsqueeze(1)  # [B, 1, hidden]
+#         # Compute view importance weights based on text-view alignment
+#         text_query = text_global.unsqueeze(1)  # [B, 1, hidden]
         
-        # Attention scores: how relevant is each view to the question?
-        attention_scores = torch.matmul(text_query, view_global.transpose(1, 2))  # [B, 1, M]
-        attention_scores = attention_scores / (self.temperature * (view_global.size(-1) ** 0.5))
+#         # Attention scores: how relevant is each view to the question?
+#         attention_scores = torch.matmul(text_query, view_global.transpose(1, 2))  # [B, 1, M]
+#         attention_scores = attention_scores / (self.temperature * (view_global.size(-1) ** 0.5))
         
-        # Softmax to get view importance weights
-        view_weights = F.softmax(attention_scores, dim=-1)  # [B, 1, M]
+#         # Softmax to get view importance weights
+#         view_weights = F.softmax(attention_scores, dim=-1)  # [B, 1, M]
         
-        # Expand weights for point-wise application
-        view_weights = view_weights.unsqueeze(1).expand(-1, Np, -1, -1)  # [B, Np, 1, M]
+#         # Expand weights for point-wise application
+#         view_weights = view_weights.unsqueeze(1).expand(-1, Np, -1, -1)  # [B, Np, 1, M]
         
-        # Weighted aggregation of views
-        aggregated_views = torch.sum(
-            view_weights * view_features.unsqueeze(2),  # [B, Np, 1, M] * [B, Np, 1, M, view_dim]
-            dim=3
-        ).squeeze(2)  # [B, Np, view_dim]
+#         # Weighted aggregation of views
+#         aggregated_views = torch.sum(
+#             view_weights * view_features.unsqueeze(2),  # [B, Np, 1, M] * [B, Np, 1, M, view_dim]
+#             dim=3
+#         ).squeeze(2)  # [B, Np, view_dim]
         
-        return aggregated_views
+#         return aggregated_views
 
 @MODELS.register_module()
 class TextViewFusion(BaseModule):
@@ -287,11 +287,11 @@ class TextViewFusion(BaseModule):
         super().__init__(init_cfg=init_cfg)
         
         # Stage 1: Text-guided view aggregation (pre-PID)
-        self.view_aggregator = TextGuidedViewAggregation(
-            text_dim=text_dim, 
-            view_dim=view_dim, 
-            hidden_dim=hidden_dim
-        )
+        # self.view_aggregator = TextGuidedViewAggregation(
+        #     text_dim=text_dim, 
+        #     view_dim=view_dim, 
+        #     hidden_dim=hidden_dim
+        # )
         
         # Stage 2: Pure PID synergy extraction
         self.synergy_fusion = BasePairwiseFusion(
@@ -324,7 +324,7 @@ class TextViewFusion(BaseModule):
         
         # Stage 1: Question-guided view aggregation (DSPNet insight)
         # This reduces [B, Np, M, view_dim] -> [B, Np, view_dim]
-        aggregated_views = self.view_aggregator(text_features, view_features)
+        # aggregated_views = self.view_aggregator(text_features, view_features)
         
         # Stage 2: Extract pure T-V synergy from aggregated views (PID requirement)
         # Handle text dimensionality for synergy extraction
@@ -337,17 +337,18 @@ class TextViewFusion(BaseModule):
                 text_pooled = text_features.mean(dim=1)  # [B, D]
             
             # Expand to point space
-            B, Np, _ = aggregated_views.shape
+            B, Np, _ = view_features.shape
             text_expanded = text_pooled.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, D]
         else:  # Global text [B, D]
-            B, Np, _ = aggregated_views.shape
+            B, Np, _ = view_features.shape
             text_expanded = text_features.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, D]
         
         # Extract pure synergy
-        Z_TV = self.synergy_fusion(text_expanded, aggregated_views)
-        
-        if self.return_aggregated_views:
-            # Return both for potential use in other modules
-            return Z_TV, aggregated_views
-        else:
-            return Z_TV
+        Z_TV = self.synergy_fusion(text_expanded, view_features)
+
+        # if self.return_aggregated_views:
+        #     # Return both for potential use in other modules
+        #     return Z_TV, aggregated_views
+        # else:
+        #     return Z_TV
+        return Z_TV

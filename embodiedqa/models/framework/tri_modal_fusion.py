@@ -739,13 +739,6 @@ class TrimodalFusion(BaseModule):
         super().__init__(init_cfg=init_cfg)
         self.fusion_dim = fusion_dim
 
-        # --- 1. Modules for processing RAW features ---
-        # Projections for manual attention score calculation
-        self.point_query_proj = nn.Linear(point_dim, hidden_dim)
-        self.text_query_proj = nn.Linear(text_dim, hidden_dim)
-        self.view_key_proj = nn.Linear(view_dim, hidden_dim)
-        self.view_agg_norm = nn.LayerNorm(view_dim)
-
         # Uniqueness Extractors for each modality
         self.unique_extractor_P = UniquenessExtractor(point_dim, synergy_dim, fusion_dim, hidden_dim)
         self.unique_extractor_V = UniquenessExtractor(view_dim, synergy_dim, fusion_dim, hidden_dim)
@@ -792,28 +785,27 @@ class TrimodalFusion(BaseModule):
         Returns:
             Z_fused, pid_weights, component_dict
         """
-        B, Np, M, Dv = view_feat.shape
-        hidden_dim = self.point_query_proj.out_features
+        B, Np, Dv = view_feat.shape
 
-        # --- Step 1: Intelligent View Aggregation (Corrected) ---
-        query_p_proj = self.point_query_proj(point_feat)
-        query_t_proj = self.text_query_proj(text_feat).unsqueeze(1).expand(-1, Np, -1)
-        combined_query = (query_p_proj + query_t_proj).unsqueeze(2) # Shape: [B, Np, 1, hidden_dim]
+        # # --- Step 1: Intelligent View Aggregation (Corrected) ---
+        # query_p_proj = self.point_query_proj(point_feat)
+        # query_t_proj = self.text_query_proj(text_feat).unsqueeze(1).expand(-1, Np, -1)
+        # combined_query = (query_p_proj + query_t_proj).unsqueeze(2) # Shape: [B, Np, 1, hidden_dim]
 
-        key_v_proj = self.view_key_proj(view_feat) # Shape: [B, Np, M, hidden_dim]
+        # key_v_proj = self.view_key_proj(view_feat) # Shape: [B, Np, M, hidden_dim]
         
-        # Manual scaled dot-product attention
-        attention_scores = (combined_query * key_v_proj).sum(dim=-1) / (hidden_dim ** 0.5) # Shape: [B, Np, M]
-        attention_weights = F.softmax(attention_scores, dim=-1) # Shape: [B, Np, M]
+        # # Manual scaled dot-product attention
+        # attention_scores = (combined_query * key_v_proj).sum(dim=-1) / (hidden_dim ** 0.5) # Shape: [B, Np, M]
+        # attention_weights = F.softmax(attention_scores, dim=-1) # Shape: [B, Np, M]
         
-        # Weighted sum of original raw view features
-        raw_v_agg = (view_feat * attention_weights.unsqueeze(-1)).sum(dim=2) # Shape: [B, Np, Dv]
-        raw_v_agg = self.view_agg_norm(raw_v_agg)
+        # # Weighted sum of original raw view features
+        # raw_v_agg = (view_feat * attention_weights.unsqueeze(-1)).sum(dim=2) # Shape: [B, Np, Dv]
+        # raw_v_agg = self.view_agg_norm(raw_v_agg)
 
         # --- Step 2: PID Component Assembly ---
         raw_t_expanded = text_feat.unsqueeze(1).expand(-1, Np, -1)
         Z_P_unique = self.unique_extractor_P(point_feat, z_pv, z_pt)
-        Z_V_unique = self.unique_extractor_V(raw_v_agg, z_pv, z_tv)
+        Z_V_unique = self.unique_extractor_V(view_feat, z_pv, z_tv)
         Z_T_unique = self.unique_extractor_T(raw_t_expanded, z_tv, z_pt)
 
         redundancy_input = torch.cat([Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
