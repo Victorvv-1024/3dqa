@@ -77,6 +77,10 @@ class MultiViewVLMBase3DQA(BaseModel):
                  backbone_lidar: ConfigType,
                  backbone_fusion: ConfigType,
                  qa_head: ConfigType,
+                 pv_fusion: ConfigType,
+                 tv_fusion: ConfigType,
+                 pt_fusion: ConfigType,
+                 tri_modal_fusion: ConfigType,
                  target_bbox_head: ConfigType = None,
                  target_cls_head: ConfigType = None,
                  situation_predict_head: ConfigType = None,
@@ -161,34 +165,37 @@ class MultiViewVLMBase3DQA(BaseModel):
         # self.pv_fusion = PointViewFusion(
         #     fusion_dim=self.D_fus,  # Output dim = 768
         # )
-        self.pv_fusion = PointViewFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
-            view_dim=self.backbone.out_channels[-1],  # View feature dimension
-            fusion_dim=self.D_fus,  # Output dimension
-            hidden_dim=512,  # Hidden dimension for intermediate layers
-            dropout=0.1,  # Dropout rate for regularization
-        )
+        # self.pv_fusion = PointViewFusion(
+        #     point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
+        #     view_dim=self.backbone.out_channels[-1],  # View feature dimension
+        #     fusion_dim=self.D_fus,  # Output dimension
+        #     hidden_dim=512,  # Hidden dimension for intermediate layers
+        #     dropout=0.1,  # Dropout rate for regularization
+        # )
+        self.pv_fusion = MODELS.build(pv_fusion)
         
         # self.pt_fusion = PointTextFusion(
         #     fusion_dim=self.D_fus,
         # )
-        self.pt_fusion = PointTextFusion(
-            synergy_dim=self.D_fus,  # Synergy dimension
-            text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
-            fusion_dim=self.D_fus,  # Output dimension
-            hidden_dim=512,  # Hidden dimension for intermediate layers
-            dropout=0.1,  # Dropout rate for regularization
-        )
+        # self.pt_fusion = PointTextFusion(
+        #     synergy_dim=self.D_fus,  # Synergy dimension
+        #     text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
+        #     fusion_dim=self.D_fus,  # Output dimension
+        #     hidden_dim=512,  # Hidden dimension for intermediate layers
+        #     dropout=0.1,  # Dropout rate for regularization
+        # )
+        self.pt_fusion = MODELS.build(pt_fusion)
         
         # self.tv_fusion = TextViewFusion(
         #     fusion_dim=self.D_fus,  # 768
         # )
-        self.tv_fusion = TextViewFusion(
-            text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
-            view_dim=self.backbone.out_channels[-1],  # View feature dimension
-            fusion_dim=self.D_fus,  # Output dimension
-            hidden_dim=512,  # Hidden dimension for intermediate layers
-        )
+        # self.tv_fusion = TextViewFusion(
+        #     text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
+        #     view_dim=self.backbone.out_channels[-1],  # View feature dimension
+        #     fusion_dim=self.D_fus,  # Output dimension
+        #     hidden_dim=512,  # Hidden dimension for intermediate layers
+        # )
+        self.tv_fusion = MODELS.build(tv_fusion)
         
         # Tri-modal fusion
         # self.tri_modal_fusion = TrimodalFusion(
@@ -196,13 +203,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         #     hidden_dim=256,  # Hidden dimension for intermediate layers
         #     dropout=0.1,  # Dropout rate for regularization
         # )
-        self.tri_modal_fusion = TrimodalFusion(
-            point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
-            view_dim=self.backbone.out_channels[-1],  # View feature dimension
-            text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
-            synergy_dim=self.D_fus,  # Synergy dimension
-            fusion_dim=self.D_fus,  # Output dimension
-        )
+        # self.tri_modal_fusion = TrimodalFusion(
+        #     point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
+        #     view_dim=self.backbone.out_channels[-1],  # View feature dimension
+        #     text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
+        #     synergy_dim=self.D_fus,  # Synergy dimension
+        #     fusion_dim=self.D_fus,  # Output dimension
+        # )
+        self.tri_modal_fusion = MODELS.build(tri_modal_fusion)
         
         # self.spatial_module = SpatialContextModule(
         #     fusion_dim=self.D_fus,
