@@ -624,26 +624,9 @@ class MultiViewVLMBase3DQA(BaseModel):
             # Compute PID losses
             pid_losses = self.pid_loss_module(
                 component_dict=feat_dict['component_dict'],
-                # target_features=fusion_feat,
-                # loss_weights={
-                #     'uniqueness': 0.5,              # Enforce orthogonality between unique components
-                #     'redundancy_consistency': 0.5,   # Ensure redundancy is truly shared
-                #     'synergy_exclusivity': 0.3,      # Synergy should be exclusive to joint observation
-                #     'component_diversity': 0.3,      # Prevent component collapse
-                #     'information_bottleneck': 0.2,   # Components should be informative about task
-                #     'redundancy_gate': 0.1          # Regularize redundancy gates
-                # }
             )
-            losses['pid_loss'] = pid_losses
-            
-            # Add individual PID losses to the loss dict for monitoring
-            # for pid_loss_name, pid_loss_value in pid_losses.items():
-            #     if pid_loss_name != 'total_pid_loss':
-            #         losses[f'pid_{pid_loss_name}'] = pid_loss_value
-            
-            # Add weighted PID loss to total
-            # Adjust the weight (0.1) based on your needs - start small and increase if needed
-            # losses['pid_total_loss'] = pid_losses['total_pid_loss']
+            # Add individual PID losses to the main losses dict
+            losses.update(pid_losses)
 
         losses = self.loss_collect(losses)
         # print(f"DEBUG: Collected losses: {losses.keys()}")  # Debugging line to check collected losses

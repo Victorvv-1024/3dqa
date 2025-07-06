@@ -258,42 +258,87 @@ class PIDLosses(nn.Module):
         
         return total_overlap / max(num_pairs, 1)
     
+    def consistency_loss(self, component_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Enforce Liang et al.'s mathematical PID constraints.
+        
+        Returns three main loss components:
+        1. pid_nonnegativity_loss: Sum of all non-negativity constraints
+        2. pid_information_bound_loss: Information conservation constraint  
+        3. pid_synergy_variance_loss: Synergy variance constraint
+        """
+        eps = 0.0001  # Small epsilon for numerical stability
+        device = next(iter(component_dict.values())).device
+        
+        # Extract components
+        U_P = component_dict.get('Z_P_unique')  # Unique point info
+        U_V = component_dict.get('Z_V_unique')  # Unique view info
+        U_T = component_dict.get('Z_T_unique')  # Unique text info
+        S_PV = component_dict.get('Z_PV_synergy')  # Point-view synergy
+        S_PT = component_dict.get('Z_PT_synergy')  # Point-text synergy
+        S_TV = component_dict.get('Z_TV_synergy')  # Text-view synergy
+        R = component_dict.get('Z_redundant')     # Redundancy
+        S_higher = component_dict.get('Z_higher_synergy')  # Higher-order synergy
+        
+        # CONSTRAINT 1: Non-negativity (all PID components must be >= 0)
+        total_nonnegativity_loss = torch.tensor(0.0, device=device)
+        for name, component in component_dict.items():
+            if component is not None:
+                neg_loss = F.relu(-component + eps).mean()
+                total_nonnegativity_loss += neg_loss * 0.1
+                # print(f"Non-negativity loss for {name}: {neg_loss.item():.6f}")
+        
+        # CONSTRAINT 2: Information conservation
+        # Total information should equal sum of all components
+        information_bound_loss = torch.tensor(0.0, device=device)
+        if all(c is not None for c in [U_P, U_V, U_T, S_PV, S_PT, S_TV, R, S_higher]):
+            total_components = U_P + U_V + U_T + S_PV + S_PT + S_TV + R + S_higher
+            
+            # Information should be bounded (not explode)
+            information_bound_loss = F.relu(total_components.norm(dim=-1).mean() - 5.0)
+            # print(f"Information bound loss: {information_bound_loss.item():.6f}, norm: {total_components.norm(dim=-1).mean().item():.6f}")
+        
+        # CONSTRAINT 3: Synergy consistency
+        # Synergies should actually contain emergent information
+        total_synergy_variance_loss = torch.tensor(0.0, device=device)
+        synergies = [S_PV, S_PT, S_TV, S_higher]
+        for i, synergy in enumerate(synergies):
+            if synergy is not None:
+                # Synergy should have some variance (not constant)
+                variance_loss = F.relu(0.1 - synergy.var(dim=-1).mean())
+                total_synergy_variance_loss += variance_loss
+                # print(f"Synergy {i} variance loss: {variance_loss.item():.6f}, variance: {synergy.var(dim=-1).mean().item():.6f}")
+        
+        losses = {
+            'pid_nonnegativity_loss': total_nonnegativity_loss,
+            'pid_information_bound_loss': information_bound_loss,
+            'pid_synergy_variance_loss': total_synergy_variance_loss,
+        }
+        
+        # print(f"PID constraint losses: {[(k, v.item()) for k, v in losses.items()]}")
+        return losses
+    
     def forward(self, component_dict: Dict[str, torch.Tensor], 
                 target_features: Optional[torch.Tensor] = None,
                 loss_weights: Optional[Dict[str, float]] = None) -> Dict[str, torch.Tensor]:
         """
-        Compute minimal PID losses for mathematical correctness only.
-        """
-        if loss_weights is None:
-            loss_weights = {
-                'uniqueness_orthogonality': 1.0,
-                'synergy_purity': 1.0,
-            }
+        Compute PID losses and return them as a dictionary.
         
-        losses = {}
+        Returns:
+            Dict containing individual PID losses with 'loss' in their names
+            for proper collection by the main model.
+        """
         device = next(iter(component_dict.values())).device
         
-        # Core PID mathematical requirements
         try:
-            losses['uniqueness_orthogonality'] = self.uniqueness_orthogonality_loss(component_dict)
+            # Get the three main PID constraint losses
+            pid_losses = self.consistency_loss(component_dict)
+            return pid_losses
         except Exception as e:
-            print(f"Warning in uniqueness_orthogonality_loss: {e}")
-            losses['uniqueness_orthogonality'] = torch.tensor(0.0, device=device)
-        
-        try:
-            losses['synergy_purity'] = self.synergy_purity_loss(component_dict)
-        except Exception as e:
-            print(f"Warning in synergy_purity_loss: {e}")
-            losses['synergy_purity'] = torch.tensor(0.0, device=device)
-        
-        # Total PID loss (much simpler)
-        total_loss = torch.tensor(0.0, device=device)
-        for name, loss_val in losses.items():
-            weight = loss_weights.get(name, 0.0)
-            if not torch.isnan(loss_val) and weight > 0:
-                total_loss += weight * loss_val
-        
-        # losses['total_pid_loss'] = total_loss
-        
-        # return losses
-        return total_loss
+            print(f"Warning in PID loss computation: {e}")
+            # Return zero losses if computation fails
+            return {
+                'pid_nonnegativity_loss': torch.tensor(0.0, device=device),
+                'pid_information_bound_loss': torch.tensor(0.0, device=device),
+                'pid_synergy_variance_loss': torch.tensor(0.0, device=device),
+            }

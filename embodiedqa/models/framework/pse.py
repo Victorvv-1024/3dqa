@@ -81,104 +81,30 @@ class SynergyExtractor(nn.Module):
         raw_synergy = self.synergy_detector(interaction)  # [B, N, D]
         
         # Step 4: Orthogonalize against unique components
-        unique_x = self.unique_x_projector(x_features)
-        unique_y = self.unique_y_projector(y_features)
+        marginal_x = self.unique_x_projector(x_features)
+        marginal_y = self.unique_y_projector(y_features)
         
         alpha = torch.sigmoid(self.orthogonalization_strength)
         
         # Project out unique components using Gram-Schmidt-like process
         synergy_orthogonal_x = raw_synergy - alpha * torch.sum(
-            raw_synergy * unique_x, dim=-1, keepdim=True
-        ) * unique_x / (torch.norm(unique_x, dim=-1, keepdim=True) ** 2 + 1e-8)
+            raw_synergy * marginal_x, dim=-1, keepdim=True
+        ) * marginal_x / (torch.norm(marginal_x, dim=-1, keepdim=True) ** 2 + 1e-8)
         
         synergy_orthogonal_y = synergy_orthogonal_x - alpha * torch.sum(
-            synergy_orthogonal_x * unique_y, dim=-1, keepdim=True
-        ) * unique_y / (torch.norm(unique_y, dim=-1, keepdim=True) ** 2 + 1e-8)
+            synergy_orthogonal_x * marginal_y, dim=-1, keepdim=True
+        ) * marginal_y / (torch.norm(marginal_y, dim=-1, keepdim=True) ** 2 + 1e-8)
+        
+        # True synergy = Joint - Marginals (PID definition)
+        # S = I(X,Y; Z) - I(X; Z) - I(Y; Z)
+        # alpha = torch.sigmoid(self.orthogonalization_strength)
+        # synergy = joint_info - alpha * (marginal_x + marginal_y) / 2
         
         # Step 5: Final synergy (emergent information only)
         synergy = synergy_orthogonal_y
+        # synergy = F.relu(synergy)  # Non-linearity to enhance expressiveness
         
         return synergy
-
-
-class TextGuidedViewAggregation(nn.Module):
-    """
-    DSPNet-inspired text-guided view aggregation (PRE-PID processing).
-    
-    Purpose: Select and weight views based on question relevance.
-    This is NOT synergy extraction - it's intelligent view selection.
-    
-    Mathematical Foundation:
-    V_aggregated = Σ_m w_m(T) * V_m where w_m(T) are text-dependent weights
-    """
-    
-    def __init__(self, text_dim=768, view_dim=768, hidden_dim=256):
-        super().__init__()
-        
-        # Text-guided attention for view selection
-        self.text_query_proj = nn.Linear(text_dim, hidden_dim)
-        self.view_key_proj = nn.Linear(view_dim, hidden_dim)
-        
-        # Global context extractors for attention computation
-        self.text_global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(text_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU()
-        )
-        
-        self.view_global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(start_dim=2),  # Keep [B, M, hidden]
-            nn.Linear(view_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU()
-        )
-        
-        # Temperature parameter for attention sharpness
-        self.temperature = nn.Parameter(torch.tensor(1.0))
-        
-    def forward(self, text_features: torch.Tensor, view_features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            text_features: [B, L, text_dim] - Sequential text features
-            view_features: [B, Np, M, view_dim] - Multi-view features
-            
-        Returns:
-            aggregated_views: [B, Np, view_dim] - Question-relevant view representation
-        """
-        B, Np, M, view_dim = view_features.shape
-        
-        # Extract global context for attention computation
-        if text_features.dim() == 3:  # [B, L, D]
-            text_global = self.text_global_pool(text_features.transpose(1, 2))  # [B, hidden]
-        else:  # [B, D]
-            text_global = self.text_query_proj(text_features)  # [B, hidden]
-        
-        # Global view features for attention keys
-        view_global = self.view_global_pool(view_features)  # [B, M, hidden]
-        
-        # Compute view importance weights based on text-view alignment
-        text_query = text_global.unsqueeze(1)  # [B, 1, hidden]
-        
-        # Attention scores: how relevant is each view to the question?
-        attention_scores = torch.matmul(text_query, view_global.transpose(1, 2))  # [B, 1, M]
-        attention_scores = attention_scores / (self.temperature * (view_global.size(-1) ** 0.5))
-        
-        # Softmax to get view importance weights
-        view_weights = F.softmax(attention_scores, dim=-1)  # [B, 1, M]
-        
-        # Expand weights for point-wise application
-        view_weights = view_weights.unsqueeze(1).expand(-1, Np, -1, -1)  # [B, Np, 1, M]
-        
-        # Weighted aggregation of views
-        aggregated_views = torch.sum(
-            view_weights * view_features.unsqueeze(2),  # [B, Np, 1, M] * [B, Np, 1, M, view_dim]
-            dim=3
-        ).squeeze(2)  # [B, Np, view_dim]
-        
-        return aggregated_views
 
 
 class BasePairwiseFusion(nn.Module):
