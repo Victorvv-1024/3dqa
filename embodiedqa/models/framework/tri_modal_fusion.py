@@ -699,28 +699,215 @@ from mmengine.model import BaseModule
 from embodiedqa.registry import MODELS
 from torch import Tensor
 
-class UniquenessExtractor(nn.Module):
-    """
-    A helper module to extract the unique information from a raw modality by
-    learning to subtract the influence of its bi-modal synergies. This is
-    based on the PID principle: Unique(X) ≈ Raw(X) - f(Synergy(X,Y), Synergy(X,Z)).
-    """
+
+class TaskAwareUniquenessExtractor(nn.Module):
     def __init__(self, raw_dim: int, synergy_dim: int, fusion_dim: int, hidden_dim: int):
         super().__init__()
-        self.synergy_remover1 = nn.Linear(synergy_dim, raw_dim)
-        self.synergy_remover2 = nn.Linear(synergy_dim, raw_dim)
-        self.unique_proj = nn.Sequential(
+        self.fusion_dim = fusion_dim
+        
+        self.raw_proj = nn.Sequential(
             nn.Linear(raw_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+        
+        self.conditioner = nn.Sequential(
+            nn.Linear(synergy_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+        
+        self.orthogonal = nn.Parameter(torch.tensor(0.3))
+        
+        self.final_proj = nn.Sequential(
+            nn.ReLU(),
+            nn.LayerNorm(fusion_dim)
+        )
+
+    def forward(self, raw_features, synergy1, synergy2):
+        # Step 1: Encode raw modality
+        raw_repr = self.raw_proj(raw_features)
+
+        # Step 2: Fuse synergy info + task context
+        # if question_context.dim() == 2:
+        #     # question_context: [B, D]
+        #     question_context = question_context.unsqueeze(1).expand(-1, synergy1.size(1), -1)  # [B, N, D]
+        # condition_input = torch.cat([synergy1, synergy2, question_context], dim=-1)
+        condition_input = torch.cat([synergy1, synergy2], dim=-1)
+        synergy_context = self.conditioner(condition_input)
+        
+        alpha = torch.sigmoid(self.orthogonal)
+
+        # Step 3: Estimate uniqueness
+        unique_repr = raw_repr - alpha * synergy_context
+        
+        return self.final_proj(unique_repr)
+    
+class TaskAwareRedundancyExtractor(nn.Module):
+    def __init__(self, fusion_dim, hidden_dim):
+        super().__init__()
+        
+        # self.redundancy_detector = nn.Sequential(
+        #     nn.Linear(fusion_dim * 3 + task_dim, hidden_dim),
+        #     nn.GELU(),
+        #     nn.Linear(hidden_dim, fusion_dim)
+        # )
+        self.redundancy_detector = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),
             nn.GELU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+    
+    def forward(self, synergy1, synergy2, synergy3):
+        # if question_context.dim() == 2:
+        #     # question_context: [B, D]
+        #     question_context = question_context.unsqueeze(1).expand(-1, synergy1.size(1), -1)  # [B, N, D]
+        # x = torch.cat([synergy1, synergy2, synergy3, question_context], dim=-1)
+        x = torch.cat([synergy1, synergy2, synergy3], dim=-1)
+        return self.redundancy_detector(x)
+    
+class TaskAwareHigherOrderSynergyDetector(nn.Module):
+    """
+    Task-aware higher-order synergy detector with explicit exclusion of lower-order interactions.
+    """
+
+    def __init__(self, point_dim: int, view_dim: int, text_dim: int, 
+                 fusion_dim: int, hidden_dim: int):
+        super().__init__()
+        
+        # Projection
+        self.point_proj = nn.Sequential(
+            nn.Linear(point_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+        self.view_proj = nn.Sequential(
+            nn.Linear(view_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+        
+        # === STEP 1: Trimodal + task encoder ===
+        # self.trimodal_interaction_detector = nn.Sequential(
+        #     nn.Linear(fusion_dim * 3 + task_dim, hidden_dim),
+        #     nn.LayerNorm(hidden_dim),
+        #     nn.GELU(),
+        #     nn.Dropout(0.1),
+        #     nn.Linear(hidden_dim, fusion_dim),
+        #     nn.LayerNorm(fusion_dim)
+        # )
+        self.trimodal_interaction_detector = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),
             nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+
+        # === STEP 2: Lower-order component removers ===
+        # self.unique_remover = nn.Sequential(
+        #     nn.Linear(fusion_dim * 3 + task_dim, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, fusion_dim)
+        # )
+        self.unique_remover = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, fusion_dim)
         )
 
-    def forward(self, raw_features: Tensor, synergy1: Tensor, synergy2: Tensor) -> Tensor:
-        synergy1_influence = self.synergy_remover1(synergy1)
-        synergy2_influence = self.synergy_remover2(synergy2)
-        unique_raw = raw_features - synergy1_influence - synergy2_influence
-        return self.unique_proj(unique_raw)
+        # self.pairwise_synergy_remover = nn.Sequential(
+        #     nn.Linear(fusion_dim * 3 + task_dim, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, fusion_dim)
+        # )
+        self.pairwise_synergy_remover = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+
+        # self.redundancy_remover = nn.Sequential(
+        #     nn.Linear(fusion_dim + task_dim, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, fusion_dim)
+        # )
+        self.redundancy_remover = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+
+        self.exclusion_combiner = nn.Sequential(
+            nn.Linear(fusion_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+
+        self.exclusion_strength = nn.Parameter(torch.tensor(0.7))
+
+        self.emergence_amplifier = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim),
+            nn.ReLU(),
+            nn.LayerNorm(fusion_dim)
+        )
+
+    def forward(self, point_feat, view_feat, text_feat,
+                z_p_unique, z_v_unique, z_t_unique,
+                z_pv, z_pt, z_tv, z_redundant,
+                ):
+        """
+        Args:
+            *_feat: raw modality features
+            z_*: PID components
+            question_context: [B, N, task_dim] or [B, task_dim] — you may need to expand if needed
+        """
+
+        # Ensure question_context is [B, N, task_dim] for broadcast
+        # if question_context.dim() == 2:
+        #     question_context = question_context.unsqueeze(1).expand(-1, point_feat.size(1), -1)
+        # Projection into unified space
+        point_feat = self.point_proj(point_feat)
+        view_feat = self.view_proj(view_feat)
+        text_feat = self.text_proj(text_feat)
+        
+        # === STEP 1: Capture trimodal interaction conditioned on task ===
+        # trimodal_input = torch.cat([point_feat, view_feat, text_feat, question_context], dim=-1)
+        trimodal_input = torch.cat([point_feat, view_feat, text_feat], dim=-1)
+        all_trimodal = self.trimodal_interaction_detector(trimodal_input)
+
+        # === STEP 2: Lower-order influences (task-aware) ===
+        # unique_input = torch.cat([z_p_unique, z_v_unique, z_t_unique, question_context], dim=-1)
+        unique_input = torch.cat([z_p_unique, z_v_unique, z_t_unique], dim=-1)
+        unique_influence = self.unique_remover(unique_input)
+
+        # pairwise_input = torch.cat([z_pv, z_pt, z_tv, question_context], dim=-1)
+        pairwise_input = torch.cat([z_pv, z_pt, z_tv], dim=-1)
+        pairwise_influence = self.pairwise_synergy_remover(pairwise_input)
+
+        # redundancy_input = torch.cat([z_redundant, question_context], dim=-1)
+        redundancy_input = torch.cat([z_redundant], dim=-1)
+        redundancy_influence = self.redundancy_remover(redundancy_input)
+
+        total_lower_order = self.exclusion_combiner(
+            torch.cat([unique_influence, pairwise_influence, redundancy_influence], dim=-1)
+        )
+
+        # === STEP 3: Exclusion ===
+        alpha = torch.sigmoid(self.exclusion_strength)
+        excluded_synergy = all_trimodal - alpha * total_lower_order
+
+        # === STEP 4: Final enhancement ===
+        return self.emergence_amplifier(excluded_synergy)
+        
 
 @MODELS.register_module()
 class TrimodalFusion(BaseModule):
@@ -738,21 +925,28 @@ class TrimodalFusion(BaseModule):
                  init_cfg=None):
         super().__init__(init_cfg=init_cfg)
         self.fusion_dim = fusion_dim
+        
+        # projection
+        # self.point_proj = nn.Sequential(nn.Linear(point_dim, fusion_dim),
+        #                                             nn.LayerNorm(fusion_dim))
+        # self.view_proj = nn.Sequential(nn.Linear(view_dim, fusion_dim),
+        #                                             nn.LayerNorm(fusion_dim))
+        # self.text_proj = nn.Sequential(nn.Linear(text_dim, fusion_dim),
+        #                                             nn.LayerNorm(fusion_dim))
 
         # Uniqueness Extractors for each modality
-        self.unique_extractor_P = UniquenessExtractor(point_dim, synergy_dim, fusion_dim, hidden_dim)
-        self.unique_extractor_V = UniquenessExtractor(view_dim, synergy_dim, fusion_dim, hidden_dim)
-        self.unique_extractor_T = UniquenessExtractor(text_dim, synergy_dim, fusion_dim, hidden_dim)
+        self.unique_extractor_P = TaskAwareUniquenessExtractor(point_dim, synergy_dim, fusion_dim, hidden_dim)
+        self.unique_extractor_V = TaskAwareUniquenessExtractor(view_dim, synergy_dim, fusion_dim, hidden_dim)
+        self.unique_extractor_T = TaskAwareUniquenessExtractor(text_dim, synergy_dim, fusion_dim, hidden_dim)
 
-        # --- 2. Modules for processing features in common FUSION_DIM ---
-        self.redundancy_detector = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, fusion_dim))
-        self.higher_synergy_detector = nn.Sequential(
-            nn.Linear(fusion_dim * 6, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, fusion_dim))
 
-        # --- 3. Dynamic Adaptive Weighting ---
-        self.question_analyzer = nn.Sequential(
-            nn.Linear(text_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, fusion_dim))
+        # self.redundancy_detector = TaskAwareRedundancyExtractor(fusion_dim, hidden_dim, text_dim)
+        self.redundancy_detector = TaskAwareRedundancyExtractor(fusion_dim, hidden_dim)
+
+        self.higher_synergy_detector = TaskAwareHigherOrderSynergyDetector(
+            point_dim, view_dim, text_dim,
+            fusion_dim, hidden_dim
+        )
         
         self.question_pid_attention = nn.MultiheadAttention(
             embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
@@ -787,20 +981,10 @@ class TrimodalFusion(BaseModule):
         """
         B, Np, Dv = view_feat.shape
 
-        # # --- Step 1: Intelligent View Aggregation (Corrected) ---
-        # query_p_proj = self.point_query_proj(point_feat)
-        # query_t_proj = self.text_query_proj(text_feat).unsqueeze(1).expand(-1, Np, -1)
-        # combined_query = (query_p_proj + query_t_proj).unsqueeze(2) # Shape: [B, Np, 1, hidden_dim]
-
-        # key_v_proj = self.view_key_proj(view_feat) # Shape: [B, Np, M, hidden_dim]
-        
-        # # Manual scaled dot-product attention
-        # attention_scores = (combined_query * key_v_proj).sum(dim=-1) / (hidden_dim ** 0.5) # Shape: [B, Np, M]
-        # attention_weights = F.softmax(attention_scores, dim=-1) # Shape: [B, Np, M]
-        
-        # # Weighted sum of original raw view features
-        # raw_v_agg = (view_feat * attention_weights.unsqueeze(-1)).sum(dim=2) # Shape: [B, Np, Dv]
-        # raw_v_agg = self.view_agg_norm(raw_v_agg)
+        # Step 1, projection
+        # point_feat = self.point_proj(point_feat)
+        # view_feat = self.view_proj(view_feat)
+        # text_feat = self.text_proj(text_feat)
 
         # --- Step 2: PID Component Assembly ---
         raw_t_expanded = text_feat.unsqueeze(1).expand(-1, Np, -1)
@@ -808,45 +992,48 @@ class TrimodalFusion(BaseModule):
         Z_V_unique = self.unique_extractor_V(view_feat, z_pv, z_tv)
         Z_T_unique = self.unique_extractor_T(raw_t_expanded, z_tv, z_pt)
 
-        redundancy_input = torch.cat([Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
-        Z_redundant = self.redundancy_detector(redundancy_input)
+        Z_redundant = self.redundancy_detector(
+            z_pv, z_tv, z_pt
+        )
 
-        higher_synergy_input = torch.cat([z_pv, z_tv, z_pt, Z_P_unique, Z_V_unique, Z_T_unique], dim=-1)
-        Z_higher_synergy = self.higher_synergy_detector(higher_synergy_input)
+        Z_higher_synergy = self.higher_synergy_detector(
+            point_feat, view_feat, raw_t_expanded,
+            Z_P_unique, Z_V_unique, Z_T_unique,
+            z_pv, z_pt, z_tv, Z_redundant,
+        )
 
-        # --- Step 3: Dynamic Adaptive Weighting ---
-        question_analyzed = self.question_analyzer(text_feat)
 
-        pid_summary = torch.stack([
-            Z_T_unique.mean(1), Z_V_unique.mean(1), Z_P_unique.mean(1),
-            z_tv.mean(1), z_pv.mean(1), z_pt.mean(1),
-            Z_redundant.mean(1), Z_higher_synergy.mean(1)
-        ], dim=1)
+        # pid_summary = torch.stack([
+        #     Z_T_unique.mean(1), Z_V_unique.mean(1), Z_P_unique.mean(1),
+        #     z_tv.mean(1), z_pv.mean(1), z_pt.mean(1),
+        #     Z_redundant.mean(1), Z_higher_synergy.mean(1)
+        # ], dim=1)
 
-        pid_context, _ = self.question_pid_attention(
-            query=question_analyzed.unsqueeze(1), key=pid_summary, value=pid_summary)
-        pid_context = pid_context.squeeze(1)
+        # pid_context, _ = self.question_pid_attention(
+        #     query=task.unsqueeze(1), key=pid_summary, value=pid_summary)
+        # pid_context = pid_context.squeeze(1)
 
-        weight_predictor_input = torch.cat([question_analyzed, pid_context], dim=-1)
-        raw_weights = self.adaptive_weight_predictor(weight_predictor_input)
-        pid_weights = F.softmax(raw_weights / self.temperature, dim=-1)
+        # weight_predictor_input = torch.cat([task, pid_context], dim=-1)
+        # raw_weights = self.adaptive_weight_predictor(weight_predictor_input)
+        # pid_weights = F.softmax(raw_weights / self.temperature, dim=-1)
 
-        # --- Step 4: Final Weighted Fusion ---
-        all_components = torch.stack([
-            Z_T_unique, Z_V_unique, Z_P_unique, z_tv, z_pv, z_pt, Z_redundant, Z_higher_synergy
-        ], dim=2)
+        # # --- Step 4: Final Weighted Fusion ---
+        # all_components = torch.stack([
+        #     Z_T_unique, Z_V_unique, Z_P_unique, z_tv, z_pv, z_pt, Z_redundant, Z_higher_synergy
+        # ], dim=2)
 
-        weights_expanded = pid_weights.unsqueeze(1).unsqueeze(-1)
-        weighted_components = all_components * weights_expanded
+        # weights_expanded = pid_weights.unsqueeze(1).unsqueeze(-1)
+        # weighted_components = all_components * weights_expanded
         
-        Z_fused = self.final_fusion(weighted_components.reshape(B, Np, 8 * self.fusion_dim))
-        Z_fused = self.final_norm(Z_fused + Z_P_unique)
+        # Z_fused = self.final_fusion(weighted_components.reshape(B, Np, 8 * self.fusion_dim))
+        # Z_fused = self.final_norm(Z_fused + Z_P_unique)
 
         # --- Step 5: Prepare Full Component Dictionary for PIDLosses ---
         component_dict = {
             'Z_P_unique': Z_P_unique, 'Z_V_unique': Z_V_unique, 'Z_T_unique': Z_T_unique,
             'Z_PV_synergy': z_pv, 'Z_TV_synergy': z_tv, 'Z_PT_synergy': z_pt,
-            'Z_redundant': Z_redundant, 'Z_higher_synergy': Z_higher_synergy,
+            'Z_redundant': Z_redundant, 'Z_higher': Z_higher_synergy,
         }
 
-        return Z_fused, pid_weights, component_dict
+        # return Z_fused, pid_weights, component_dict
+        return component_dict

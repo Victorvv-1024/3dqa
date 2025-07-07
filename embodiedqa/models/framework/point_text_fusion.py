@@ -394,7 +394,7 @@ from embodiedqa.registry import MODELS
 from torch import Tensor
 
 # Import shared base components
-from .pse import SynergyExtractor
+from .pse import BasePairwiseFusion
 
 
 @MODELS.register_module()
@@ -438,23 +438,27 @@ class PointTextFusion(BaseModule):
             nn.Linear(fusion_dim, fusion_dim),
             nn.LayerNorm(fusion_dim),
             nn.GELU(),
-            nn.Dropout(dropout)
         )
         
         # Pure PID synergy extractor
-        self.synergy_extractor = SynergyExtractor(
-            dim=fusion_dim, num_heads=num_heads, dropout=dropout
+        self.synergy_fusion = BasePairwiseFusion(
+            modality_x_dim=fusion_dim,  # Use fusion_dim after projection
+            modality_y_dim=fusion_dim,  # Use fusion_dim after projection
+            fusion_dim=fusion_dim,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout
         )
         
-        # Final fusion with residual connection
-        self.final_fusion = nn.Sequential(
-            nn.Linear(fusion_dim * 2, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-            nn.Dropout(dropout * 0.5),
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
-        )
+        # # Final fusion with residual connection
+        # self.final_fusion = nn.Sequential(
+        #     nn.Linear(fusion_dim * 2, fusion_dim),
+        #     nn.LayerNorm(fusion_dim),
+        #     nn.GELU(),
+        #     nn.Dropout(dropout * 0.5),
+        #     nn.Linear(fusion_dim, fusion_dim),
+        #     nn.LayerNorm(fusion_dim)
+        # )
         
     def forward(self, 
                 Z_PV: Tensor, 
@@ -479,7 +483,7 @@ class PointTextFusion(BaseModule):
         
         # Handle text dimensionality
         if text_features.dim() == 2:  # [B, D]
-            text_expanded = text_features.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, D]
+            text_expanded = text_features.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Df]
         else:  # [B, L, D]
             # Pool sequential text to global representation
             if text_mask is not None:
@@ -487,33 +491,35 @@ class PointTextFusion(BaseModule):
                 text_pooled = text_masked.sum(dim=1) / text_mask.sum(dim=1, keepdim=True)
             else:
                 text_pooled = text_features.mean(dim=1)  # [B, D]
-            text_expanded = text_pooled.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, D]
+            text_expanded = text_pooled.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Df]
         
         # Process features to fusion space
-        processed_text = self.text_processor(text_expanded)  # [B, Np, fusion_dim]
+        processed_text = self.text_processor(text_expanded)  # [B, Np, Df]
         
         # --- Step 2: View-Mediated Context Enhancement ---
         
         # Z_TV provides semantic bridge context for P-T interaction
-        view_context = self.view_context_projector(Z_TV)  # [B, Np, fusion_dim]
+        view_context = self.view_context_projector(Z_TV)  # [B, Np, Df]
         
         # Enhance both point and text representations with view context
-        context_enhanced_points = Z_PV + view_context  # [B, Np, fusion_dim]
-        context_enhanced_text = processed_text + view_context  # [B, Np, fusion_dim]
+        context_enhanced_points = Z_PV + view_context  # [B, Np, Df]
+        context_enhanced_text = processed_text + view_context  # [B, Np, Df]
         
         # --- Step 3: Extract Pure Point-Text Synergy ---
         
-        pt_synergy = self.synergy_extractor.extract_synergy(
-            context_enhanced_points, context_enhanced_text
-        )  # [B, Np, fusion_dim]
+        # pt_synergy = self.synergy_extractor.extract_synergy(
+        #     context_enhanced_points, context_enhanced_text
+        # )  # [B, Np, fusion_dim]
         
-        # --- Step 4: Final Fusion with Residual Connection ---
+        # # --- Step 4: Final Fusion with Residual Connection ---
         
-        # Combine synergy with original semantically-enriched points
-        fusion_input = torch.cat([pt_synergy, Z_PV], dim=-1)  # [B, Np, 2*fusion_dim]
-        Z_PT = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
+        # # Combine synergy with original semantically-enriched points
+        # fusion_input = torch.cat([pt_synergy, Z_PV], dim=-1)  # [B, Np, 2*fusion_dim]
+        # Z_PT = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
         
-        # Residual connection to preserve point information
-        Z_PT = Z_PT + Z_PV
+        # # Residual connection to preserve point information
+        # Z_PT = Z_PT + Z_PV
+        
+        Z_PT = self.synergy_fusion(context_enhanced_points, context_enhanced_text)
         
         return Z_PT

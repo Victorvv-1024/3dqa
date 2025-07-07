@@ -23,10 +23,8 @@ import os
 from .point_view_fusion import PointViewFusion
 from .point_text_fusion import PointTextFusion
 from .text_view_fusion import TextViewFusion
-from .unified_pid_fusion import UnifiedAdaptivePIDFusion
 from .tri_modal_fusion import TrimodalFusion
-from embodiedqa.models.layers.fusion_layers import FeatureRefinement
-from .reason import SpatialFeatureEncoder
+# from .reason import SpatialFeatureEncoder
 from .spatial import SpatialContextModule, integrate_spatial_context
 from embodiedqa.models.losses import PIDLosses
 import traceback
@@ -102,18 +100,18 @@ class MultiViewVLMBase3DQA(BaseModel):
         # Reasoning (using original MCGR)
         self.reason = MODELS.build(backbone_fusion)
         self.D_fus = self.reason.config.hidden_size # Fusion dimension, can be adjusted 
-        self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
-        self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
-        self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
-        self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
-        self.reason_visual_pre_norm = nn.Sequential(
-            nn.LayerNorm(self.D_fus),
-            nn.Dropout(0.1)
-        )
-        self.reason_full_visual_pre_norm = nn.Sequential(
-            nn.LayerNorm(self.D_fus),
-            nn.Dropout(0.1)
-        )
+        # self.visual_feat_map = nn.Linear(self.D_fus, self.D_fus)
+        # self.full_visual_feat_map = deepcopy(self.visual_feat_map)  # For full visual features
+        # self.pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # Positional encoding for 3D points
+        # self.full_pos_embedding = PositionEmbeddingLearned(3, self.D_fus)  # For full visual features
+        # self.reason_visual_pre_norm = nn.Sequential(
+        #     nn.LayerNorm(self.D_fus),
+        #     nn.Dropout(0.1)
+        # )
+        # self.reason_full_visual_pre_norm = nn.Sequential(
+        #     nn.LayerNorm(self.D_fus),
+        #     nn.Dropout(0.1)
+        # )
         
         if self.use_2d:
             self.backbone = MODELS.build(backbone)
@@ -144,106 +142,14 @@ class MultiViewVLMBase3DQA(BaseModel):
         self.coord_type = coord_type
         self.voxel_size = voxel_size
         
-        # Unified projection
-        # self.unified_proj = nn.ModuleDict({
-        #     'point': nn.Sequential(
-        #         nn.Linear(self.backbone_lidar.fp_channels[-1][-1], self.D_fus), # Point: 256 -> 768
-        #         nn.LayerNorm(self.D_fus),
-        #         nn.ReLU(),
-        #         nn.Linear(self.D_fus, self.D_fus)
-        #     ),
-        #     'view': nn.Sequential(
-        #         nn.Linear(self.backbone.out_channels[-1], self.D_fus), # View: 1024 -> 768
-        #         nn.LayerNorm(self.D_fus),
-        #         nn.ReLU(),
-        #         nn.Linear(self.D_fus, self.D_fus)
-        #     ),
-        #     'text': nn.Sequential(
-        #         nn.Linear(self.text_encoder.config.hidden_size, self.D_fus), # Text: 768 -> 768
-        #         nn.LayerNorm(self.D_fus),
-        #         nn.ReLU(),
-        #         nn.Linear(self.D_fus, self.D_fus)
-        #     )
-        # })
-
-        # Bi-Modal fusion
-        # self.pv_fusion = PointViewFusion(
-        #     fusion_dim=self.D_fus,  # Output dim = 768
-        # )
-        # self.pv_fusion = PointViewFusion(
-        #     point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
-        #     view_dim=self.backbone.out_channels[-1],  # View feature dimension
-        #     fusion_dim=self.D_fus,  # Output dimension
-        #     hidden_dim=512,  # Hidden dimension for intermediate layers
-        #     dropout=0.1,  # Dropout rate for regularization
-        # )
         self.pv_fusion = MODELS.build(pv_fusion)
-        
-        # self.pt_fusion = PointTextFusion(
-        #     fusion_dim=self.D_fus,
-        # )
-        # self.pt_fusion = PointTextFusion(
-        #     synergy_dim=self.D_fus,  # Synergy dimension
-        #     text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
-        #     fusion_dim=self.D_fus,  # Output dimension
-        #     hidden_dim=512,  # Hidden dimension for intermediate layers
-        #     dropout=0.1,  # Dropout rate for regularization
-        # )
         self.pt_fusion = MODELS.build(pt_fusion)
-        
-        # self.tv_fusion = TextViewFusion(
-        #     fusion_dim=self.D_fus,  # 768
-        # )
-        # self.tv_fusion = TextViewFusion(
-        #     text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
-        #     view_dim=self.backbone.out_channels[-1],  # View feature dimension
-        #     fusion_dim=self.D_fus,  # Output dimension
-        #     hidden_dim=512,  # Hidden dimension for intermediate layers
-        # )
         self.tv_fusion = MODELS.build(tv_fusion)
         
-        # Tri-modal fusion
-        # self.tri_modal_fusion = TrimodalFusion(
-        #     fusion_dim=self.D_fus, # 768
-        #     hidden_dim=256,  # Hidden dimension for intermediate layers
-        #     dropout=0.1,  # Dropout rate for regularization
-        # )
-        # self.tri_modal_fusion = TrimodalFusion(
-        #     point_dim=self.backbone_lidar.fp_channels[-1][-1],  # Point feature dimension
-        #     view_dim=self.backbone.out_channels[-1],  # View feature dimension
-        #     text_dim=self.text_encoder.config.hidden_size,  # Text feature dimension
-        #     synergy_dim=self.D_fus,  # Synergy dimension
-        #     fusion_dim=self.D_fus,  # Output dimension
-        # )
         self.tri_modal_fusion = MODELS.build(tri_modal_fusion)
-        
-        # self.spatial_module = SpatialContextModule(
-        #     fusion_dim=self.D_fus,
-        #     num_scales=3,
-        #     k_neighbors=[8, 16, 32],
-        #     voxel_size=0.2,
-        #     max_superpoints=256,
-        #     dropout=0.1
-        # )
-        # self.use_spatial_enhancement = False
-        # if self.use_spatial_enhancement:
-        #     self.spatial_alpha_pv = 0.3  # Weight for PV enhancement
-        #     self.spatial_alpha_pt = 0.15  # Weight for PT enhancement
-        #     print("Using spatial enhancement module")
-        # else:
-        #     print("Not using spatial enhancement module")
-        
-        
-        
+    
         # loss module
         self.pid_loss_module = PIDLosses(temperature=0.1)
-        
-        """Try to Replace MCGR"""        
-        # self.reason = SpatialFeatureEncoder(hidden_dim=self.D_fus,
-        #                                     vision_num_queries=self.vision_num_queries,
-        #                                     num_transformer_layers=4,
-        #                                     num_heads=12,
-        #                                     dropout=0.1,)
 
          
     @property
@@ -337,6 +243,7 @@ class MultiViewVLMBase3DQA(BaseModel):
         # all_extrinsics = [] # store camera extrinsic matrices for each sample in the batch
         img_feat_valid_flags = []
         points_imgfeats = []
+        raw_imgfeats = []
         
         text_global_token = text_dict.get('text_global_token', None)
         text_global_features_for_att = self.text_global_att_proj(text_global_token)
@@ -396,7 +303,7 @@ class MultiViewVLMBase3DQA(BaseModel):
             # )
             
             # visible_imgfeats.append(visible_imgfeat)  # still list of tensors
-            _, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            raw_imgfeat, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
                 img_meta,
                 img_features=img_features[-1][idx],
                 points=feat_dict['fp_xyz'][-1][idx],
@@ -415,12 +322,14 @@ class MultiViewVLMBase3DQA(BaseModel):
                 img_features_for_att=img_features_for_att[idx])
             points_imgfeats.append(
                 points_imgfeat)  # all sample
+            raw_imgfeats.append(raw_imgfeat)  # last_level
             img_feat_valid_flags.append(img_feat_valid_flag)# last_level
 
 
         # visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, M, Di
         # all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
-        points_imgfeats = torch.stack(points_imgfeats)#B,Np,D_fus
+        points_imgfeats = torch.stack(points_imgfeats) #B,Np,Di
+        raw_imgfeats = torch.stack(raw_imgfeats) #B,Np,Di
         img_feat_valid_flags = torch.stack(img_feat_valid_flags)#B,N
         all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device)#B,n_views,4,4
 
@@ -433,43 +342,48 @@ class MultiViewVLMBase3DQA(BaseModel):
         raw_global_text_feats = text_dict['text_global_token']  # [B, D] = [12, 768]
         # raw_text_feats = text_dict['text_feats']  # [B, L, D_fus] = [12, 14, 768]
         
-        # 2. Uni-modal representation space
-        # Z_P = self.unified_proj['point'](raw_point_feats)  # [B, Np, D_fus] = [12, 1024, 768]
-        # Z_V = self.unified_proj['view'](raw_view_feats)  # [B, Np, M, D_fus] = [12, 1024, 20, 768]
-        # Z_T = self.unified_proj['text'](raw_global_text_feats)  # [B, D_fus] = [12, 768]
-        # Z_T = self.unified_proj['text'](raw_text_feats)  # [B, L, D_fus] = [12, 14, 768]
-        # Store features in the dictionary
-        # feat_dict['Z_P'] = Z_P  # [B, Np, D_fus] = [12, 1024, 768]
-        # feat_dict['Z_V'] = Z_V  # [B, Np, D_fus] = [12, 1024, 20, 768]
-        # feat_dict['Z_T'] = Z_T  # [B, L, D_fus] = [12, 14, 768]
+        # analyse the question
+        # question_context = self.question_analyzer(raw_global_text_feats)  # [B, D_fus] = [12, 768]
         
         # 3. Bi-modal representation space
         z_tv = self.tv_fusion(raw_global_text_feats, points_imgfeats)  # [B, Np, Di] = [12, 1024, 768]
         feat_dict['z_tv'] = z_tv
         
-        z_pv = self.pv_fusion(raw_point_feats, points_imgfeats)
+        z_pv = self.pv_fusion(raw_point_feats, raw_imgfeats)
         feat_dict['z_pv'] = z_pv # [B, Np, D_fus] = [12, 1024, 768]
         
         z_pt = self.pt_fusion(
             z_pv,
             z_tv,
-            raw_global_text_feats
+            raw_global_text_feats,
         )
         feat_dict['z_pt'] = z_pt
         
         # 4. Tri-modal fusion
-        z_fused, component_weights, component_dict = self.tri_modal_fusion(
-            point_feat=raw_point_feats,
-            view_feat=points_imgfeats,
-            text_feat=raw_global_text_feats,
+        # z_fused, component_weights, component_dict = self.tri_modal_fusion(
+        #     point_feat=raw_point_feats, # Dp = 256
+        #     view_feat=raw_imgfeats, # Di = 1024
+        #     text_feat=raw_global_text_feats, # Df = 768
+        #     z_pv=z_pv,
+        #     z_tv=z_tv,
+        #     z_pt=z_pt,
+        #     task=question_context
+        # )
+        
+        # get component dict
+        component_dict = self.tri_modal_fusion(
+            point_feat=raw_point_feats, # Dp = 256
+            view_feat=raw_imgfeats, # Di = 1024
+            text_feat=raw_global_text_feats, # Df = 768
             z_pv=z_pv,
             z_tv=z_tv,
             z_pt=z_pt,
+            # task=question_context
         )
         
-        feat_dict['z_final'] = z_fused  # [B, Np, D_fus] = [12, 1024, 768]
+        # feat_dict['z_final'] = z_fused  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['component_dict'] = component_dict  # Dictionary of components
-        feat_dict['component_weights'] = component_weights  # Weights for each component
+        # feat_dict['component_weights'] = component_weights  # Weights for each component
 
         return feat_dict
 
@@ -568,30 +482,44 @@ class MultiViewVLMBase3DQA(BaseModel):
         B = len(points) # batch size
         losses = {}
         
-        full_point_feats = feat_dict['z_final'] # [B, Np, D_fus] = [12, 1024, 768]
-        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        # full_point_feats = feat_dict['z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        # full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
         # print(f'full_point_feats shape: {full_point_feats.shape}') # [B, Np, D_fus] = [12, 1024, 768]
         # print(f'full_point_pos shape: {full_point_pos.shape}') # [B, Np, 3] = [12, 1024, 3]
         point_mask = None
         
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
+        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq] = [6, 256]
         
         # gather_points expects [B, C, N] format, so we need to transpose
         # full_point_feats: [B, Np, D_fus] -> [B, D_fus, Np] -> gather -> [B, D_fus, Nq] -> [B, Nq, D_fus]
-        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        # point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
         
         # full_point_pos: [B, Np, 3] -> [B, 3, Np] -> gather -> [B, 3, Nq] -> [B, Nq, 3]
-        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        # point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
         # print(f'point_feats shape: {point_feats.shape}') # [B, Nq, D_fus] = [12, 256, 768]
         # print(f'point_pos shape: {point_pos.shape}') # [B, Nq, 3] = [12, 256, 3]
         
-        head_inputs_dict = self.forward_reasoning(
-            point_feats=point_feats,
-            point_pos=point_pos,
-            point_mask=point_mask,
+        # head_inputs_dict = self.forward_reasoning(
+        #     point_feats=point_feats,
+        #     point_pos=point_pos,
+        #     point_mask=point_mask,
+        #     text_dict=text_dict,
+        #     full_point_feats=full_point_feats,
+        #     full_point_pos=full_point_pos,
+        # )
+        
+        output_dict = self.reason(
+            feat_dict=feat_dict,
             text_dict=text_dict,
-            full_point_feats=full_point_feats,
-            full_point_pos=full_point_pos,
+        )
+        point_pos = output_dict['sparse_point_pos'] # [B, K ,3]
+        
+        head_inputs_dict = dict(
+            fusion_feat_visual=output_dict['visual_feats'],  # [B, K, Df] = [12, 256, 768]
+            visual_mask=point_mask,
+            fusion_feat_language=output_dict['lang_feats'],
+            language_mask=text_dict['text_token_mask'],  # [B, L] = [12, 14]
+            fusion_feat_pooler=output_dict.get('pooler_feat', None),  # [B, D_fus] = [12, 768]
         )
         
         qa_losses = self.qa_head.loss(**head_inputs_dict,
@@ -691,22 +619,37 @@ class MultiViewVLMBase3DQA(BaseModel):
         # )
         
         # 2. Preparation for reasoning
-        full_point_feats = feat_dict['z_final'] # [B, Np, D_fus] = [12, 1024, 768]
-        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
-        point_mask = None
-        B = full_point_feats.shape[0]  # batch size
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
-        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
+        # full_point_feats = feat_dict['z_final'] # [B, Np, D_fus] = [12, 1024, 768]
+        # full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3] = [12, 1024, 3]
+        # point_mask = None
+        # B = full_point_feats.shape[0]  # batch size
+        # fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
+        # point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, D_fus] = [6, 256, 768]
+        # point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3] = [6, 256, 3]
         
-        head_inputs_dict = self.forward_reasoning(
-            point_feats=point_feats,
-            point_pos=point_pos,
-            point_mask=point_mask,
+        # head_inputs_dict = self.forward_reasoning(
+        #     point_feats=point_feats,
+        #     point_pos=point_pos,
+        #     point_mask=point_mask,
+        #     text_dict=text_dict,
+        #     full_point_feats=full_point_feats,
+        #     full_point_pos=full_point_pos,
+        # )
+        
+        output_dict = self.reason(
+            feat_dict=feat_dict,
             text_dict=text_dict,
-            full_point_feats=full_point_feats,
-            full_point_pos=full_point_pos,
         )
+        point_mask = None
+        
+        head_inputs_dict = dict(
+            fusion_feat_visual=output_dict['visual_feats'],  # [B, K, Df] = [12, 256, 768]
+            visual_mask=point_mask,  # None if not used
+            fusion_feat_language=output_dict['lang_feats'],
+            language_mask=text_dict['text_token_mask'],  # [B, L] = [12, 14]
+            fusion_feat_pooler=output_dict.get('pooler_feat', None),  # [B, D_fus] = [12, 768]
+        )
+        
         results_list = self.qa_head.predict(**head_inputs_dict,
                                      batch_data_samples=batch_data_samples)
         for data_sample, pred_scores in zip(batch_data_samples,
@@ -872,81 +815,3 @@ class MultiViewVLMBase3DQA(BaseModel):
                                 )
         
         return head_inputs_dict
-        
-    def compute_spatial_consistency_loss(self, features, superpoint_labels):
-        """Vectorized spatial consistency loss computation."""
-        B, N, D = features.shape
-        device = features.device
-        
-        # Create a mask for valid superpoints (not -1)
-        valid_mask = (superpoint_labels != -1)  # [B, N]
-        
-        if not valid_mask.any():
-            return torch.tensor(0.0, device=device, requires_grad=True)
-        
-        total_loss = 0.0
-        valid_batches = 0
-        
-        # Process each batch (unavoidable due to different superpoint structures)
-        for b in range(B):
-            feat = features[b]  # [N, D]
-            labels = superpoint_labels[b]  # [N]
-            batch_valid_mask = valid_mask[b]  # [N]
-            
-            if not batch_valid_mask.any():
-                continue
-                
-            # Get valid labels and features
-            valid_labels = labels[batch_valid_mask]  # [N_valid]
-            valid_features = feat[batch_valid_mask]  # [N_valid, D]
-            
-            # Get unique superpoint IDs
-            unique_labels, inverse_indices = torch.unique(valid_labels, return_inverse=True)
-            num_superpoints = len(unique_labels)
-            
-            if num_superpoints == 0:
-                continue
-                
-            # Vectorized computation of superpoint means
-            # Create one-hot encoding for superpoints
-            sp_one_hot = F.one_hot(inverse_indices, num_classes=num_superpoints).float()  # [N_valid, num_sp]
-            
-            # Compute superpoint sizes
-            sp_sizes = sp_one_hot.sum(dim=0)  # [num_sp]
-            
-            # Filter out superpoints with size < 2
-            valid_sp_mask = (sp_sizes >= 2)
-            
-            if not valid_sp_mask.any():
-                continue
-                
-            # Keep only valid superpoints
-            sp_one_hot = sp_one_hot[:, valid_sp_mask]  # [N_valid, num_valid_sp]
-            sp_sizes = sp_sizes[valid_sp_mask]  # [num_valid_sp]
-            
-            # Vectorized mean computation
-            # sp_means: [num_valid_sp, D]
-            sp_means = torch.matmul(sp_one_hot.t(), valid_features) / sp_sizes.unsqueeze(1)
-            
-            # Vectorized variance computation
-            # Expand means to match point dimensions: [N_valid, num_valid_sp, D]
-            expanded_means = sp_means.unsqueeze(0).expand(valid_features.size(0), -1, -1)
-            
-            # Expand features: [N_valid, num_valid_sp, D]
-            expanded_features = valid_features.unsqueeze(1).expand(-1, sp_means.size(0), -1)
-            
-            # Expand membership mask: [N_valid, num_valid_sp]
-            membership_mask = sp_one_hot  # Already correct shape
-            
-            # Compute squared differences only for members
-            sq_diff = ((expanded_features - expanded_means) ** 2) * membership_mask.unsqueeze(2)  # [N_valid, num_valid_sp, D]
-            
-            # Sum over points and dimensions, then divide by superpoint sizes
-            sp_variances = sq_diff.sum(dim=[0, 2]) / sp_sizes  # [num_valid_sp]
-            
-            # Average variance across all valid superpoints
-            batch_loss = sp_variances.mean()
-            total_loss += batch_loss
-            valid_batches += 1
-        
-        return total_loss / max(valid_batches, 1)

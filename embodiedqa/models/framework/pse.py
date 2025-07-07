@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Optional
 
-class SynergyExtractor(nn.Module):
+class TaskAwareSynergyExtractor(nn.Module):
     """
     Base class for mathematically rigorous synergy extraction following PID theory.
     
@@ -24,7 +24,7 @@ class SynergyExtractor(nn.Module):
     This class should be inherited by all pairwise fusion modules.
     """
     
-    def __init__(self, dim=768, num_heads=8, dropout=0.1):
+    def __init__(self, dim=768, task_dim=768, num_heads=8, dropout=0.1):
         super().__init__()
         self.dim = dim
         
@@ -51,6 +51,13 @@ class SynergyExtractor(nn.Module):
         self.unique_y_projector = nn.Linear(dim, dim)
         self.orthogonalization_strength = nn.Parameter(torch.tensor(0.3))
         
+        # final map
+        self.map = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.GELU(),
+        )
+        
     def extract_synergy(self, x_features: torch.Tensor, y_features: torch.Tensor) -> torch.Tensor:
         """
         Extract mathematically correct synergy between modalities X and Y.
@@ -65,6 +72,7 @@ class SynergyExtractor(nn.Module):
         
         # Step 1: Bidirectional mutual information capture
         # X → Y: What information in Y is relevant to X?
+        # print(f'Extracting synergy: X features shape {x_features.shape}, Y features shape {y_features.shape}')
         x_guided_y, _ = self.x_to_y_attention(
             query=x_features, key=y_features, value=y_features
         )
@@ -75,6 +83,8 @@ class SynergyExtractor(nn.Module):
         )
         
         # Step 2: Interaction representation (mutual information)
+        # task_repeated = task.unsqueeze(1).expand(-1, x_features.size(1), -1)  # [B, N, D_task]
+        # interaction = torch.cat([x_guided_y, y_guided_x, task_repeated], dim=-1)  # [B, N, 3D]
         interaction = torch.cat([x_guided_y, y_guided_x], dim=-1)  # [B, N, 2D]
         
         # Step 3: Extract synergistic component
@@ -95,14 +105,7 @@ class SynergyExtractor(nn.Module):
             synergy_orthogonal_x * marginal_y, dim=-1, keepdim=True
         ) * marginal_y / (torch.norm(marginal_y, dim=-1, keepdim=True) ** 2 + 1e-8)
         
-        # True synergy = Joint - Marginals (PID definition)
-        # S = I(X,Y; Z) - I(X; Z) - I(Y; Z)
-        # alpha = torch.sigmoid(self.orthogonalization_strength)
-        # synergy = joint_info - alpha * (marginal_x + marginal_y) / 2
-        
-        # Step 5: Final synergy (emergent information only)
-        synergy = synergy_orthogonal_y
-        # synergy = F.relu(synergy)  # Non-linearity to enhance expressiveness
+        synergy = self.map(synergy_orthogonal_y)  # Final mapping to target dimension
         
         return synergy
 
@@ -136,8 +139,8 @@ class BasePairwiseFusion(nn.Module):
         )
         
         # Core synergy extractor
-        self.synergy_extractor = SynergyExtractor(
-            dim=fusion_dim, num_heads=num_heads, dropout=dropout
+        self.synergy_extractor = TaskAwareSynergyExtractor(
+            dim=fusion_dim, task_dim=fusion_dim, num_heads=num_heads, dropout=dropout
         )
         
     def process_features(self, x_features: torch.Tensor, y_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -145,15 +148,18 @@ class BasePairwiseFusion(nn.Module):
         processed_x = self.x_processor(x_features)
         processed_y = self.y_processor(y_features)
         return processed_x, processed_y
-        
+
     def extract_synergy(self, processed_x: torch.Tensor, processed_y: torch.Tensor) -> torch.Tensor:
         """Extract pure synergy using shared extractor."""
+        # return self.synergy_extractor.extract_synergy(processed_x, processed_y, task)
         return self.synergy_extractor.extract_synergy(processed_x, processed_y)
-        
+
     def forward(self, x_features: torch.Tensor, y_features: torch.Tensor) -> torch.Tensor:
         """
         Default forward pass. Override in child classes for custom preprocessing.
         """
         processed_x, processed_y = self.process_features(x_features, y_features)
+        # print(f'Processing features: X shape {processed_x.shape}, Y shape {processed_y.shape}')
+        # synergy = self.extract_synergy(processed_x, processed_y, task)
         synergy = self.extract_synergy(processed_x, processed_y)
         return synergy

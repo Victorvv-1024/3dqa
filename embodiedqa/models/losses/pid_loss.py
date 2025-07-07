@@ -278,14 +278,14 @@ class PIDLosses(nn.Module):
         S_PT = component_dict.get('Z_PT_synergy')  # Point-text synergy
         S_TV = component_dict.get('Z_TV_synergy')  # Text-view synergy
         R = component_dict.get('Z_redundant')     # Redundancy
-        S_higher = component_dict.get('Z_higher_synergy')  # Higher-order synergy
+        S_higher = component_dict.get('Z_higher')  # Higher-order synergy
         
         # CONSTRAINT 1: Non-negativity (all PID components must be >= 0)
         total_nonnegativity_loss = torch.tensor(0.0, device=device)
         for name, component in component_dict.items():
             if component is not None:
                 neg_loss = F.relu(-component + eps).mean()
-                total_nonnegativity_loss += neg_loss * 0.1
+                total_nonnegativity_loss += neg_loss
                 # print(f"Non-negativity loss for {name}: {neg_loss.item():.6f}")
         
         # CONSTRAINT 2: Information conservation
@@ -304,15 +304,21 @@ class PIDLosses(nn.Module):
         synergies = [S_PV, S_PT, S_TV, S_higher]
         for i, synergy in enumerate(synergies):
             if synergy is not None:
-                # Synergy should have some variance (not constant)
-                variance_loss = F.relu(0.1 - synergy.var(dim=-1).mean())
-                total_synergy_variance_loss += variance_loss
-                # print(f"Synergy {i} variance loss: {variance_loss.item():.6f}, variance: {synergy.var(dim=-1).mean().item():.6f}")
+                # Synergy should have some variance (not constant) Not too low and not too high
+                variance = synergy.var(dim=-1).mean()
+                
+                too_low = F.relu(0.1 - variance)  # Synergy should not be too low variance
+                too_high = F.relu(variance - 2.0)  # Synergy should not be too high variance
+                # Combine both conditions into a single variance loss
+                total_synergy_variance_loss += too_low + too_high
+                
+                # DEBUG OUTPUT
+                # print(f"{synergy} variance loss: {variance_loss.item():.6f}, variance: {synergy.var(dim=-1).mean().item():.6f}")
         
         losses = {
-            'pid_nonnegativity_loss': total_nonnegativity_loss,
-            'pid_information_bound_loss': information_bound_loss,
-            'pid_synergy_variance_loss': total_synergy_variance_loss,
+            'pid_nonnegativity_loss': total_nonnegativity_loss * 0.05,
+            'pid_information_bound_loss': information_bound_loss * 0.02,
+            'pid_synergy_variance_loss': total_synergy_variance_loss * 0.01,
         }
         
         # print(f"PID constraint losses: {[(k, v.item()) for k, v in losses.items()]}")

@@ -150,7 +150,7 @@ from embodiedqa.registry import MODELS
 from torch import Tensor
 
 # Import shared base components
-from .pse import SynergyExtractor
+from .pse import BasePairwiseFusion
 
 
 @MODELS.register_module()
@@ -181,56 +181,27 @@ class PointViewFusion(BaseModule):
                  init_cfg=None):
         super().__init__(init_cfg=init_cfg)
         
-        # Project raw features to common hidden dimension for attention calculation
-        self.point_att_proj = nn.Linear(point_dim, hidden_dim)
-        self.view_att_proj = nn.Linear(view_dim, hidden_dim)
-        
-        # Feature processors to fusion dimension
-        self.point_processor = nn.Sequential(
-            nn.Linear(point_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU()
-        )
-        self.view_processor = nn.Sequential(
-            nn.Linear(view_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU()
-        )
-        
         # Pure PID synergy extractor
-        self.synergy_extractor = SynergyExtractor(
-            dim=fusion_dim, num_heads=num_heads, dropout=dropout
-        )
-        
-        # Final projection
-        self.final_proj = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim)
+        self.synergy_fusion = BasePairwiseFusion(
+            modality_x_dim=point_dim,  # Use fusion_dim after projection
+            modality_y_dim=view_dim,  # Use fusion_dim after projection
+            fusion_dim=fusion_dim,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout
         )
         
     def forward(self, point_features: Tensor, view_features: Tensor) -> Tensor:
         """
         Args:
             point_features (Tensor): Raw point features of shape [B, Np, Dp].
-            view_features (Tensor): Aggregated view features of shape [B, Np, Dv] 
+            view_features (Tensor): Aggregated view features of shape [B, Np, fusion_dim] 
                                    (already aggregated by TextViewFusion).
             
         Returns:
             Z_PV (Tensor): Fused point-view features of shape [B, Np, fusion_dim].
         """
-        B, Np, Dv = view_features.shape  # No multi-view dimension anymore
-
-        # --- Step 1: Direct Processing (No View Aggregation Needed) ---
-        # Since views are already aggregated by TextViewFusion, skip manual attention
-        
-        # --- Step 2: Process Features to Common Fusion Space ---
-        processed_points = self.point_processor(point_features)  # [B, Np, fusion_dim]
-        processed_views = self.view_processor(view_features)     # [B, Np, fusion_dim]
-        
-        # --- Step 3: Extract Pure PID Synergy ---
-        Z_PV = self.synergy_extractor.extract_synergy(processed_points, processed_views)
-        
-        # --- Step 4: Final Processing ---
-        Z_PV = self.final_proj(Z_PV)
+        # Extract Pure PID Synergy ---
+        Z_PV = self.synergy_fusion(point_features, view_features)
         
         return Z_PV
