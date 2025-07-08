@@ -254,11 +254,6 @@ optim_wrapper = dict(
                          bypass_duplicate=True,
                          custom_keys={
                             'text_encoder': dict(lr_mult=0.1),
-                            # fusion module get a slightly higher learning rate to learn faster
-                            # 'pv_fusion': dict(lr_mult=1.2),
-                            # 'pt_fusion': dict(lr_mult=1.2),
-                            # 'tv_fusion': dict(lr_mult=1.2),
-                            # 'tri_modal_fusion': dict(lr_mult=1.2),
                          }),
                      clip_grad=dict(max_norm=10, norm_type=2),
                      accumulative_counts=1)  # 1

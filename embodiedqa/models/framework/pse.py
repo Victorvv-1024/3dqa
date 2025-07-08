@@ -143,6 +143,22 @@ class BasePairwiseFusion(nn.Module):
             dim=fusion_dim, task_dim=fusion_dim, num_heads=num_heads, dropout=dropout
         )
         
+        self._init_weights()
+        
+    def _init_weights(self):
+        """Initialize the weights of the fusion blocks."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+        
     def process_features(self, x_features: torch.Tensor, y_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Process raw features to common fusion space."""
         processed_x = self.x_processor(x_features)

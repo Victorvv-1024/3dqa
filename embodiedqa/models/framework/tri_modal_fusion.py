@@ -967,7 +967,23 @@ class TrimodalFusion(BaseModule):
             nn.Linear(fusion_dim * 2, fusion_dim)
         )
         self.final_norm = nn.LayerNorm(fusion_dim)
+        
+        self._init_weights()
 
+    def _init_weights(self):
+        """Initialize the weights of the fusion blocks."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+    
     def forward(self, 
                 point_feat: Tensor, view_feat: Tensor, text_feat: Tensor, 
                 z_pv: Tensor, z_tv: Tensor, z_pt: Tensor,
