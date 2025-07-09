@@ -239,16 +239,16 @@ class MultiViewVLMBase3DQA(BaseModel):
             img_features_dict = self.backbone(img) # directly pass through the 2D Swin backbone 
             img_features, img_global_features = img_features_dict['layer_outputs'], img_features_dict['pooler_output']
             
-        # visible_imgfeats = [] # list to store visible image features after lifting
-        # all_extrinsics = [] # store camera extrinsic matrices for each sample in the batch
-        img_feat_valid_flags = []
-        points_imgfeats = []
-        raw_imgfeats = []
+        visible_imgfeats = [] # list to store visible image features after lifting
+        all_extrinsics = [] # store camera extrinsic matrices for each sample in the batch
+        # img_feat_valid_flags = []
+        # points_imgfeats = []
+        # raw_imgfeats = []
         
         text_global_token = text_dict.get('text_global_token', None)
-        text_global_features_for_att = self.text_global_att_proj(text_global_token)
+        # text_global_features_for_att = self.text_global_att_proj(text_global_token)
         
-        img_features_for_att = self.img_att_proj(img_features[-1].mean(dim=[-1,-2]))#B, n_views, C
+        # img_features_for_att = self.img_att_proj(img_features[-1].mean(dim=[-1,-2]))#B, n_views, C
         all_extrinsics = []
         for idx in range(len(batch_img_metas)):
             img_meta = batch_img_metas[idx]
@@ -283,33 +283,13 @@ class MultiViewVLMBase3DQA(BaseModel):
             proj_mat = torch.stack(projection) # n_views, 4, 4
 
             """We make visible sampling here"""
-            # visible_imgfeat = visible_sample(
-            #     img_meta,
-            #     img_features=img_features[-1][idx], # sample the last feature level
-            #     points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
-            #     views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
-            #     voxel_size=self.voxel_size,
-            #     proj_mat=proj_mat, # projects 3D points to 2D image plane
-            #     coord_type=self.coord_type,
-            #     img_scale_factor=img_scale_factor,
-            #     img_crop_offset=img_crop_offset,
-            #     img_flip=img_flip,
-            #     img_pad_shape=img.shape[-2:],
-            #     img_shape=img_meta['img_shape'][:2],
-            #     aligned=False,
-            #     valid_flag=True,
-            #     return_valid_flag=False  # Simplified - just get clean features
-            #     # Note: Removed text_global_features_for_att and img_features_for_att
-            # )
-            
-            # visible_imgfeats.append(visible_imgfeat)  # still list of tensors
-            raw_imgfeat, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            visible_imgfeat = visible_sample(
                 img_meta,
-                img_features=img_features[-1][idx],
-                points=feat_dict['fp_xyz'][-1][idx],
-                views_points = batch_data_samples[idx].views_points,
-                voxel_size = self.voxel_size,
-                proj_mat=proj_mat,
+                img_features=img_features[-1][idx], # sample the last feature level
+                points=feat_dict['fp_xyz'][-1][idx], # takes 3D points from the last feature level
+                views_points=batch_data_samples[idx].views_points, # represent the 3D positions of each camera view in the scene
+                voxel_size=self.voxel_size,
+                proj_mat=proj_mat, # projects 3D points to 2D image plane
                 coord_type=self.coord_type,
                 img_scale_factor=img_scale_factor,
                 img_crop_offset=img_crop_offset,
@@ -317,21 +297,42 @@ class MultiViewVLMBase3DQA(BaseModel):
                 img_pad_shape=img.shape[-2:],
                 img_shape=img_meta['img_shape'][:2],
                 aligned=False,
-                return_valid_flag=True,
-                text_global_features_for_att=text_global_features_for_att[idx],
-                img_features_for_att=img_features_for_att[idx])
-            points_imgfeats.append(
-                points_imgfeat)  # all sample
-            raw_imgfeats.append(raw_imgfeat)  # last_level
-            img_feat_valid_flags.append(img_feat_valid_flag)# last_level
+                valid_flag=True,
+                return_valid_flag=False  # Simplified - just get clean features
+                # Note: Removed text_global_features_for_att and img_features_for_att
+            )
+            visible_imgfeats.append(visible_imgfeat)  # still list of tensors
+            # raw_imgfeat, points_imgfeat, img_feat_valid_flag, img_feat_valid_flag_each = batch_point_sample_in_visible(# (N, C), (N,)
+            #     img_meta,
+            #     img_features=img_features[-1][idx],
+            #     points=feat_dict['fp_xyz'][-1][idx],
+            #     views_points = batch_data_samples[idx].views_points,
+            #     voxel_size = self.voxel_size,
+            #     proj_mat=proj_mat,
+            #     coord_type=self.coord_type,
+            #     img_scale_factor=img_scale_factor,
+            #     img_crop_offset=img_crop_offset,
+            #     img_flip=img_flip,
+            #     img_pad_shape=img.shape[-2:],
+            #     img_shape=img_meta['img_shape'][:2],
+            #     aligned=False,
+            #     return_valid_flag=True,
+            #     text_global_features_for_att=text_global_features_for_att[idx],
+            #     img_features_for_att=img_features_for_att[idx])
+            # points_imgfeats.append(
+            #     points_imgfeat)  # all sample
+            # raw_imgfeats.append(raw_imgfeat)  # last_level
+            # img_feat_valid_flags.append(img_feat_valid_flag)# last_level
 
 
-        # visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, M, Di
-        # all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
-        points_imgfeats = torch.stack(points_imgfeats) #B,Np,Di
-        raw_imgfeats = torch.stack(raw_imgfeats) #B,Np,Di
-        img_feat_valid_flags = torch.stack(img_feat_valid_flags)#B,N
-        all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device)#B,n_views,4,4
+        visible_imgfeats = torch.stack(visible_imgfeats) # to tensor, B, Np, M, Di
+        visible_imgfeats = visible_imgfeats.mean(dim=2)  # average over views, B, Np, Di
+        all_extrinsics = torch.stack(all_extrinsics).to(visible_imgfeats.device) # B, n_views, 4, 4
+        
+        # points_imgfeats = torch.stack(points_imgfeats) #B,Np,Di
+        # raw_imgfeats = torch.stack(raw_imgfeats) #B,Np,Di
+        # img_feat_valid_flags = torch.stack(img_feat_valid_flags)#B,N
+        # all_extrinsics = torch.stack(all_extrinsics).to(points_imgfeats.device)#B,n_views,4,4
 
         """ 
         Our pipeline starts here 
@@ -346,10 +347,12 @@ class MultiViewVLMBase3DQA(BaseModel):
         # question_context = self.question_analyzer(raw_global_text_feats)  # [B, D_fus] = [12, 768]
         
         # 3. Bi-modal representation space
-        z_tv = self.tv_fusion(raw_global_text_feats, points_imgfeats)  # [B, Np, Di] = [12, 1024, 768]
+        # z_tv = self.tv_fusion(raw_global_text_feats, points_imgfeats)  # [B, Np, Di] = [12, 1024, 768]
+        z_tv = self.tv_fusion(raw_global_text_feats, visible_imgfeats)  # [B, Np, Di] = [12, 1024, 768]
         feat_dict['z_tv'] = z_tv
         
-        z_pv = self.pv_fusion(raw_point_feats, raw_imgfeats)
+        # z_pv = self.pv_fusion(raw_point_feats, raw_imgfeats)
+        z_pv = self.pv_fusion(raw_point_feats, visible_imgfeats)  # [B, Np, D_fus] = [12, 1024, 768]
         feat_dict['z_pv'] = z_pv # [B, Np, D_fus] = [12, 1024, 768]
         
         z_pt = self.pt_fusion(
@@ -371,14 +374,22 @@ class MultiViewVLMBase3DQA(BaseModel):
         # )
         
         # get component dict
+        # component_dict = self.tri_modal_fusion(
+        #     point_feat=raw_point_feats, # Dp = 256
+        #     view_feat=raw_imgfeats, # Di = 1024
+        #     text_feat=raw_global_text_feats, # Df = 768
+        #     z_pv=z_pv,
+        #     z_tv=z_tv,
+        #     z_pt=z_pt,
+        #     # task=question_context
+        # )
         component_dict = self.tri_modal_fusion(
-            point_feat=raw_point_feats, # Dp = 256
-            view_feat=raw_imgfeats, # Di = 1024
-            text_feat=raw_global_text_feats, # Df = 768
+            point_feat=raw_point_feats,  # Dp = 256
+            view_feat=visible_imgfeats,  # Di = 1024
+            text_feat=raw_global_text_feats,  # Df = 768
             z_pv=z_pv,
             z_tv=z_tv,
             z_pt=z_pt,
-            # task=question_context
         )
         
         # feat_dict['z_final'] = z_fused  # [B, Np, D_fus] = [12, 1024, 768]

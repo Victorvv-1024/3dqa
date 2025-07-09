@@ -706,21 +706,22 @@ class TaskAwareUniquenessExtractor(nn.Module):
         self.fusion_dim = fusion_dim
         
         self.raw_proj = nn.Sequential(
-            nn.Linear(raw_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(raw_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         
         self.conditioner = nn.Sequential(
-            nn.Linear(synergy_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(synergy_dim * 2, synergy_dim * 2 // 8),
+            nn.LayerNorm(synergy_dim * 2 // 8),
+            nn.GELU(),
+            nn.Linear(synergy_dim * 2 // 8, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         
         self.orthogonal = nn.Parameter(torch.tensor(0.3))
         
         self.final_proj = nn.Sequential(
-            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim),
             nn.LayerNorm(fusion_dim)
         )
 
@@ -744,26 +745,37 @@ class TaskAwareUniquenessExtractor(nn.Module):
         return self.final_proj(unique_repr)
     
 class TaskAwareRedundancyExtractor(nn.Module):
-    def __init__(self, fusion_dim, hidden_dim):
+    def __init__(self, point_dim, view_dim, text_dim, fusion_dim, hidden_dim):
         super().__init__()
-        
-        # self.redundancy_detector = nn.Sequential(
-        #     nn.Linear(fusion_dim * 3 + task_dim, hidden_dim),
-        #     nn.GELU(),
-        #     nn.Linear(hidden_dim, fusion_dim)
-        # )
         self.redundancy_detector = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
+            nn.Linear(fusion_dim * 3, fusion_dim * 3 // 16),
+            nn.LayerNorm(fusion_dim * 3 // 16),
             nn.GELU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(fusion_dim * 3 // 16, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        self.point_proj = nn.Sequential(
+            nn.Linear(point_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        self.view_proj = nn.Sequential(
+            nn.Linear(view_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
     
-    def forward(self, synergy1, synergy2, synergy3):
+    def forward(self, point_feat, view_feat, text_feat):
         # if question_context.dim() == 2:
         #     # question_context: [B, D]
         #     question_context = question_context.unsqueeze(1).expand(-1, synergy1.size(1), -1)  # [B, N, D]
         # x = torch.cat([synergy1, synergy2, synergy3, question_context], dim=-1)
-        x = torch.cat([synergy1, synergy2, synergy3], dim=-1)
+        point_feat = self.point_proj(point_feat)
+        view_feat = self.view_proj(view_feat)
+        text_feat = self.text_proj(text_feat)
+        x = torch.cat([point_feat, view_feat, text_feat], dim=-1)
         return self.redundancy_detector(x)
     
 class TaskAwareHigherOrderSynergyDetector(nn.Module):
@@ -777,19 +789,16 @@ class TaskAwareHigherOrderSynergyDetector(nn.Module):
         
         # Projection
         self.point_proj = nn.Sequential(
-            nn.Linear(point_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(point_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         self.view_proj = nn.Sequential(
-            nn.Linear(view_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(view_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         self.text_proj = nn.Sequential(
-            nn.Linear(text_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(text_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
         
         # === STEP 1: Trimodal + task encoder ===
@@ -802,11 +811,10 @@ class TaskAwareHigherOrderSynergyDetector(nn.Module):
         #     nn.LayerNorm(fusion_dim)
         # )
         self.trimodal_interaction_detector = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+            nn.Linear(fusion_dim * 3, fusion_dim * 3 // 16),
+            nn.LayerNorm(fusion_dim * 3 // 16),
             nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, fusion_dim),
+            nn.Linear(fusion_dim * 3 // 16, fusion_dim),
             nn.LayerNorm(fusion_dim)
         )
 
@@ -817,9 +825,11 @@ class TaskAwareHigherOrderSynergyDetector(nn.Module):
         #     nn.Linear(hidden_dim, fusion_dim)
         # )
         self.unique_remover = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(fusion_dim * 3, fusion_dim * 3 // 16),
+            nn.LayerNorm(fusion_dim * 3 // 16),
+            nn.GELU(),
+            nn.Linear(fusion_dim * 3 // 16, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
 
         # self.pairwise_synergy_remover = nn.Sequential(
@@ -828,9 +838,11 @@ class TaskAwareHigherOrderSynergyDetector(nn.Module):
         #     nn.Linear(hidden_dim, fusion_dim)
         # )
         self.pairwise_synergy_remover = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(fusion_dim * 3, fusion_dim * 3 // 16),
+            nn.LayerNorm(fusion_dim * 3 // 16),
+            nn.GELU(),
+            nn.Linear(fusion_dim * 3 // 16, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
 
         # self.redundancy_remover = nn.Sequential(
@@ -839,24 +851,28 @@ class TaskAwareHigherOrderSynergyDetector(nn.Module):
         #     nn.Linear(hidden_dim, fusion_dim)
         # )
         self.redundancy_remover = nn.Sequential(
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(fusion_dim, fusion_dim // 2),
+            nn.LayerNorm(fusion_dim // 2),
+            nn.GELU(),
+            nn.Linear(fusion_dim // 2, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
 
         self.exclusion_combiner = nn.Sequential(
-            nn.Linear(fusion_dim * 3, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim)
+            nn.Linear(fusion_dim * 3, fusion_dim * 3 // 16),
+            nn.LayerNorm(fusion_dim * 3 // 16),
+            nn.GELU(),
+            nn.Linear(fusion_dim * 3 // 16, fusion_dim),
+            nn.LayerNorm(fusion_dim)
         )
 
         self.exclusion_strength = nn.Parameter(torch.tensor(0.7))
 
         self.emergence_amplifier = nn.Sequential(
-            nn.Linear(fusion_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, fusion_dim),
-            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim // 2),
+            nn.LayerNorm(fusion_dim // 2),
+            nn.GELU(),
+            nn.Linear(fusion_dim // 2, fusion_dim),
             nn.LayerNorm(fusion_dim)
         )
 
@@ -926,13 +942,13 @@ class TrimodalFusion(BaseModule):
         super().__init__(init_cfg=init_cfg)
         self.fusion_dim = fusion_dim
         
-        # projection
-        # self.point_proj = nn.Sequential(nn.Linear(point_dim, fusion_dim),
-        #                                             nn.LayerNorm(fusion_dim))
-        # self.view_proj = nn.Sequential(nn.Linear(view_dim, fusion_dim),
-        #                                             nn.LayerNorm(fusion_dim))
-        # self.text_proj = nn.Sequential(nn.Linear(text_dim, fusion_dim),
-        #                                             nn.LayerNorm(fusion_dim))
+        # batch norm
+        self.bn_syn1 = nn.BatchNorm1d(synergy_dim)
+        self.bn_syn2 = nn.BatchNorm1d(synergy_dim)
+        self.bn_syn3 = nn.BatchNorm1d(synergy_dim)
+        self.bn_unq1 = nn.BatchNorm1d(fusion_dim)
+        self.bn_unq2 = nn.BatchNorm1d(fusion_dim)
+        self.bn_unq3 = nn.BatchNorm1d(fusion_dim)
 
         # Uniqueness Extractors for each modality
         self.unique_extractor_P = TaskAwareUniquenessExtractor(point_dim, synergy_dim, fusion_dim, hidden_dim)
@@ -941,32 +957,32 @@ class TrimodalFusion(BaseModule):
 
 
         # self.redundancy_detector = TaskAwareRedundancyExtractor(fusion_dim, hidden_dim, text_dim)
-        self.redundancy_detector = TaskAwareRedundancyExtractor(fusion_dim, hidden_dim)
+        self.redundancy_detector = TaskAwareRedundancyExtractor(point_dim, view_dim, text_dim, fusion_dim, hidden_dim)
 
         self.higher_synergy_detector = TaskAwareHigherOrderSynergyDetector(
             point_dim, view_dim, text_dim,
             fusion_dim, hidden_dim
         )
         
-        self.question_pid_attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
+        # self.question_pid_attention = nn.MultiheadAttention(
+        #     embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
 
-        self.adaptive_weight_predictor = nn.Sequential(
-            nn.Linear(fusion_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 8)
-        )
-        self.temperature = nn.Parameter(torch.tensor(1.0))
+        # self.adaptive_weight_predictor = nn.Sequential(
+        #     nn.Linear(fusion_dim * 2, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Dropout(dropout),
+        #     nn.Linear(hidden_dim, 8)
+        # )
+        # self.temperature = nn.Parameter(torch.tensor(1.0))
 
         # --- 4. Final Fusion Layer ---
-        self.final_fusion = nn.Sequential(
-            nn.Linear(fusion_dim * 8, fusion_dim * 2),
-            nn.GELU(),
-            nn.LayerNorm(fusion_dim * 2),
-            nn.Linear(fusion_dim * 2, fusion_dim)
-        )
-        self.final_norm = nn.LayerNorm(fusion_dim)
+        # self.final_fusion = nn.Sequential(
+        #     nn.Linear(fusion_dim * 8, fusion_dim * 2),
+        #     nn.GELU(),
+        #     nn.LayerNorm(fusion_dim * 2),
+        #     nn.Linear(fusion_dim * 2, fusion_dim)
+        # )
+        # self.final_norm = nn.LayerNorm(fusion_dim)
         
         self._init_weights()
 
@@ -997,25 +1013,28 @@ class TrimodalFusion(BaseModule):
         """
         B, Np, Dv = view_feat.shape
 
-        # Step 1, projection
-        # point_feat = self.point_proj(point_feat)
-        # view_feat = self.view_proj(view_feat)
-        # text_feat = self.text_proj(text_feat)
+        # Step 1, batchnorm
+        z_pv = self.bn_syn1(z_pv.transpose(1, 2)).transpose(1, 2)
+        z_tv = self.bn_syn2(z_tv.transpose(1, 2)).transpose(1, 2)
+        z_pt = self.bn_syn3(z_pt.transpose(1, 2)).transpose(1, 2)
 
         # --- Step 2: PID Component Assembly ---
         raw_t_expanded = text_feat.unsqueeze(1).expand(-1, Np, -1)
-        Z_P_unique = self.unique_extractor_P(point_feat, z_pv, z_pt)
-        Z_V_unique = self.unique_extractor_V(view_feat, z_pv, z_tv)
-        Z_T_unique = self.unique_extractor_T(raw_t_expanded, z_tv, z_pt)
+        z_p_unq = self.unique_extractor_P(point_feat, z_pv, z_pt)
+        z_v_unq = self.unique_extractor_V(view_feat, z_pv, z_tv)
+        z_t_unq = self.unique_extractor_T(raw_t_expanded, z_tv, z_pt)
 
-        Z_redundant = self.redundancy_detector(
-            z_pv, z_tv, z_pt
-        )
+        z_red = self.redundancy_detector(point_feat, view_feat, raw_t_expanded)
+        
+        # batch norm uniqueness
+        z_p_unq = self.bn_unq1(z_p_unq.transpose(1, 2)).transpose(1, 2)
+        z_v_unq = self.bn_unq2(z_v_unq.transpose(1, 2)).transpose(1, 2)
+        z_t_unq = self.bn_unq3(z_t_unq.transpose(1, 2)).transpose(1, 2)
 
-        Z_higher_synergy = self.higher_synergy_detector(
+        z_higher = self.higher_synergy_detector(
             point_feat, view_feat, raw_t_expanded,
-            Z_P_unique, Z_V_unique, Z_T_unique,
-            z_pv, z_pt, z_tv, Z_redundant,
+            z_p_unq, z_v_unq, z_t_unq,
+            z_pv, z_pt, z_tv, z_red,
         )
 
 
@@ -1046,9 +1065,9 @@ class TrimodalFusion(BaseModule):
 
         # --- Step 5: Prepare Full Component Dictionary for PIDLosses ---
         component_dict = {
-            'Z_P_unique': Z_P_unique, 'Z_V_unique': Z_V_unique, 'Z_T_unique': Z_T_unique,
+            'Z_P_unique': z_p_unq, 'Z_V_unique': z_v_unq, 'Z_T_unique': z_t_unq,
             'Z_PV_synergy': z_pv, 'Z_TV_synergy': z_tv, 'Z_PT_synergy': z_pt,
-            'Z_redundant': Z_redundant, 'Z_higher': Z_higher_synergy,
+            'Z_redundant': z_red, 'Z_higher': z_higher,
         }
 
         # return Z_fused, pid_weights, component_dict

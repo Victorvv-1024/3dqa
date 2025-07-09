@@ -1,3 +1,4 @@
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,7 +25,7 @@ class PositionEmbeddingLearned(BaseModule):
         pos = self.position_embedding_head(xyz)
         return pos.transpose(1, 2).contiguous()
 
-# --- Step 1: Language Integration ---
+# -- Language Integration ---
 
 class LanguageIntegrator(nn.Module):
     """f(question_feat, Z_T_unique) → enhanced_lang_feat"""
@@ -40,6 +41,7 @@ class LanguageIntegrator(nn.Module):
         # Gating for adaptive integration
         self.gate = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Sigmoid()
         )
         
@@ -69,46 +71,179 @@ class LanguageIntegrator(nn.Module):
         # Gated integration: text + weighted_spatial_context
         enhanced_lang = text_feats + gate_weights * spatial_context
         return self.norm(enhanced_lang)  # [B, Lt, D]
+    
+class SpatialQuestionIntegrator(nn.Module):
+    """f(z_t_unique_dense, question_feat) → question_aware_spatial_feat"""
+    def __init__(self, hidden_dim=768, num_heads=8):
+        super().__init__()
+        # Spatial locations attend to question for question awareness
+        self.spatial_to_question_attention = MultiheadAttention(
+            embed_dims=hidden_dim,
+            num_heads=num_heads,
+            batch_first=True
+        )
+        
+        # Gating for adaptive question integration
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.Sigmoid()
+        )
+        
+        self.norm = nn.LayerNorm(hidden_dim)
+        
+    def forward(self, z_t_unique_dense, text_feats):
+        """
+        Args:
+            z_t_unique_dense: [B, Np, D] - Dense spatial language component
+            text_feats: [B, Lt, D] - Sequential text features
+        
+        Returns:
+            question_aware_spatial: [B, Np, D] - Spatial features enhanced with question context
+        """
+        # Spatial locations attend to question tokens for question awareness
+        question_context = self.spatial_to_question_attention(
+            query=z_t_unique_dense,    # [B, Np, D] - Spatial locations as queries
+            key=text_feats,            # [B, Lt, D] - Question tokens as keys
+            value=text_feats           # [B, Lt, D] - Question tokens as values
+        )  # [B, Np, D]
+        
+        # Adaptive gating to control question context integration
+        gate_input = torch.cat([z_t_unique_dense, question_context], dim=-1)  # [B, Np, 2*D]
+        gate_weights = self.gate(gate_input)  # [B, Np, D]
+        
+        # Gated integration: spatial + weighted_question_context
+        question_aware_spatial = z_t_unique_dense + gate_weights * question_context
+        return self.norm(question_aware_spatial)  # [B, Np, D]
 
 # --- Step 2: Visual Fusion ---
 
-class VisualFusion(nn.Module):
+# class VisualFusion(nn.Module):
+#     def __init__(self, hidden_dim=768, num_visual_components=7):
+#         super().__init__()
+#         # Simple question analyzer (like working version)
+#         self.question_analyzer = nn.Sequential(
+#             nn.Linear(hidden_dim, hidden_dim // 2),
+#             nn.LayerNorm(hidden_dim // 2),
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim // 2, num_visual_components),
+#             nn.Softmax(dim=-1)
+#         )
+        
+#         # Simple fusion (like working Z_fused)
+#         self.final_fusion = nn.Sequential(
+#             nn.Linear(num_visual_components * hidden_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim)
+#         )
+        
+#     def forward(self, visual_components, enhanced_lang, point_pos):
+#         # Global language representation
+#         lang_global = enhanced_lang.mean(dim=1)  # [B, D]
+        
+#         # Learn component weights (like working version)
+#         component_weights = self.question_analyzer(lang_global)  # [B, num_components]
+        
+#         # Stack and weight components (like working Z_fused)
+#         stacked_components = torch.stack(visual_components, dim=2)  # [B, Np, num_comp, D]
+#         weights_expanded = component_weights.unsqueeze(1).unsqueeze(-1)  # [B, 1, num_comp, 1]
+#         weighted = stacked_components * weights_expanded  # [B, Np, num_comp, D]
+        
+#         # Simple fusion
+#         B, Np, num_comp, D = weighted.shape
+#         # print(f'DEBUG: Weighted shape: {weighted.shape}')  # Debugging line
+#         concat_weighted = weighted.reshape(B, Np, -1)  # [B, Np, num_comp * D]
+#         fused_visual = self.final_fusion(concat_weighted)  # [B, Np, D]
+        
+#         return fused_visual
+
+class SpatialAwareVisualFusion(nn.Module):
+    """g(visual_components, question_aware_spatial) → full_visual_feat with spatial component weighting"""
     def __init__(self, hidden_dim=768, num_visual_components=7):
         super().__init__()
-        # Simple question analyzer (like working version)
-        self.question_analyzer = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, num_visual_components),
+        self.num_visual_components = num_visual_components
+        
+        # Spatial component analyzer - each location gets its own component weights
+        self.spatial_component_analyzer = nn.Sequential(
+            nn.Linear(hidden_dim + 3, (hidden_dim + 3)// 2), # including xyz
+            nn.LayerNorm((hidden_dim + 3) // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear((hidden_dim + 3) // 2, num_visual_components),
+            nn.LayerNorm(num_visual_components),
+            nn.Softmax(dim=-1)  # Normalize component weights at each location
+        )
+        
+        # Optional: Global question context for overall guidance
+        self.global_question_analyzer = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.LayerNorm(hidden_dim // 4),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 4, num_visual_components),
+            nn.LayerNorm(num_visual_components),
             nn.Softmax(dim=-1)
         )
         
-        # Simple fusion (like working Z_fused)
+        # Fusion controller to balance spatial vs global
+        self.fusion_controller = nn.Sequential(
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+        
+        # Final fusion (like working Z_fused)
         self.final_fusion = nn.Sequential(
-            nn.Linear(num_visual_components * hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim)
         )
         
-    def forward(self, visual_components, enhanced_lang, point_pos):
-        # Global language representation
-        lang_global = enhanced_lang.mean(dim=1)  # [B, D]
+        self.final_norm = nn.LayerNorm(hidden_dim)
         
-        # Learn component weights (like working version)
-        component_weights = self.question_analyzer(lang_global)  # [B, num_components]
+    def forward(self, visual_components, question_aware_spatial, enhanced_lang, full_point_pos):
+        """
+        Args:
+            visual_components: List of [B, Np, D] visual components
+            question_aware_spatial: [B, Np, D] question-aware spatial features
+            enhanced_lang: [B, Lt, D] enhanced language features (for global context)
+            
+        Returns:
+            full_visual: [B, Np, D] - Spatially-aware fused visual features
+        """
+        B, Np, D = visual_components[0].shape
         
-        # Stack and weight components (like working Z_fused)
-        stacked_components = torch.stack(visual_components, dim=2)  # [B, Np, num_comp, D]
-        weights_expanded = component_weights.unsqueeze(1).unsqueeze(-1)  # [B, 1, num_comp, 1]
-        weighted = stacked_components * weights_expanded  # [B, Np, num_comp, D]
+        # Spatial component weighting - each location gets its own preferences
+        spatial_input = torch.cat([question_aware_spatial, full_point_pos], dim=-1) # [B, Np, D + 3]
+        spatial_component_weights = self.spatial_component_analyzer(spatial_input)  # [B, Np, num_comp]
         
-        # Simple fusion
-        B, Np, num_comp, D = weighted.shape
-        # print(f'DEBUG: Weighted shape: {weighted.shape}')  # Debugging line
-        concat_weighted = weighted.reshape(B, Np, -1)  # [B, Np, num_comp * D]
-        fused_visual = self.final_fusion(concat_weighted)  # [B, Np, D]
+        # Optional: Global component guidance
+        # lang_global = enhanced_lang.mean(dim=1)  # [B, D]
+        # global_component_weights = self.global_question_analyzer(lang_global)  # [B, num_comp]
+        # global_weights_expanded = global_component_weights.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, num_comp]
         
-        return fused_visual
+        # Adaptive combination of spatial and global weighting
+        # fusion_alpha = self.fusion_controller(question_aware_spatial)  # [B, Np, 1]
+        # final_component_weights = (
+        #     fusion_alpha * spatial_component_weights + 
+        #     (1 - fusion_alpha) * global_weights_expanded
+        # )  # [B, Np, num_comp]
+        
+        # Apply spatial-aware component weights
+        stacked_components = torch.stack(visual_components, dim=3)  # [B, Np, D, num_comp]
+        
+        # Element-wise multiplication with spatial weights
+        # weighted_components = stacked_components * final_component_weights.unsqueeze(2)  # [B, Np, D, num_comp]
+        weighted_components = stacked_components * spatial_component_weights.unsqueeze(2)  # [B, Np, D, num_comp]
+        fused_visual = weighted_components.sum(dim=3)  # [B, Np, D]
+        
+        # Final processing
+        fused_visual = self.final_fusion(fused_visual)
+        
+        # Residual connection with primary component
+        # if len(visual_components) > 1:
+        #     fused_visual = self.final_norm(fused_visual + visual_components[1])  # +Z_P_unique
+        # else:
+        #     fused_visual = self.final_norm(fused_visual)
+            
+        # return fused_visual, final_component_weights  # Return weights for analysis
+        return fused_visual, spatial_component_weights  # Return weights for analysis
 
 # --- Dense to Sparse Distillation (Standard MCGR) ---
 
@@ -213,15 +348,17 @@ class PIDGroundedReasoningModule(BaseModule):
 
         # Step 1: Language integration
         self.language_integrator = LanguageIntegrator(hidden_dim, num_heads)
+        self.spatial_question_integrator = SpatialQuestionIntegrator(hidden_dim, num_heads)
         
         # Step 2: Visual fusion  
-        self.visual_fusion = VisualFusion(hidden_dim, len(self.visual_component_names))
-        
+        # self.visual_fusion = VisualFusion(hidden_dim, len(self.visual_component_names))
+        self.visual_fusion = SpatialAwareVisualFusion(hidden_dim, len(self.visual_component_names))
+                
         # Steps 3-8: Standard MCGR processing
         self.pos_embedding = PositionEmbeddingLearned(3, hidden_dim)
         self.full_pos_embedding = PositionEmbeddingLearned(3, hidden_dim)
         self.visual_feat_map = nn.Linear(hidden_dim, hidden_dim)
-        self.full_visual_feat_map = nn.Linear(hidden_dim, hidden_dim)
+        self.full_visual_feat_map = deepcopy(self.visual_feat_map)
         self.visual_norm = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Dropout(dropout))
         self.full_visual_norm = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Dropout(dropout))
 
@@ -232,9 +369,14 @@ class PIDGroundedReasoningModule(BaseModule):
             JointTransformerLayer(hidden_dim, num_heads, dropout) for _ in range(num_layers)])
         
         # Final projections
-        self.final_visual_projection = nn.Linear(hidden_dim, hidden_dim)
-        self.final_lang_projection = nn.Linear(hidden_dim, hidden_dim)
-        
+        self.final_visual_projection = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
+        self.final_lang_projection = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
         # Initialize weights
         self._init_weights()
     
@@ -282,7 +424,9 @@ class PIDGroundedReasoningModule(BaseModule):
         if 'Z_T_unique' in component_dict:
             z_t_unique_dense = component_dict['Z_T_unique']  # [B, Np, D] - Dense spatial language info
             enhanced_lang = self.language_integrator(lang_feats, z_t_unique_dense)  # [B, Lt, D]
+            question_aware_spatial = self.spatial_question_integrator(z_t_unique_dense, lang_feats)  # [B, Np, D]
         else:
+            question_aware_spatial = torch.zeros(B, Np, D, device=lang_feats.device)
             enhanced_lang = lang_feats  # Fallback
         
         # ===================== STEP 2: Visual Fusion =====================  
@@ -296,10 +440,12 @@ class PIDGroundedReasoningModule(BaseModule):
         
         if visual_components:
             # Language-guided visual fusion
-            full_visual_feat = self.visual_fusion(visual_components, enhanced_lang, full_point_pos)
+            # full_visual_feat = self.visual_fusion(visual_components, enhanced_lang, full_point_pos)
+            full_visual_feat, component_weights = self.visual_fusion(visual_components, question_aware_spatial, enhanced_lang, full_point_pos)
         else:
             # Fallback: use primary component or zeros
-            full_visual_feat = torch.zeros(B, Np, D, device=lang_feats.device)
+            full_visual_feat = question_aware_spatial
+            component_weights = torch.zeros(B, Np, len(self.visual_component_names), device=lang_feats.device)
         
         # Apply position embedding and normalization to fused visual features
         full_visual_feat = self.full_visual_feat_map(full_visual_feat) + self.full_pos_embedding(full_point_pos)
@@ -349,4 +495,5 @@ class PIDGroundedReasoningModule(BaseModule):
             'lang_feats': final_lang,
             'visual_feats': final_visual,
             'sparse_point_pos': sparse_point_pos,
+            'component_weights': component_weights,  # For analysis
         }
