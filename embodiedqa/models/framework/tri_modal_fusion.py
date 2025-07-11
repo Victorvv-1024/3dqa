@@ -949,6 +949,8 @@ class TrimodalFusion(BaseModule):
         self.bn_unq1 = nn.BatchNorm1d(fusion_dim)
         self.bn_unq2 = nn.BatchNorm1d(fusion_dim)
         self.bn_unq3 = nn.BatchNorm1d(fusion_dim)
+        self.bn_red = nn.BatchNorm1d(fusion_dim)
+        self.bn_higher = nn.BatchNorm1d(fusion_dim)
 
         # Uniqueness Extractors for each modality
         self.unique_extractor_P = TaskAwareUniquenessExtractor(point_dim, synergy_dim, fusion_dim, hidden_dim)
@@ -1025,6 +1027,7 @@ class TrimodalFusion(BaseModule):
         z_t_unq = self.unique_extractor_T(raw_t_expanded, z_tv, z_pt)
 
         z_red = self.redundancy_detector(point_feat, view_feat, raw_t_expanded)
+        z_red = self.bn_red(z_red.transpose(1,2)).transpose(1,2)
         
         # batch norm uniqueness
         z_p_unq = self.bn_unq1(z_p_unq.transpose(1, 2)).transpose(1, 2)
@@ -1036,6 +1039,7 @@ class TrimodalFusion(BaseModule):
             z_p_unq, z_v_unq, z_t_unq,
             z_pv, z_pt, z_tv, z_red,
         )
+        z_higher = self.bn_higher(z_higher.transpose(1,2)).transpose(1,2)
 
 
         # pid_summary = torch.stack([

@@ -149,17 +149,23 @@ class BasePairwiseFusion(nn.Module):
         
         # Feature processors for each modality
         self.x_processor = nn.Sequential(
-            nn.Linear(modality_x_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
+            nn.Linear(modality_x_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
         )
         self.y_processor = nn.Sequential(
-            nn.Linear(modality_y_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
+            nn.Linear(modality_y_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
         )
         
         # Core synergy extractor
         self.synergy_extractor = TaskAwareSynergyExtractor(
-            dim=fusion_dim, num_heads=num_heads, dropout=dropout
+            dim=hidden_dim, num_heads=num_heads, dropout=dropout
+        )
+        
+        # Final projection to fusion dimension
+        self.final_projection = nn.Sequential(
+            nn.Linear(hidden_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
         )
         
         self._init_weights()
@@ -197,4 +203,6 @@ class BasePairwiseFusion(nn.Module):
         # print(f'Processing features: X shape {processed_x.shape}, Y shape {processed_y.shape}')
         # synergy = self.extract_synergy(processed_x, processed_y, task)
         synergy = self.extract_synergy(processed_x, processed_y)
+        synergy = self.final_projection(synergy)  # Project to fusion dimension
+        
         return synergy

@@ -419,36 +419,35 @@ class PointTextFusion(BaseModule):
                  init_cfg=None):
         super().__init__(init_cfg=init_cfg)
         
-        self.fusion_dim = fusion_dim
+        # self.fusion_dim = fusion_dim
         
-        # Feature processors
-        self.point_processor = nn.Sequential(
-            nn.Linear(point_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU()
-        )
-        self.text_processor = nn.Sequential(
-            nn.Linear(text_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU()
-        )
+        # self.point_processor = nn.Sequential(
+        #     nn.Linear(point_dim, fusion_dim),
+        #     nn.LayerNorm(fusion_dim),
+        #     nn.GELU()
+        # )
+        # self.text_processor = nn.Sequential(
+        #     nn.Linear(text_dim, fusion_dim),
+        #     nn.LayerNorm(fusion_dim),
+        #     nn.GELU()
+        # )
         
-        # View-mediated context enhancement
-        self.view_context_projector = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim),
-            nn.LayerNorm(fusion_dim),
-            nn.GELU(),
-        )
+        # # View-mediated context enhancement
+        # self.view_context_projector = nn.Sequential(
+        #     nn.Linear(fusion_dim, fusion_dim),
+        #     nn.LayerNorm(fusion_dim),
+        #     nn.GELU(),
+        # )
         
-        # Pure PID synergy extractor
-        self.synergy_fusion = BasePairwiseFusion(
-            modality_x_dim=fusion_dim,  # Use fusion_dim after projection
-            modality_y_dim=fusion_dim,  # Use fusion_dim after projection
-            fusion_dim=fusion_dim,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout
-        )
+        # # Pure PID synergy extractor
+        # self.synergy_fusion = BasePairwiseFusion(
+        #     modality_x_dim=fusion_dim,  # Use fusion_dim after projection
+        #     modality_y_dim=fusion_dim,  # Use fusion_dim after projection
+        #     fusion_dim=fusion_dim,
+        #     hidden_dim=hidden_dim,
+        #     num_heads=num_heads,
+        #     dropout=dropout
+        # )
         
         # # Final fusion with residual connection
         # self.final_fusion = nn.Sequential(
@@ -459,6 +458,34 @@ class PointTextFusion(BaseModule):
         #     nn.Linear(fusion_dim, fusion_dim),
         #     nn.LayerNorm(fusion_dim)
         # )
+        
+        # Project P and T into view-compatible space
+        self.p2v = nn.Sequential(
+            nn.Linear(point_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
+        self.t2v = nn.Sequential(
+            nn.Linear(text_dim, hidden_dim), 
+            nn.LayerNorm(hidden_dim),
+        )
+        self.view_map = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+        )
+        
+        # Synergy extraction in VIEW SPACE
+        self.view_space_synergy = BasePairwiseFusion(
+            modality_x_dim=hidden_dim,
+            modality_y_dim=hidden_dim,
+            fusion_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+        )
+
+        # Project back to point space for output
+        self.view_to_point_projector = nn.Sequential(
+            nn.Linear(hidden_dim, fusion_dim),
+        )
+        self.final_norm = nn.LayerNorm(fusion_dim)
         
     def forward(self, 
                 Z_PV: Tensor, 
@@ -477,49 +504,76 @@ class PointTextFusion(BaseModule):
         Returns:
             Z_PT: [B, Np, fusion_dim] - Point-Text synergy
         """
-        B, Np, _ = Z_PV.shape
+        # B, Np, _ = Z_PV.shape
         
-        # --- Step 1: Process Text Features to Point Space ---
+        # # --- Step 1: Process Text Features to Point Space ---
         
-        # Handle text dimensionality
-        if text_features.dim() == 2:  # [B, D]
-            text_expanded = text_features.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Df]
-        else:  # [B, L, D]
-            # Pool sequential text to global representation
-            if text_mask is not None:
-                text_masked = text_features * text_mask.unsqueeze(-1)
-                text_pooled = text_masked.sum(dim=1) / text_mask.sum(dim=1, keepdim=True)
-            else:
-                text_pooled = text_features.mean(dim=1)  # [B, D]
-            text_expanded = text_pooled.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Df]
+        # # Handle text dimensionality
+        # if text_features.dim() == 2:  # [B, D]
+        #     text_expanded = text_features.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Df]
+        # else:  # [B, L, D]
+        #     # Pool sequential text to global representation
+        #     if text_mask is not None:
+        #         text_masked = text_features * text_mask.unsqueeze(-1)
+        #         text_pooled = text_masked.sum(dim=1) / text_mask.sum(dim=1, keepdim=True)
+        #     else:
+        #         text_pooled = text_features.mean(dim=1)  # [B, D]
+        #     text_expanded = text_pooled.unsqueeze(1).expand(-1, Np, -1)  # [B, Np, Df]
         
-        # Process features to fusion space
-        processed_text = self.text_processor(text_expanded)  # [B, Np, Df]
+        # # Process features to fusion space
+        # processed_text = self.text_processor(text_expanded)  # [B, Np, Df]
         
-        # --- Step 2: View-Mediated Context Enhancement ---
+        # # --- Step 2: View-Mediated Context Enhancement ---
         
-        # Z_TV provides semantic bridge context for P-T interaction
-        view_context = self.view_context_projector(Z_TV)  # [B, Np, Df]
+        # # Z_TV provides semantic bridge context for P-T interaction
+        # view_context = self.view_context_projector(Z_TV)  # [B, Np, Df]
         
-        # Enhance both point and text representations with view context
-        context_enhanced_points = Z_PV + view_context  # [B, Np, Df]
-        context_enhanced_text = processed_text + view_context  # [B, Np, Df]
+        # # Enhance both point and text representations with view context
+        # context_enhanced_points = Z_PV + view_context  # [B, Np, Df]
+        # context_enhanced_text = processed_text + view_context  # [B, Np, Df]
         
-        # --- Step 3: Extract Pure Point-Text Synergy ---
+        # # --- Step 3: Extract Pure Point-Text Synergy ---
         
-        # pt_synergy = self.synergy_extractor.extract_synergy(
-        #     context_enhanced_points, context_enhanced_text
-        # )  # [B, Np, fusion_dim]
+        # # pt_synergy = self.synergy_extractor.extract_synergy(
+        # #     context_enhanced_points, context_enhanced_text
+        # # )  # [B, Np, fusion_dim]
         
-        # # --- Step 4: Final Fusion with Residual Connection ---
+        # # # --- Step 4: Final Fusion with Residual Connection ---
         
-        # # Combine synergy with original semantically-enriched points
-        # fusion_input = torch.cat([pt_synergy, Z_PV], dim=-1)  # [B, Np, 2*fusion_dim]
-        # Z_PT = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
+        # # # Combine synergy with original semantically-enriched points
+        # # fusion_input = torch.cat([pt_synergy, Z_PV], dim=-1)  # [B, Np, 2*fusion_dim]
+        # # Z_PT = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
         
-        # # Residual connection to preserve point information
-        # Z_PT = Z_PT + Z_PV
+        # # # Residual connection to preserve point information
+        # # Z_PT = Z_PT + Z_PV
         
-        Z_PT = self.synergy_fusion(context_enhanced_points, context_enhanced_text)
+        # Z_PT = self.synergy_fusion(context_enhanced_points, context_enhanced_text)
         
-        return Z_PT
+        # return Z_PT
+        p_in_view = self.p2v(Z_PV)  # [B, Np, hidden_dim]
+        
+        # Process text to point level
+        if text_features.dim() == 3:
+            text_pooled = text_features.mean(dim=1)  # [B, D]
+        else:
+            text_pooled = text_features
+        text_expanded = text_pooled.unsqueeze(1).expand(-1, Z_PV.shape[1], -1)
+        t_in_view = self.t2v(text_expanded)  # [B, Np, hidden_dim]
+        z_tv = self.view_map(Z_TV) # [B, Np, hidden_dim]
+        
+        # Step 2: Extract synergy in VIEW SPACE using Z_TV as reference
+        # Key insight: Z_TV provides the semantic bridge space
+        P_guided_by_views = p_in_view + z_tv  # Points informed by visual semantics
+        T_guided_by_views = t_in_view + z_tv  # Text informed by visual semantics
+        
+        # Step 3: Extract synergy in the view-mediated space
+        # print(f'shape of P_guided_by_views: {P_guided_by_views.shape}, T_guided_by_views: {T_guided_by_views.shape}')
+        view_mediated_synergy = self.view_space_synergy.extract_synergy(
+            P_guided_by_views, T_guided_by_views
+        )  # [B, Np, D]
+        
+        # Step 4: Project back to point space
+        Z_PT = self.view_to_point_projector(view_mediated_synergy)
+        Z_PT += Z_PV  # Residual connection to preserve original point information
+        
+        return self.final_norm(Z_PT)

@@ -183,8 +183,8 @@ class PointViewFusion(BaseModule):
         
         # Pure PID synergy extractor
         self.synergy_fusion = BasePairwiseFusion(
-            modality_x_dim=point_dim,  # Use fusion_dim after projection
-            modality_y_dim=view_dim,  # Use fusion_dim after projection
+            modality_x_dim=point_dim, 
+            modality_y_dim=view_dim, 
             fusion_dim=fusion_dim,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
