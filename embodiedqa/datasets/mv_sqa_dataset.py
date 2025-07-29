@@ -260,7 +260,7 @@ class MultiViewSQADataset(BaseDataset):
             
             question_info['question_type'] = self.get_question_type(question_info['question'])
             s,q = question_info['situation'], question_info['question']
-            question_info['question'] =  f'{s} {q}'
+            # question_info['question'] =  f'{s} {q}'
             question_info['answers'] = [a['answer'] for a in question_info['answers']]
             question_info['situation_label'] = np.array(list(question_info['position'].values()) + list(question_info['rotation'].values()))
         return question_infos
@@ -281,6 +281,7 @@ class MultiViewSQADataset(BaseDataset):
             language_info = dict()
             language_info.update({
                 'scan_id': 'scannet/' + anno['scene_id'],
+                'situation': anno['situation'],
                 'question': anno['question'],
                 'question_id': anno ['question_id']
             })

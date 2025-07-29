@@ -57,7 +57,7 @@ class Pack3DDetInputs(BaseTransform):
         'gt_bboxes',
         'gt_bboxes_labels',
     ]
-
+    # TEXT_KEYS = ['question', 'situation']
     SEG_KEYS = [
         'gt_seg_map', 'pts_instance_mask', 'pts_semantic_mask',
         'gt_semantic_seg'
@@ -78,7 +78,8 @@ class Pack3DDetInputs(BaseTransform):
             'lidar2cam', 'ori_lidar2img', 'num_ref_frames', 'num_views',
             'ego2global', 'fov_ori2aug', 'ego2cam', 'axis_align_matrix',
             'text', 'tokens_positive', 'scan_id','text_graph_node',
-            'text_graph_edge','views_points','question','img_caption','answer_list')):
+            'text_graph_edge','views_points','question','img_caption','answer_list',
+            'situation')): # add this due to we need situation separately. 
         self.keys = keys
         self.meta_keys = meta_keys
 
@@ -214,6 +215,7 @@ class Pack3DDetInputs(BaseTransform):
         gt_instances = InstanceData()
         gt_pts_seg = PointData()
         gt_depth_map = PixelData()
+        # gt_text = InstanceData()
         data_metas = {}
         for key in self.meta_keys:
             if key in results:
@@ -245,6 +247,8 @@ class Pack3DDetInputs(BaseTransform):
             if key in results:
                 if key in self.INPUTS_KEYS:
                     inputs[key] = results[key]
+                # elif key in self.TEXT_KEYS:
+                #     gt_text[key] = results[key]
                 elif key in self.INSTANCEDATA_3D_KEYS:
                     gt_instances_3d[self._remove_prefix(key)] = results[key]
                 elif key in self.ANSWERS_KEYS:
@@ -283,6 +287,7 @@ class Pack3DDetInputs(BaseTransform):
         data_sample.gt_instances = gt_instances
         data_sample.gt_pts_seg = gt_pts_seg
         data_sample.gt_depth_map = gt_depth_map
+        # data_sample.gt_text = gt_text
         if 'eval_ann_info' in results:
             data_sample.eval_ann_info = results['eval_ann_info']
         else:

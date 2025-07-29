@@ -532,24 +532,25 @@ class PointTextFusion(BaseModule):
         # context_enhanced_points = Z_PV + view_context  # [B, Np, Df]
         # context_enhanced_text = processed_text + view_context  # [B, Np, Df]
         
-        # # --- Step 3: Extract Pure Point-Text Synergy ---
+        # --- Step 3: Extract Pure Point-Text Synergy ---
         
-        # # pt_synergy = self.synergy_extractor.extract_synergy(
-        # #     context_enhanced_points, context_enhanced_text
-        # # )  # [B, Np, fusion_dim]
+        # pt_synergy = self.synergy_extractor.extract_synergy(
+        #     context_enhanced_points, context_enhanced_text
+        # )  # [B, Np, fusion_dim]
         
-        # # # --- Step 4: Final Fusion with Residual Connection ---
+        # # --- Step 4: Final Fusion with Residual Connection ---
         
-        # # # Combine synergy with original semantically-enriched points
-        # # fusion_input = torch.cat([pt_synergy, Z_PV], dim=-1)  # [B, Np, 2*fusion_dim]
-        # # Z_PT = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
+        # # Combine synergy with original semantically-enriched points
+        # fusion_input = torch.cat([pt_synergy, Z_PV], dim=-1)  # [B, Np, 2*fusion_dim]
+        # Z_PT = self.final_fusion(fusion_input)  # [B, Np, fusion_dim]
         
-        # # # Residual connection to preserve point information
-        # # Z_PT = Z_PT + Z_PV
+        # # Residual connection to preserve point information
+        # Z_PT = Z_PT + Z_PV
         
         # Z_PT = self.synergy_fusion(context_enhanced_points, context_enhanced_text)
         
         # return Z_PT
+        
         p_in_view = self.p2v(Z_PV)  # [B, Np, hidden_dim]
         
         # Process text to point level

@@ -244,22 +244,6 @@ class SpatialAwareVisualFusion(nn.Module):
             nn.Softmax(dim=-1)  # Normalize component weights at each location
         )
         
-        # Optional: Global question context for overall guidance
-        self.global_question_analyzer = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 4),
-            nn.LayerNorm(hidden_dim // 4),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 4, num_visual_components),
-            nn.LayerNorm(num_visual_components),
-            nn.Softmax(dim=-1)
-        )
-        
-        # Fusion controller to balance spatial vs global
-        self.fusion_controller = nn.Sequential(
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-        
         # self attention
         self.self_attention = nn.MultiheadAttention(
             embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout, batch_first=True
@@ -273,7 +257,7 @@ class SpatialAwareVisualFusion(nn.Module):
         
         self.final_norm = nn.LayerNorm(hidden_dim)
         
-    def forward(self, visual_components, question_aware_spatial, enhanced_lang, full_point_pos):
+    def forward(self, visual_components, question_aware_spatial, full_point_pos):
         """
         Args:
             visual_components: List of [B, Np, D] visual components
@@ -315,14 +299,7 @@ class SpatialAwareVisualFusion(nn.Module):
         # Final processing
         # fused_visual = self.final_fusion(fused_visual)
         fused_visual = self.final_norm(attn_output + fused_visual)  # [B, Np, D]
-        
-        # Residual connection with primary component
-        # if len(visual_components) > 1:
-        #     fused_visual = self.final_norm(fused_visual + visual_components[1])  # +Z_P_unique
-        # else:
-        #     fused_visual = self.final_norm(fused_visual)
             
-        # return fused_visual, final_component_weights  # Return weights for analysis
         return fused_visual, spatial_component_weights  # Return weights for analysis
 
 # --- Dense to Sparse Distillation (Standard MCGR) ---
@@ -395,8 +372,8 @@ class JointTransformerLayer(nn.Module):
 
 # --- Main PID-Grounded Reasoning Module ---
 
-@MODELS.register_module()
-class PIDGroundedReasoningModule(BaseModule):
+# @MODELS.register_module()
+class PIDGroundedReasoningModule(nn.Module):
     """
     Reordered PID-grounded reasoning with early language-visual fusion:
     
@@ -441,30 +418,30 @@ class PIDGroundedReasoningModule(BaseModule):
         # self.visual_fusion = QuestionGuidedVisualFusion(hidden_dim, num_heads=8, dropout=0.1)
                 
         # Steps 3-8: Standard MCGR processing
-        self.pos_embedding = PositionEmbeddingLearned(3, hidden_dim)
-        self.full_pos_embedding = PositionEmbeddingLearned(3, hidden_dim)
-        self.visual_feat_map = nn.Linear(hidden_dim, hidden_dim)
-        self.full_visual_feat_map = deepcopy(self.visual_feat_map)
-        self.visual_norm = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Dropout(dropout))
-        self.full_visual_norm = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Dropout(dropout))
+        # self.pos_embedding = PositionEmbeddingLearned(3, hidden_dim)
+        # self.full_pos_embedding = PositionEmbeddingLearned(3, hidden_dim)
+        # self.visual_feat_map = nn.Linear(hidden_dim, hidden_dim)
+        # self.full_visual_feat_map = deepcopy(self.visual_feat_map)
+        # self.visual_norm = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Dropout(dropout))
+        # self.full_visual_norm = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Dropout(dropout))
 
         # Multi-layer MCGR processing
-        self.d2s_layers = nn.ModuleList([
-            DenseToSparseDistillation(hidden_dim, num_heads, dropout) for _ in range(num_layers)])
-        self.transformer_layers = nn.ModuleList([
-            JointTransformerLayer(hidden_dim, num_heads, dropout) for _ in range(num_layers)])
+        # self.d2s_layers = nn.ModuleList([
+        #     DenseToSparseDistillation(hidden_dim, num_heads, dropout) for _ in range(num_layers)])
+        # self.transformer_layers = nn.ModuleList([
+        #     JointTransformerLayer(hidden_dim, num_heads, dropout) for _ in range(num_layers)])
         
-        # Final projections
-        self.final_visual_projection = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-        )
-        self.final_lang_projection = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-        )
-        # Initialize weights
-        self._init_weights()
+        # # Final projections
+        # self.final_visual_projection = nn.Sequential(
+        #     nn.Linear(hidden_dim, hidden_dim),
+        #     nn.LayerNorm(hidden_dim),
+        # )
+        # self.final_lang_projection = nn.Sequential(
+        #     nn.Linear(hidden_dim, hidden_dim),
+        #     nn.LayerNorm(hidden_dim),
+        # )
+        # # Initialize weights
+        # self._init_weights()
     
     def _init_weights(self):
         """Initialize weights like MCGR for stable training."""
@@ -510,11 +487,11 @@ class PIDGroundedReasoningModule(BaseModule):
         
         if 'Z_T_unique' in component_dict:
             z_t_unique_dense = component_dict['Z_T_unique']  # [B, Np, D] - Dense spatial language info
-            enhanced_lang = self.language_integrator(lang_feats, z_t_unique_dense)  # [B, Lt, D]
+            # enhanced_lang = self.language_integrator(lang_feats, z_t_unique_dense)  # [B, Lt, D]
             question_aware_spatial = self.spatial_question_integrator(z_t_unique_dense, lang_feats)  # [B, Np, D]
         else:
             question_aware_spatial = torch.zeros(B, Np, D, device=lang_feats.device)
-            enhanced_lang = lang_feats  # Fallback
+            # enhanced_lang = lang_feats  # Fallback
         
         # ===================== STEP 2: Visual Fusion =====================  
         # g(visual_components, enhanced_lang) → full_visual_feat
@@ -527,74 +504,76 @@ class PIDGroundedReasoningModule(BaseModule):
         if visual_components:
             # Language-guided visual fusion
             # full_visual_feat = self.visual_fusion(visual_components, enhanced_lang, full_point_pos)
-            full_visual_feat, component_weights = self.visual_fusion(visual_components, question_aware_spatial, enhanced_lang, full_point_pos)
+            full_visual_feat, component_weights = self.visual_fusion(visual_components, question_aware_spatial, full_point_pos)
         else:
             # Fallback: use primary component or zeros
             full_visual_feat = question_aware_spatial
             component_weights = torch.zeros(B, Np, len(self.visual_component_names), device=lang_feats.device)
-        
-        # collect components
-        # components = []
-        # for comp_name in self.component_names:
-        #     if comp_name in component_dict:
-        #         components.append(component_dict[comp_name])
-        
-        # if components:
-        #     # Language-guided visual fusion
-        #     full_visual_feat, component_weights = self.visual_fusion(components, global_lang)
-        # else:
-        #     # Fallback: use primary component or zeros
-        #     full_visual_feat = torch.zeros(B, Np, self.hidden_dim, device=lang_feats.device)
-        #     component_weights = torch.zeros(B, Np, len(self.component_names), device=lang_feats.device)
             
-        # Apply position embedding and normalization to fused visual features
-        full_visual_feat = self.full_visual_feat_map(full_visual_feat) + self.full_pos_embedding(full_point_pos)
-        full_visual_feat = self.full_visual_norm(full_visual_feat)
+        return full_visual_feat, component_weights
         
-        # ===================== STEPS 3-8: Standard MCGR Processing =====================
+        # # collect components
+        # # components = []
+        # # for comp_name in self.component_names:
+        # #     if comp_name in component_dict:
+        # #         components.append(component_dict[comp_name])
         
-        # Step 3: FPS sampling
-        fps_idx = furthest_point_sample(full_point_pos, K)  # [B, K]
-        sparse_point_pos = gather_points(
-            full_point_pos.transpose(1, 2).contiguous(), fps_idx
-        ).transpose(1, 2)  # [B, K, 3]
-        
-        # Step 4: Get sparse visual feat
-        sparse_visual_feat = gather_points(
-            full_visual_feat.transpose(1, 2).contiguous(), fps_idx
-        ).transpose(1, 2)  # [B, K, D]
-        
-        # Add position embedding to sparse features
-        sparse_visual_feat = self.visual_feat_map(sparse_visual_feat) + self.pos_embedding(sparse_point_pos)
-        sparse_visual_feat = self.visual_norm(sparse_visual_feat)
-        
-        # Steps 5-7: Multi-layer MCGR processing
-        current_visual = sparse_visual_feat
-        current_lang = enhanced_lang
-        # current_lang = lang_feats  # Use original language features for MCGR
-        
-        for layer_idx in range(self.num_layers):
-            # Step 5: Dense-to-sparse cross-attention
-            current_visual = self.d2s_layers[layer_idx](current_visual, full_visual_feat)
+        # # if components:
+        # #     # Language-guided visual fusion
+        # #     full_visual_feat, component_weights = self.visual_fusion(components, global_lang)
+        # # else:
+        # #     # Fallback: use primary component or zeros
+        # #     full_visual_feat = torch.zeros(B, Np, self.hidden_dim, device=lang_feats.device)
+        # #     component_weights = torch.zeros(B, Np, len(self.component_names), device=lang_feats.device)
             
-            # Step 6: Joint transformer
-            joint_feat = torch.cat([current_visual, current_lang], dim=1)  # [B, K+Lt, D]
-            visual_mask = torch.ones(B, K, dtype=torch.bool, device=lang_feats.device)
-            joint_mask = torch.cat([visual_mask, lang_mask], dim=1)
-            
-            refined_joint = self.transformer_layers[layer_idx](joint_feat, joint_mask)
-            
-            # Step 7: Split visual and lang
-            current_visual = refined_joint[:, :K, :]      # [B, K, D]
-            current_lang = refined_joint[:, K:, :]        # [B, Lt, D]
+        # # Apply position embedding and normalization to fused visual features
+        # full_visual_feat = self.full_visual_feat_map(full_visual_feat) + self.full_pos_embedding(full_point_pos)
+        # full_visual_feat = self.full_visual_norm(full_visual_feat)
         
-        # Step 8: Final projections
-        final_visual = self.final_visual_projection(current_visual)
-        final_lang = self.final_lang_projection(current_lang)
+        # # ===================== STEPS 3-8: Standard MCGR Processing =====================
         
-        return {
-            'lang_feats': final_lang,
-            'visual_feats': final_visual,
-            'sparse_point_pos': sparse_point_pos,
-            'component_weights': component_weights,  # For analysis
-        }
+        # # Step 3: FPS sampling
+        # fps_idx = furthest_point_sample(full_point_pos, K)  # [B, K]
+        # sparse_point_pos = gather_points(
+        #     full_point_pos.transpose(1, 2).contiguous(), fps_idx
+        # ).transpose(1, 2)  # [B, K, 3]
+        
+        # # Step 4: Get sparse visual feat
+        # sparse_visual_feat = gather_points(
+        #     full_visual_feat.transpose(1, 2).contiguous(), fps_idx
+        # ).transpose(1, 2)  # [B, K, D]
+        
+        # # Add position embedding to sparse features
+        # sparse_visual_feat = self.visual_feat_map(sparse_visual_feat) + self.pos_embedding(sparse_point_pos)
+        # sparse_visual_feat = self.visual_norm(sparse_visual_feat)
+        
+        # # Steps 5-7: Multi-layer MCGR processing
+        # current_visual = sparse_visual_feat
+        # current_lang = enhanced_lang
+        # # current_lang = lang_feats  # Use original language features for MCGR
+        
+        # for layer_idx in range(self.num_layers):
+        #     # Step 5: Dense-to-sparse cross-attention
+        #     current_visual = self.d2s_layers[layer_idx](current_visual, full_visual_feat)
+            
+        #     # Step 6: Joint transformer
+        #     joint_feat = torch.cat([current_visual, current_lang], dim=1)  # [B, K+Lt, D]
+        #     visual_mask = torch.ones(B, K, dtype=torch.bool, device=lang_feats.device)
+        #     joint_mask = torch.cat([visual_mask, lang_mask], dim=1)
+            
+        #     refined_joint = self.transformer_layers[layer_idx](joint_feat, joint_mask)
+            
+        #     # Step 7: Split visual and lang
+        #     current_visual = refined_joint[:, :K, :]      # [B, K, D]
+        #     current_lang = refined_joint[:, K:, :]        # [B, Lt, D]
+        
+        # # Step 8: Final projections
+        # final_visual = self.final_visual_projection(current_visual)
+        # final_lang = self.final_lang_projection(current_lang)
+        
+        # return {
+        #     'lang_feats': final_lang,
+        #     'visual_feats': final_visual,
+        #     'sparse_point_pos': sparse_point_pos,
+        #     'component_weights': component_weights,  # For analysis
+        # }

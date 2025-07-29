@@ -1,119 +1,98 @@
-# Add this to your LossComputation class in mv_vlm_base_qa.py or create a simple loss module
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
+
+# class UniquenessLoss(nn.Module):
+#     """
+#     Enforces uniqueness by making it difficult to reconstruct context modalities
+#     from a unique representation.
+#     Loss_U_P = -MSE(Adversary(U_P), I) - MSE(Adversary(U_P), D)
+#     """
+#     def __init__(self, fusion_dim: int, hidden_dim: int):
+#         super().__init__()
+#         # A simple MLP adversary that tries to reconstruct a context vector
+#         self.adversary = nn.Sequential(
+#             nn.Linear(fusion_dim, hidden_dim),
+#             nn.ReLU(),
+#             nn.Linear(hidden_dim, fusion_dim)
+#         )
+
+#     def forward(self, 
+#                 unique_repr: torch.Tensor, 
+#                 context1_repr: torch.Tensor, 
+#                 context2_repr: torch.Tensor) -> torch.Tensor:
+        
+#         # We don't want to train the context representations, so we detach them.
+#         # They are the fixed targets for the adversary.
+#         detached_context1 = context1_repr.detach()
+#         detached_context2 = context2_repr.detach()
+
+#         # Adversary's attempt to reconstruct the contexts
+#         reconstructed_context1 = self.adversary(unique_repr)
+#         reconstructed_context2 = self.adversary(unique_repr)
+
+#         # The adversary's error (how badly it failed)
+#         adversary_error1 = F.mse_loss(reconstructed_context1, detached_context1)
+#         adversary_error2 = F.mse_loss(reconstructed_context2, detached_context2)
+
+#         # The uniqueness loss is the NEGATIVE of the adversary's error.
+#         # By MINIMIZING this loss, we are MAXIMIZING the adversary's error,
+#         # thus encouraging the unique_repr to be uninformative about the contexts.
+#         return -(adversary_error1 + adversary_error2)
 
 class UniquenessLoss(nn.Module):
     """
-    Simple, mathematically grounded PID loss implementation.
-    
-    Based on Variance-based approach for component specialization.
+    Enforces uniqueness by minimizing the cosine similarity between the
+    unique representation and the context representations.
+    This pushes them to be orthogonal.
     """
-    
     def __init__(self):
         super().__init__()
-        
-    def compute_raw_uniqueness_loss(self, uni_modal_representations):
-        """
-        Compute raw uniqueness loss for uni-modal representations.
-        
-        This encourages each modality (P, V, T) to maintain distinct and unique features
-        by maximizing orthogonality between their representations.
-        
-        Args:
-            uni_modal_representations: List of [Z_P, Z_V, Z_T] tensors
-                - Z_P: [B, Np, D_fus] Point features
-                - Z_V: [B, Np, D_fus] View features  
-                - Z_T: [B, L, D_fus] Text features
-                
-        Returns:
-            torch.Tensor: Raw uniqueness loss scalar
-        """
-        # Filter out None values and extract valid representations
-        valid_representations = []
-        modality_names = ['Point', 'View', 'Text']
-        
-        for i, (modality, repr_tensor) in enumerate(zip(modality_names, uni_modal_representations)):
-            if repr_tensor is not None:
-                # Handle different shapes: [B, Np, D] -> [B, D] and [B, D] -> [B, D]
-                if repr_tensor.dim() == 3:  # [B, Np, D] for Point and View
-                    pooled_repr = repr_tensor.mean(dim=1)  # Pool over spatial dimension
-                elif repr_tensor.dim() == 2:  # [B, D] for Text
-                    pooled_repr = repr_tensor
-                else:
-                    continue  # Skip invalid shapes
-                    
-                valid_representations.append(pooled_repr)
-        
-        # Need at least 2 modalities for uniqueness computation
-        if len(valid_representations) < 2:
-            device = uni_modal_representations[0].device if uni_modal_representations[0] is not None else torch.device('cpu')
-            return torch.tensor(0.0, device=device, requires_grad=True)
-        
-        # Stack representations: [B, num_modalities, D_fus]
-        stacked_representations = torch.stack(valid_representations, dim=1)  # [B, M, D]
-        B, M, D = stacked_representations.shape
-        
-        # Normalize for cosine similarity computation
-        normalized_reprs = F.normalize(stacked_representations, dim=-1)  # [B, M, D]
-        
-        # Compute pairwise cosine similarities: [B, M, M]
-        similarity_matrix = torch.bmm(normalized_reprs, normalized_reprs.transpose(-1, -2))
-        
-        # Create mask to exclude diagonal elements (self-similarity)
-        mask = ~torch.eye(M, dtype=torch.bool, device=similarity_matrix.device)
-        mask = mask.unsqueeze(0).expand(B, -1, -1)  # [B, M, M]
-        
-        # Extract off-diagonal similarities (cross-modal similarities)
-        cross_modal_similarities = similarity_matrix[mask]  # [B * M * (M-1)]
-        
-        # Raw uniqueness loss: minimize cross-modal similarities (encourage orthogonality)
-        # We want different modalities to be as orthogonal as possible
-        raw_uniqueness_loss = cross_modal_similarities.abs().mean()
-        
-        return raw_uniqueness_loss
 
-    def compute_simple_pid_loss(self, component_dict, component_weights):
-        """
-        Simple PID loss: orthogonality.
+    def forward(self, 
+                unique_repr: torch.Tensor, 
+                context1_repr: torch.Tensor, 
+                context2_repr: torch.Tensor = None) -> torch.Tensor:
         
-        Args:
-            component_dict: Dictionary containing PID components
-            component_weights: [B, 8] component importance weights
-            
-        Returns:
-            Dictionary of loss components
-        """
-        device = component_weights.device
-        # Unique components should be orthogonal to each other
-        unique_components = []
-        for key in ['Z_P_unique', 'Z_V_unique', 'Z_T_unique']:
-            if key in component_dict and component_dict[key] is not None:
-                # Pool to [B, D] for easier computation
-                pooled = component_dict[key].mean(dim=1)
-                unique_components.append(pooled)
+        # Calculate similarity between the unique vector and the first context
+        # We take the absolute value because we want them to be unaligned (positive or negative)
+        loss1 = torch.abs(F.cosine_similarity(unique_repr, context1_repr.detach(), dim=-1)).mean()
         
-        orthogonality_loss = torch.tensor(0.0, device=device)
-        if len(unique_components) >= 2:
-            # Stack: [B, num_components, D]
-            unique_stack = torch.stack(unique_components, dim=1)
-            
-            # Normalize for cosine similarity
-            normalized = F.normalize(unique_stack, dim=-1)
-            
-            # Compute pairwise cosine similarities: [B, num_components, num_components]
-            similarity_matrix = torch.bmm(normalized, normalized.transpose(-1, -2))
-            
-            # Extract off-diagonal elements (we want these to be zero)
-            batch_size, num_comp = similarity_matrix.shape[0], similarity_matrix.shape[1]
-            mask = ~torch.eye(num_comp, dtype=torch.bool, device=device)
-            
-            # Minimize off-diagonal similarities
-            orthogonality_loss = similarity_matrix[:, mask].abs().mean()
+        if context2_repr is not None:
+            # Also calculate loss for the second context if it exists (for trivariate case)
+            loss2 = torch.abs(F.cosine_similarity(unique_repr, context2_repr.detach(), dim=-1)).mean()
+            return loss1 + loss2
         
-        return {
-            'uniqueness_loss': orthogonality_loss,
-        }
+        return loss1
+    
+class BiModalUniquenessLoss(nn.Module):
+    """
+    Enforces uniqueness by making it difficult to reconstruct a SINGLE context
+    modality from a unique representation.
+    Loss_U_P = -MSE(Adversary(U_P), I)
+    """
+    def __init__(self, fusion_dim: int, hidden_dim: int):
+        super().__init__()
+        # The adversary is the same, an MLP that tries to reconstruct
+        self.adversary = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, fusion_dim)
+        )
+
+    def forward(self, 
+                unique_repr: torch.Tensor, 
+                context_repr: torch.Tensor) -> torch.Tensor:
+        
+        # Detach the context so its gradients aren't computed
+        detached_context = context_repr.detach()
+
+        # Adversary's attempt to reconstruct the context
+        reconstructed_context = self.adversary(unique_repr)
+
+        # The adversary's error
+        adversary_error = F.mse_loss(reconstructed_context, detached_context)
+
+        # Loss is the negative of the error. Minimizing this maximizes the error.
+        return -adversary_error
