@@ -24,6 +24,42 @@ from .decomposition import (BiModalRedundancyExtractor, BiModalSynergyExtractor,
                             TriModalSynergyExtractor, TriModalUniquenessExtractor,
                             ConditioningModule)
 
+# --- Gating Network (Router) ---
+class PIDInterpreter(nn.Module):
+    """
+    Acts as the Gating Network (Router) for the PIDNet-MoE.
+    It takes a summary of all decomposed information and the question to
+    predict the importance weights for each of the k experts.
+    """
+    def __init__(self, decomposed_dim: int, question_dim: int, num_atoms: int, hidden_dim_ratio: int = 2):
+        super().__init__()
+        # Principled hidden dimension based on inputs
+        hidden_dim = (decomposed_dim + question_dim) // hidden_dim_ratio
+
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(decomposed_dim + question_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, num_atoms),
+            # Softmax is applied later for numerical stability if needed,
+            # but usually direct output is fine for cross-entropy based balancing loss.
+        )
+        # We will use Softmax in the forward pass to get probabilities
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, decomposed_visual_feat, question_repr):
+        # Step 1: Pool the per-point features to get a single summary vector
+        # for the entire scene's decomposition.
+        global_decomposed_feat = decomposed_visual_feat.mean(dim=1) # Shape: [B, Df * k]
+
+        # Step 2: Concatenate the global visual evidence with the question.
+        gate_input = torch.cat([global_decomposed_feat, question_repr], dim=-1)
+
+        # Step 3: Pass through the MLP to predict the k weights.
+        gate_logits = self.gate_mlp(gate_input) # Shape: [B, k]
+        gate_weights = self.softmax(gate_logits) # Shape: [B, k]
+
+        return gate_logits, gate_weights
+
 class PositionEmbeddingLearned(BaseModule):
     """Absolute pos embedding, learned."""
 
@@ -42,26 +78,16 @@ class PositionEmbeddingLearned(BaseModule):
         return position_embedding.transpose(1, 2).contiguous()
     
 @MODELS.register_module()
-class PIDNet(BaseModel):
-    """PIDNet.
+class PIDMoE(BaseModel):
+    """PID-MoE: A Modularized PID Network with Mixture of Experts.
 
-    Args:
-        backbone (dict): Config dict of detector's backbone.
-        neck (dict, optional): Config dict of neck. Defaults to None.
-        bbox_head (dict, optional): Config dict of box head. Defaults to None.
-        max_num_entities (int, optional): The maximum number of entities.
-            Defaults to 256.
-        train_cfg (dict, optional): Config dict of training hyper-parameters.
-            Defaults to None.
-        test_cfg (dict, optional): Config dict of test hyper-parameters.
-            Defaults to None.
-        data_preprocessor (dict or ConfigDict, optional): The pre-process
-            config of :class:`BaseDataPreprocessor`.  it usually includes,
-                ``pad_size_divisor``, ``pad_value``, ``mean`` and ``std``.
-        init_cfg (dict or ConfigDict, optional): the config to control the
-            initialization. Defaults to None.
+    This architecture first decomposes the multimodal input into k distinct
+    information atoms (uniqueness, redundancy, synergy). It then uses a
+    gating network to route these atoms to k parallel expert pathways. Each
+    expert consists of its own fusion encoder and decoder heads. The final
+
+    prediction is a weighted sum of the predictions from all experts.
     """
-    _version = 2 # Version 1 is Early Fusion of PID components, Version 2 is Late Fusion, Version 3 is IterativeEncoder
     def __init__(self,
              backbone: ConfigType,
              backbone_text: ConfigType,
@@ -79,156 +105,116 @@ class PIDNet(BaseModel):
              test_cfg: OptConfigType = None,
              data_preprocessor: OptConfigType = None,
              use_2d: bool = True,
-             init_cfg: OptConfigType = None):
-        # Initialize the PIDNet model with various components.
-        super().__init__(data_preprocessor=data_preprocessor,
-                        init_cfg=init_cfg)
+             init_cfg: OptConfigType = None,
+             load_balancing_loss_weight: float = 0.1,
+             gate_supervision_loss_weight: float = 0.1,
+             geometric_pid_loss_weight: float = 1.0): # Add MoE loss weight
+        super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
+
+        # --- Basic Setup ---
+        self.use_2d = use_2d
+        self.coord_type = coord_type
+        self.voxel_size = voxel_size
+        self.text_max_length = text_max_length
+        self.vision_num_queries = vision_num_queries
+        self.train_cfg = train_cfg
+        self.test_cfg = test_cfg
+        self.geometric_pid_loss_weight = geometric_pid_loss_weight
+        self.gate_supervision_loss_weight = gate_supervision_loss_weight
+        self.load_balancing_loss_weight = load_balancing_loss_weight
         
-        # --- Backbone and Encoder Setup ---
+        # --- Feature Encoders & Projectors (largely from PIDNet) ---
         self.backbone_lidar = MODELS.build(backbone_lidar)
         self.text_encoder = MODELS.build(backbone_text)
         self.tokenizer = self.text_encoder.get_tokenizer()
-        self.use_2d = use_2d
-        self.fusion_encoder = MODELS.build(backbone_fusion)
-        self.Df = self.fusion_encoder.config.hidden_size
-        # --- Comment out for Version 2 ---
-        # self.visual_feat_map = nn.Linear(self.Df, self.Df)
-        # self.full_visual_feat_map = deepcopy(self.visual_feat_map) # For full visual features
-        
-        self.pos_embedding = PositionEmbeddingLearned(3, self.Df) # Positional encoding for 3D points
-        self.full_pos_embedding = PositionEmbeddingLearned(3, self.Df) # For full visual features
-        self.fusion_encoder_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.Df),nn.Dropout(0.1))
-        self.fusion_encoder_full_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.Df),nn.Dropout(0.1))
         if self.use_2d:
             self.backbone = MODELS.build(backbone)
-        self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size, self.Df),nn.LayerNorm(self.Df))
+        
+        self.Df = backbone_fusion.get('hidden_size', 768)
+        self.fusion_dim = 512 # The common dimension for PID atoms
+        self.hidden_dim = 2048 # Feed-forward dimension in extractors
 
-        # --- Dimension and Config Setup ---
-        self.text_max_length = text_max_length
-        self.vision_num_queries = vision_num_queries
-        self.coord_type = coord_type
-        self.voxel_size = voxel_size
-        self.train_cfg = train_cfg
-        self.test_cfg = test_cfg
-
-        # --- Head Setup ---
-        if target_bbox_head is not None:
-            self.target_bbox_head = MODELS.build(target_bbox_head)
-        if target_cls_head is not None:
-            self.target_cls_head = MODELS.build(target_cls_head)
-        if situation_predict_head is not None:
-            self.situation_predict_head = MODELS.build(situation_predict_head)
-        self.qa_head = MODELS.build(qa_head)
-
-        # --- Determine Task Type (VQA vs. SQA) ---
-        if qa_head['num_classes'] == 706: # SQA
-            self.use_sqa = True
-        elif qa_head['num_classes'] == 8864: # ScanQA VQA
-            self.use_sqa = False
-        else:
-            # Default or error case
-            raise ValueError(
-                f"Unsupported DATASET TYPE with number of classes {qa_head['num_classes']}. ")
-
-        # --- PID Framework Initialization ---
-        self.fusion_dim = 512
-        self.hidden_dim = 2048
-
-        # --- Common Modules ---
-        # Projectors to map all modalities to the common fusion_dim
         self.point_dim = self.backbone_lidar.fp_channels[-1][-1]
         self.point_proj = nn.Sequential(nn.Linear(self.point_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
         self.image_dim = self.backbone.out_channels[-1]
         self.img_proj = nn.Sequential(nn.Linear(self.image_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
         self.text_dim = self.text_encoder.config.hidden_size
         self.question_proj = nn.Sequential(nn.Linear(self.text_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
-        
-        # Common view fusion module
+
         self.view_fusion = nn.MultiheadAttention(embed_dim=self.fusion_dim, num_heads=8, batch_first=True)
         self.view_fusion_conditioner = ConditioningModule('concat', self.fusion_dim, self.hidden_dim)
 
-        # --- Task-Specific PID Branches and Aggregator ---
-        if self.use_sqa:
-            # --- SQA Path: Initialize TriModal Components ---
-            # SQA requires an additional projector for the description text
-            self.description_proj = nn.Sequential(nn.Linear(self.text_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
+        # --- Determine Task Type (VQA vs. SQA) ---
+        if qa_head['num_classes'] == 706: # SQA
+            self.use_sqa = True
+            self.num_experts = 7
+        elif qa_head['num_classes'] == 8864: # ScanQA VQA
+            self.use_sqa = False
+            self.num_experts = 4
+        else:
+            raise ValueError(f"Unsupported number of classes {qa_head['num_classes']}.")
 
-            # Initialize the extractors to handle 1 target and 2 contexts
-            # self.uniqueness_point_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            # self.uniqueness_image_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            # self.uniqueness_desc_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            # Shared TriModalUniquenessExtractor, reused for all three modalities.
+        # --- PID Atom Extractors (Identical to PIDNet v2) ---
+        if self.use_sqa:
+            self.description_proj = nn.Sequential(nn.Linear(self.text_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
             self.uniqueness_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            
-            # 2. Redundancy Extractors: THREE instances of BiModalRedundancyExtractor, one for each pair.
-            #    This is the correct way to handle pairwise redundancy, as there is no "TriModalRedundancyExtractor".
             self.redundancy_PI_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
             self.redundancy_PD_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
             self.redundancy_ID_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
-            
-            # 3. Synergy Extractor: ONE instance of TriModalSynergyExtractor for emergent information.
             self.synergy_extractor = TriModalSynergyExtractor(self.fusion_dim, self.hidden_dim)
-
-            # The SQA gate weighs the 5 primary components we can extract
-            # self.gate_dim = self.fusion_dim * 7 + self.fusion_dim # U_p, U_i, U_d, R_pid, S_pid + Question
-            # self.pid_aggregator_gate = nn.Sequential(
-            #     nn.Linear(self.gate_dim, self.hidden_dim), nn.GELU(),
-            #     nn.Linear(self.hidden_dim, 7), nn.Softmax(dim=-1)
-            # )
-            
-            # --- ADD (Version 2) ---
-            # Define the input dimension for the new "wide" decomposed feature vector
-            self.decomposed_dim = self.fusion_dim * 7 # 7 atoms for SQA
-            
+            self.decomposed_dim = self.fusion_dim * self.num_experts
         else:
-            # --- VQA Path: Initialize BiModal Components ---
             self.uniqueness_point_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
             self.uniqueness_image_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
             self.redundancy_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
             self.synergy_extractor = BiModalSynergyExtractor(self.fusion_dim, self.hidden_dim)
+            self.decomposed_dim = self.fusion_dim * self.num_experts
 
-            # The VQA gate weighs the 4 visual components
-            # self.gate_dim = self.fusion_dim * 4 + self.fusion_dim # U_p, U_i, R_pi, S_pi + Question
-            # self.pid_aggregator_gate = nn.Sequential(
-            #     nn.Linear(self.gate_dim, self.hidden_dim), nn.GELU(),
-            #     nn.Linear(self.hidden_dim, 4), nn.Softmax(dim=-1)
-            # )
+        # --- MoE Gating Network ---
+        self.gating_network = PIDInterpreter(
+            decomposed_dim=self.decomposed_dim,
+            question_dim=self.Df,
+            num_atoms=self.num_experts
+        )
+
+        # --- MoE Expert Pathways ---
+        # Each expert has its own fusion encoder and set of decoder heads.
+        self.expert_fusion_encoders = nn.ModuleList()
+        self.expert_qa_heads = nn.ModuleList()
+        self.has_target_bbox_head = target_bbox_head is not None
+        self.has_target_cls_head = target_cls_head is not None
+        self.has_situation_predict_head = situation_predict_head is not None
+        
+        if self.has_target_bbox_head: self.expert_ref_loc_heads = nn.ModuleList()
+        if self.has_target_cls_head: self.expert_ref_cls_heads = nn.ModuleList()
+        if self.has_situation_predict_head: self.situation_predict_heads = nn.ModuleList()
+
+        for _ in range(self.num_experts):
+            self.expert_fusion_encoders.append(MODELS.build(backbone_fusion))
+            self.expert_qa_heads.append(MODELS.build(qa_head))
+            if self.has_target_bbox_head: self.expert_ref_loc_heads.append(MODELS.build(target_bbox_head))
+            if self.has_target_cls_head: self.expert_ref_cls_heads.append(MODELS.build(target_cls_head))
+            if self.has_situation_predict_head: self.situation_predict_heads.append(MODELS.build(situation_predict_head))
             
-            # --- ADD (Version 2) ---
-            self.decomposed_dim = self.fusion_dim * 4 # 4 atoms for VQA
-        
-        # --- Version 2 feat map ---
-        self.visual_feat_map = nn.Linear(self.decomposed_dim, self.Df)
-        self.full_visual_feat_map = nn.Linear(self.decomposed_dim, self.Df)
-    
-        
-        # --- Common Final Layers ---
-        # self.final_refinement = nn.TransformerEncoderLayer(
-        #     d_model=self.fusion_dim, nhead=8, dim_feedforward=self.hidden_dim,
-        #     batch_first=True, activation='gelu'
-        # )
-        # self.final_proj = nn.Linear(self.fusion_dim, self.Df)
-        
-        # PID consistency loss module
-        # if self.use_sqa:
-        #     # self.pid_uniqueness_loss = UniquenessLoss(self.fusion_dim, self.hidden_dim)
-        #     self.pid_uniqueness_loss = UniquenessLoss()
-        # else:
-        #     self.pid_uniqueness_loss = BiModalUniquenessLoss(self.fusion_dim, self.hidden_dim)
-        # self.auxiliary_qa_head = nn.Linear(self.fusion_dim, qa_head['num_classes'])
-        # --- Version 2 --- PID consistency loss (proved to work)
-        self.pid_uniqueness_loss = UniquenessLoss() # Use the new UniquenessLoss class
+        # --- Shared Components for Experts ---
+        self.pos_embedding = PositionEmbeddingLearned(3, self.Df)
+        self.full_pos_embedding = PositionEmbeddingLearned(3, self.Df)
+        self.visual_feat_map = nn.Linear(self.fusion_dim, self.Df)
+        self.full_visual_feat_map = nn.Linear(self.fusion_dim, self.Df)
+        self.fusion_encoder_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.Df), nn.Dropout(0.1))
+        self.fusion_encoder_full_visual_pre_norm = nn.Sequential(nn.LayerNorm(self.Df), nn.Dropout(0.1))
+        self.text_feat_map = nn.Sequential(nn.Linear(self.text_encoder.config.hidden_size, self.Df), nn.LayerNorm(self.Df))
+
+        # --- Auxiliary PID Consistency Losses ---
+        self.pid_uniqueness_loss = UniquenessLoss()
         self.pid_redundancy_loss = RedundancyLoss(self.fusion_dim, self.hidden_dim)
         self.pid_synergy_loss = SynergyLoss()
         
-        # NEW PID Losses
-        # self.pid_uniqueness_loss = TaskAwareUniquenessLoss()
-        # self.pid_redundancy_loss = TaskAwareRedundancyLoss()
-        # no synergy loss in the new version   
+        
     @property
     def with_qa_head(self):
         """Whether the detector has a qa head."""
-        return hasattr(self, 'qa_head') and self.qa_head is not None
+        return hasattr(self, 'expert_qa_heads') and self.qa_heads is not None
 
     @property
     def with_backbone(self):
@@ -238,16 +224,16 @@ class PIDNet(BaseModel):
     @property
     def with_target_bbox_head(self):
         """Whether the detector has a target bbox head."""
-        return hasattr(self, 'target_bbox_head') and self.target_bbox_head is not None
+        return hasattr(self, 'target_bbox_heads') and self.target_bbox_heads is not None
     @property
     def with_target_cls_head(self):
         """Whether the detector has a target cls head."""
-        return hasattr(self, 'target_cls_head') and self.target_cls_head is not None
+        return hasattr(self, 'target_cls_heads') and self.target_cls_heads is not None
     @property
     def with_situation_predict_head(self):
         """Whether the detector has a situation predict head."""
-        return hasattr(self, 'situation_predict_head') and self.situation_predict_head is not None
-    
+        return hasattr(self, 'situation_predict_heads') and self.situation_predict_heads is not None
+
     def extract_text_feat(
         self, batch_inputs_dict: Dict[str, Tensor], batch_data_samples: SampleList
     ):
@@ -526,187 +512,162 @@ class PIDNet(BaseModel):
         
         return feat_dict, pid_atoms_dict, source_repr_dict
     
-    def forward_transformer(self,
-                            point_feats: Tensor,
-                            point_pos: Tensor,
-                            point_mask:Tensor,
-                            text_dict: Dict,
-                            full_point_feats: Tensor = None,
-                            full_point_pos: Tensor = None,
-                            full_point_mask: Tensor = None
-                            ) -> Dict:
-        #feats: mapping and add pos embedding
-        point_feats = self.visual_feat_map(point_feats)
-        if point_pos is not None:
-            # If point_pos is provided, add positional encoding
-            point_feats += self.pos_embedding(point_pos)
-        else:
-            # New Learnable Query path
-            # The queries' own embeddings serve as their positional information
-            B = point_feats.shape[0]
-            query_embed = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1)
-            point_feats += query_embed # Or a separate projection of it
-        point_feats = self.fusion_encoder_visual_pre_norm(point_feats)
+    def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
+        losses = {}
         
-        full_point_feats = self.full_visual_feat_map(full_point_feats)
-        full_point_feats += self.full_pos_embedding(full_point_pos)
-        full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
+        # --- STEP 1: PID Atom and Text Feature Extraction ---
+        text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
+        feat_dict, pid_atoms_dict, source_repr_dict = self.extract_feat(
+            batch_inputs_dict, batch_data_samples, text_dict
+        )
+        
+        # --- STEP 2: Gate & Shared Pre-processing ---
+        full_decomposed_feats = feat_dict['visual_features']
+        full_point_pos = feat_dict['fp_xyz'][-1]
+        
+        # Use the appropriate question representation based on the gate's init
+        gate_question_repr = text_dict['question_global_token']
+        gate_logits, gate_weights = self.gating_network(
+            full_decomposed_feats.detach(), gate_question_repr
+        )
         
         if self.use_sqa:
-            # Concatenate description and question to form the full language context
             lang_feats = torch.cat([text_dict['description_feats'], text_dict['question_feats']], dim=1)
             lang_attention_mask = torch.cat([text_dict['description_token_mask'], text_dict['question_token_mask']], dim=1)
         else:
-            # Original behavior for VQA
             lang_feats = text_dict['question_feats']
             lang_attention_mask = text_dict['question_token_mask']
+        
+        full_pos_enc = self.full_pos_embedding(full_point_pos)
+        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2).contiguous()
+        pos_enc = self.pos_embedding(point_pos)
+        
+        # --- STEP 3: Generate GT targets ONCE for all heads ---
+        gt_qa_labels = torch.stack([ds.gt_answer.answer_labels for ds in batch_data_samples]).float()
+        if self.has_target_bbox_head:
+            batch_gt_instances_3d = [ds.gt_instances_3d for ds in batch_data_samples]
+            gt_loc_labels, gt_loc_obj, _, _ = self.expert_ref_loc_heads[0].get_loc_target(
+                batch_inputs_dict['points'], point_pos, batch_gt_instances_3d)
+        if self.has_target_cls_head:
+            num_cls = self.expert_ref_cls_heads[0].num_classes
+            target_obj_labels = [ds.gt_instances_3d.labels_3d[ds.gt_instances_3d.target_objects_mask.bool()].unique() for ds in batch_data_samples]
+            gt_cls_labels = torch.zeros((len(batch_data_samples), num_cls), device=full_point_pos.device)
+            for i, labels in enumerate(target_obj_labels):
+                gt_cls_labels[i, labels] = 1
+
+        # --- STEP 4: Parallel Expert Processing Loop ---
+        pid_streams_full = torch.split(full_decomposed_feats, self.fusion_dim, dim=-1)
+        all_expert_qa_logits, all_expert_ref_loc_logits, all_expert_ref_cls_logits = [], [], []
+        all_expert_qa_losses = [] # store the individual loss for each expert
+
+        for i in range(self.num_experts):
+            atom_full_feats = pid_streams_full[i]
+            atom_sampled_feats = gather_points(atom_full_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2).contiguous()
             
-        fusion_encoder_inputs_dict = dict(
-            lang_feats = lang_feats,
-            lang_attention_mask = lang_attention_mask,
-            visual_feats = point_feats,
-            visual_attention_mask = point_mask,
-            full_visual_feats = full_point_feats,
-            full_visual_attention_mask = full_point_mask,
+            atom_full_with_pos = self.visual_feat_map(atom_full_feats) + full_pos_enc
+            atom_sampled_with_pos = self.visual_feat_map(atom_sampled_feats) + pos_enc
+            
+            fusion_encoder_inputs_dict = dict(
+                lang_feats=lang_feats, lang_attention_mask=lang_attention_mask,
+                visual_feats=atom_sampled_with_pos, visual_attention_mask=None,
+                full_visual_feats=atom_full_with_pos, full_visual_attention_mask=None
             )
-        fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
-        head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
-                                visual_mask=fusion_encoder_inputs_dict['visual_attention_mask'], 
-                                fusion_feat_language=fusion_output['lang_feats'], 
-                                language_mask=fusion_encoder_inputs_dict['lang_attention_mask'],
-                                fusion_feat_pooler=fusion_output.get('pooler_feat',None)
-                                )
-        
-        return head_inputs_dict
-
-    def loss(self, batch_inputs_dict, batch_data_samples, **kwargs):
-        """Calculate losses from a batch of inputs dict and data samples.
-
-        Args:
-            batch_inputs_dict (dict): The model input dict which include
-                'points', 'img' keys.
-                    - points (list[torch.Tensor]): Point cloud of each sample.
-                    - imgs (torch.Tensor, optional): Image of each sample.
-
-            batch_data_samples (List[:obj:`Det3DDataSample`]): The Data
-                Samples. It usually includes information such as
-                `gt_instance_3d`, `gt_panoptic_seg_3d` and `gt_sem_seg_3d`.
-
-        Returns:
-            dict: A dictionary of loss components.
-        """
-        # Feature extraction
-        text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-        feat_dict, pid_atoms_dict, source_repr_dict = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
-
-        # 2. Original MCGR reasoning
-        # This step is to prepare the features for the downstream heads
-        points = batch_inputs_dict['points']
-        B = len(points) # batch size
-        losses = {}
-        
-        full_point_feats = feat_dict['visual_features'] # [B, Np, Df*7] if self.use_sqa else [B, Np, Df*4]
-        full_point_pos = feat_dict['fp_xyz'][-1]  # [B, Np, 3]
-        point_mask = None
-        
-        # --- Original FPS Sampling ---
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)  # [B, Nq]
-        # gather_points expects [B, C, N] format, so we need to transpose
-        # full_point_feats: [B, Np, Df] -> [B, Df, Np] -> gather -> [B, Df, Nq] -> [B, Nq, Df]
-        point_feats = gather_points(full_point_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, Df]
-        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2)  # [B, Nq, 3]
-        
-        head_inputs_dict = self.forward_transformer(
-            point_feats=point_feats,
-            point_pos=point_pos, # Pass None here since we are not using specific XYZ positions when using DETR-style sampling
-            point_mask=point_mask,
-            text_dict=text_dict,
-            full_point_feats=full_point_feats,
-            full_point_pos=full_point_pos,
-        )
-        qa_losses = self.qa_head.loss(**head_inputs_dict,
-                                     ret_fusion_feat=True,
-                                     batch_data_samples=batch_data_samples)
-        losses.update(qa_losses)
-        
-        if self.with_target_bbox_head:
-            ref_loc_losses = self.target_bbox_head.loss(**head_inputs_dict,
-                                                    points=points, 
-                                                    aggregated_points=point_pos, 
-                                                    batch_data_samples=batch_data_samples)
-            losses.update(ref_loc_losses)
-        if self.with_target_cls_head:
-            fusion_feat = qa_losses['fusion_feat']
-            ref_cls_loss = self.target_cls_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
-            losses.update(ref_cls_loss)
-        if self.with_situation_predict_head:
-            fusion_feat = qa_losses['fusion_feat']
-            situation_predict_loss = self.situation_predict_head.loss(fusion_feat,batch_data_samples=batch_data_samples)
-            losses.update(situation_predict_loss)
-        
-        # 3. PID losses
-        if self.use_sqa:
-            """ Proved PID consistency loss works well for SQA """
-            # 1. Uniqueness Loss
-            loss_u_p = self.pid_uniqueness_loss(pid_atoms_dict['U_P'], source_repr_dict['image'], source_repr_dict['description'])
-            loss_u_i = self.pid_uniqueness_loss(pid_atoms_dict['U_I'], source_repr_dict['point'], source_repr_dict['description'])
-            loss_u_d = self.pid_uniqueness_loss(pid_atoms_dict['U_D'], source_repr_dict['point'], source_repr_dict['image'])
-            total_uniqueness_loss = loss_u_p + loss_u_i + loss_u_d
-            losses['loss_pid_uniqueness'] = total_uniqueness_loss * 0.1 # Apply a weight
-
-            # 2. Redundancy Loss
-            loss_r_pi = self.pid_redundancy_loss(pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
-            loss_r_pd = self.pid_redundancy_loss(pid_atoms_dict['R_PD'], source_repr_dict['point'], source_repr_dict['description'])
-            loss_r_id = self.pid_redundancy_loss(pid_atoms_dict['R_ID'], source_repr_dict['image'], source_repr_dict['description'])
-            total_redundancy_loss = loss_r_pi + loss_r_pd + loss_r_id
-            losses['loss_pid_redundancy'] = total_redundancy_loss * 0.1 # Apply a weight
-
-            # 3. Synergy Loss
-            non_synergy_atoms = [v for k, v in pid_atoms_dict.items() if k != 'S_PID']
-            total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PID'], non_synergy_atoms)
-            losses['loss_pid_synergy'] = total_synergy_loss * 0.1 # Apply a weight
             
+            fusion_output = self.expert_fusion_encoders[i](**fusion_encoder_inputs_dict)
             
-            """ Refined pid losses (Not working as well as the above) """ 
-            # loss_u_pi = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_P'], pid_atoms_dict['U_I'])
-            # loss_u_pd = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_P'], pid_atoms_dict['U_D'])
-            # loss_u_id = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_I'], pid_atoms_dict['U_D'])
-            # total_uniqueness_loss = loss_u_pi + loss_u_pd + loss_u_id
-            # losses['loss_pid_uniqueness'] = total_uniqueness_loss * 0.1
+            # Prepare the expert head input dict
+            head_inputs_dict = dict(
+                fusion_feat_visual=fusion_output['visual_feats'],
+                visual_mask=None,
+                fusion_feat_language=fusion_output['lang_feats'],
+                language_mask=lang_attention_mask,
+                fusion_feat_pooler=fusion_output.get('pooler_feat', None)
+            )
             
-            # loss_r_pi = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
-            # loss_r_pd = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_PD'], source_repr_dict['point'], source_repr_dict['description'])
-            # loss_r_id = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_ID'], source_repr_dict['image'], source_repr_dict['description'])
-            # total_redundancy_loss = loss_r_pi + loss_r_pd + loss_r_id
-            # losses['loss_pid_redundancy'] = total_redundancy_loss * 0.1
+            qa_logits, fusion_feat_pooled = self.expert_qa_heads[i].forward(**head_inputs_dict, batch_data_samples=batch_data_samples,)
+            all_expert_qa_logits.append(qa_logits)
             
-        else:
-            """ Proved PID consistency loss works well for VQA """
-            # 1. Uniqueness Loss (using the bimodal class)
-            loss_u_p = self.pid_uniqueness_loss(pid_atoms_dict['U_P'], source_repr_dict['image'])
-            loss_u_i = self.pid_uniqueness_loss(pid_atoms_dict['U_I'], source_repr_dict['point'])
-            total_uniqueness_loss = loss_u_p + loss_u_i
-            losses['loss_pid_uniqueness'] = total_uniqueness_loss * 0.1 # Apply a weight
+            individual_qa_loss = self.expert_qa_heads[i].group_cross_entropy_loss(qa_logits, gt_qa_labels, reduction='none') # per-sample
+            all_expert_qa_losses.append(individual_qa_loss)
 
-            # 2. Redundancy Loss (reusing the same class)
-            total_redundancy_loss = self.pid_redundancy_loss(
-                pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
-            losses['loss_pid_redundancy'] = total_redundancy_loss * 0.1 # Apply a weight
+            if self.has_target_bbox_head:
+                all_expert_ref_loc_logits.append(self.expert_ref_loc_heads[i].clf_head(fusion_output['visual_feats']).squeeze(-1))
+            if self.has_target_cls_head:
+                all_expert_ref_cls_logits.append(self.expert_ref_cls_heads[i].clf_head(fusion_feat_pooled))
 
-            # 3. Synergy Loss (reusing the same class)
-            non_synergy_atoms = [pid_atoms_dict['U_P'], pid_atoms_dict['U_I'], pid_atoms_dict['R_PI']]
-            total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PI'], non_synergy_atoms)
-            losses['loss_pid_synergy'] = total_synergy_loss * 0.1 # Apply a weight
+        # --- STEP 5: Weighted Aggregation & MAIN TASK LOSS ---
+        final_qa_logits = (gate_weights.unsqueeze(-1) * torch.stack(all_expert_qa_logits, dim=1)).sum(dim=1)
+        losses['loss_qa_cls'] = self.expert_qa_heads[0].group_cross_entropy_loss(final_qa_logits, gt_qa_labels)
+
+        if self.has_target_bbox_head:
+            final_ref_loc_logits = (gate_weights.unsqueeze(-1) * torch.stack(all_expert_ref_loc_logits, dim=1)).sum(dim=1)
+            losses['loss_ref_loc'] = self.expert_ref_loc_heads[0].loss_weight * self.expert_ref_loc_heads[0].group_cross_entropy_loss(final_ref_loc_logits, gt_loc_labels, gt_loc_obj)
+        
+        if self.has_target_cls_head:
+            final_ref_cls_logits = (gate_weights.unsqueeze(-1) * torch.stack(all_expert_ref_cls_logits, dim=1)).sum(dim=1)
+            losses['loss_ref_cls'] = self.expert_ref_cls_heads[0].loss_weight * self.expert_ref_cls_heads[0].group_cross_entropy_loss(final_ref_cls_logits, gt_cls_labels.float())
+
+        # --- STEP 6: AUXILIARY LOSSES ---
+
+        # --- 6a. MoE Load Balancing Loss ---
+        mean_gate_weights = torch.mean(gate_weights, dim=0)
+        load_balancing_loss = self.num_experts * torch.sum(mean_gate_weights * torch.log(mean_gate_weights + 1e-10))
+        losses['loss_moe_load_balancing'] = self.load_balancing_loss_weight * load_balancing_loss
+        
+        # --- 6b. Direct Gate Supervision Loss (THE CORRECT WAY) ---
+        # Stack the per-sample losses from all experts.
+        # all_expert_qa_losses is a list of k tensors, each of shape [B].
+        # Stacking them gives a tensor of shape [k, B].
+        expert_losses_tensor = torch.stack(all_expert_qa_losses)
+
+        # We want to find the best expert for each sample, so we need shape [B, k].
+        expert_losses_tensor = expert_losses_tensor.transpose(0, 1) # Shape is now [B, k]
+
+        # Find the index of the best expert (minimum loss) for EACH sample.
+        with torch.no_grad():
+            best_expert_indices = torch.argmin(expert_losses_tensor, dim=1).detach() # Shape: [B]
+
+        # The target for the gate is now a tensor of correct indices, one for each sample.
+        loss_gate_supervision = F.cross_entropy(gate_logits, best_expert_indices)
+        losses['loss_gate_supervision'] = self.gate_supervision_loss_weight * loss_gate_supervision
+
+
+        # --- 6c. Geometric "Structural" PID Consistency Loss ---
+        total_geometric_loss = 0
+        if self.geometric_pid_loss_weight > 0:
+            if self.use_sqa:
+                loss_u_p = self.pid_uniqueness_loss(pid_atoms_dict['U_P'], source_repr_dict['image'], source_repr_dict['description'])
+                loss_u_i = self.pid_uniqueness_loss(pid_atoms_dict['U_I'], source_repr_dict['point'], source_repr_dict['description'])
+                loss_u_d = self.pid_uniqueness_loss(pid_atoms_dict['U_D'], source_repr_dict['point'], source_repr_dict['image'])
+                total_uniqueness_loss = loss_u_p + loss_u_i + loss_u_d
+                
+                loss_r_pi = self.pid_redundancy_loss(pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
+                loss_r_pd = self.pid_redundancy_loss(pid_atoms_dict['R_PD'], source_repr_dict['point'], source_repr_dict['description'])
+                loss_r_id = self.pid_redundancy_loss(pid_atoms_dict['R_ID'], source_repr_dict['image'], source_repr_dict['description'])
+                total_redundancy_loss = loss_r_pi + loss_r_pd + loss_r_id
+                
+                non_synergy_atoms = [v for k, v in pid_atoms_dict.items() if k != 'S_PID']
+                total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PID'], non_synergy_atoms)
+                
+                total_geometric_loss = total_uniqueness_loss + total_redundancy_loss + total_synergy_loss
+            else:
+                loss_u_p = self.pid_uniqueness_loss(pid_atoms_dict['U_P'], source_repr_dict['image'])
+                loss_u_i = self.pid_uniqueness_loss(pid_atoms_dict['U_I'], source_repr_dict['point'])
+                total_uniqueness_loss = loss_u_p + loss_u_i
+                
+                total_redundancy_loss = self.pid_redundancy_loss(pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
+                
+                non_synergy_atoms = [pid_atoms_dict['U_P'], pid_atoms_dict['U_I'], pid_atoms_dict['R_PI']]
+                total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PI'], non_synergy_atoms)
+                
+                total_geometric_loss = total_uniqueness_loss + total_redundancy_loss + total_synergy_loss
+                
+            losses['loss_geometric_pid'] = self.geometric_pid_loss_weight * total_geometric_loss
             
-            """ Refined PID losses (Not working as well as the above) """
-            # loss_u_pi = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_P'], pid_atoms_dict['U_I'])
-            # losses['loss_pid_uniqueness'] = loss_u_pi * 0.1
-
-            # loss_r_pi = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
-            # losses['loss_pid_redundancy'] = loss_r_pi * 0.1
-            
-        losses = self.loss_collect(losses)
-
+        # print mean gate weights
+        # print(f"Mean Gate Weights: {gate_weights.mean(dim=0)}")
+                
         return losses
     
     def loss_collect(self, losses_dict):
@@ -746,41 +707,82 @@ class PIDNet(BaseModel):
                     new_dict[key] = value
         return new_dict
     
-    def predict(self, batch_inputs_dict, batch_data_samples,**kwargs):
-        text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
-        feat_dict,_,_ = self.extract_feat(batch_inputs_dict, batch_data_samples,text_dict=text_dict)
-        full_point_feats = feat_dict['visual_features'] # [B, Np, Df]
-        full_point_pos = feat_dict['fp_xyz'][-1]
-        B = full_point_feats.shape[0]
-        point_mask = None #B,proposal_num
-        # --- Original FPS sampling ---
-        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries) #B,proposal_num
-        point_feats = gather_points(full_point_feats.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,hidden_size
-        point_pos = gather_points(full_point_pos.transpose(1,2).contiguous(), fps_idx).transpose(1,2) #B,proposal_num,3
-
-        # --- DETR style Query Sampling ---
-        # query_embed = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1)
-        # point_pos_encoded = self.point_pos_encoder(full_point_pos)
-        # point_feats, _ = self.query_sampler(
-        #     query=query_embed,                     # The "empty slots" to be filled
-        #     key=full_point_feats + point_pos_encoded, # The visual features + their positions
-        #     value=full_point_feats                 # The visual features to be sampled
-        # )
-        # point_feats = self.query_norm(point_feats)
-        # point_pos = self.location_pred_head(point_feats)
+    def predict(self, batch_inputs_dict, batch_data_samples, **kwargs):
+        # The predict function follows the same expert loop and aggregation logic
+        # but calls the .predict() method of the heads.
         
-        head_inputs_dict = self.forward_transformer(point_feats=point_feats,
-                                                    point_pos=point_pos,
-                                                    point_mask=point_mask,
-                                                    text_dict=text_dict,
-                                                    full_point_feats=full_point_feats,
-                                                    full_point_pos=full_point_pos)
-        results_list = self.qa_head.predict(**head_inputs_dict,
-                                     batch_data_samples=batch_data_samples)
+        # --- Steps 1-3: Feature Extraction, Gating, Shared Pre-processing ---
+        text_dict = self.extract_text_feat(batch_inputs_dict, batch_data_samples)
+        feat_dict, _, _ = self.extract_feat(batch_inputs_dict, batch_data_samples, text_dict)
+        full_decomposed_feats = feat_dict['visual_features']
+        full_point_pos = feat_dict['fp_xyz'][-1]
+        
+        _, gate_weights = self.gating_network(full_decomposed_feats, text_dict['question_global_token'])
+        
+        # Prepare language features once for all experts
+        if self.use_sqa:
+            lang_feats = torch.cat([text_dict['description_feats'], text_dict['question_feats']], dim=1)
+            lang_attention_mask = torch.cat([text_dict['description_token_mask'], text_dict['question_token_mask']], dim=1)
+        else:
+            lang_feats = text_dict['question_feats']
+            lang_attention_mask = text_dict['question_token_mask']
+        
+        full_pos_enc = self.full_pos_embedding(full_point_pos)
+        fps_idx = furthest_point_sample(full_point_pos, self.vision_num_queries)
+        point_pos = gather_points(full_point_pos.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2).contiguous()
+        pos_enc = self.pos_embedding(point_pos)
+        
+        pid_streams_full = torch.split(full_decomposed_feats, self.fusion_dim, dim=-1)
+        
+        # --- Step 4: Parallel Expert Prediction Loop ---
+        all_expert_qa_scores = [] # This will be a list of lists: [[B scores], [B scores], ...]
+        # Add lists for other heads if needed
 
-        for data_sample, pred_scores in zip(batch_data_samples,
-                                                  results_list):
+        for i in range(self.num_experts):
+            atom_full_feats = self.visual_feat_map(pid_streams_full[i])
+            atom_full_feats_with_pos = atom_full_feats + full_pos_enc
+            
+            atom_sampled_feats = gather_points(atom_full_feats.transpose(1, 2).contiguous(), fps_idx).transpose(1, 2).contiguous()
+            point_feats = atom_sampled_feats + pos_enc
+            
+            fusion_encoder_inputs_dict = dict(
+                lang_feats=lang_feats, lang_attention_mask=lang_attention_mask,
+                visual_feats=atom_sampled_feats, visual_attention_mask=None,
+                full_visual_feats=atom_full_feats, full_visual_attention_mask=None
+            )
+            
+            fusion_output = self.expert_fusion_encoders[i](**fusion_encoder_inputs_dict)
+            
+            # Prepare the expert head input dict
+            head_inputs_dict = dict(
+                fusion_feat_visual=fusion_output['visual_feats'],
+                visual_mask=None,
+                fusion_feat_language=fusion_output['lang_feats'],
+                language_mask=lang_attention_mask,
+                fusion_feat_pooler=fusion_output.get('pooler_feat', None)
+            )
+            
+            # Use the .predict() method of the head
+            qa_scores = self.expert_qa_heads[i].predict(**head_inputs_dict, batch_data_samples=batch_data_samples)
+            all_expert_qa_scores.append(qa_scores)
+            
+        # --- Step 5: Weighted Aggregation of Expert Predictions ---
+        # The QA head's predict returns a list of tensors, one for each sample in the batch.
+        # We need to aggregate them correctly.
+        final_scores_list = []
+        num_samples = len(batch_data_samples)
+        for b in range(num_samples):
+            # For each sample, gather the scores from all k experts
+            scores_from_all_experts_for_sample_b = torch.stack([expert_scores[b] for expert_scores in all_expert_qa_scores]) # Shape: [k, Num_Classes]
+            weights_for_sample_b = gate_weights[b].unsqueeze(-1) # Shape: [k, 1]
+            # Calculate the final weighted score
+            final_score_for_sample_b = (weights_for_sample_b * scores_from_all_experts_for_sample_b).sum(dim=0)
+            final_scores_list.append(final_score_for_sample_b)
+
+        # Update data samples with final predictions
+        for data_sample, pred_scores in zip(batch_data_samples, final_scores_list):
             data_sample.pred_scores = pred_scores
+            # If you aggregated other heads, update them here too.
         return batch_data_samples
     
     def add_pred_to_datasample(

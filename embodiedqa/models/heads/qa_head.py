@@ -78,11 +78,24 @@ class QAHead(BaseModule):
             loss['fusion_feat']=fusion_feat
         return loss
 
-    def group_cross_entropy_loss(self, logits, gt_answer_labels):
+    # def group_cross_entropy_loss(self, logits, gt_answer_labels):
+    #     pred_score = F.softmax(logits,dim=1)
+    #     pred_score = (pred_score*gt_answer_labels).sum(1)#B,
+    #     loss = -(pred_score + eps).log()
+    #     return loss.mean()
+    
+    def group_cross_entropy_loss(self, logits, gt_answer_labels, reduction='mean'):
         pred_score = F.softmax(logits,dim=1)
         pred_score = (pred_score*gt_answer_labels).sum(1)#B,
-        loss = -(pred_score + eps).log()
-        return loss.mean()
+        loss = -(pred_score + eps).log() # Shape: [Batch_Size]
+        
+        if reduction == 'mean':
+            return loss.mean()
+        elif reduction == 'none':
+            return loss # <-- Return the per-sample loss tensor
+        else:
+            raise ValueError(f"Unsupported reduction: {reduction}")
+    
     def predict(self, fusion_feat_visual,visual_mask, fusion_feat_language, language_mask, fusion_feat_pooler, batch_data_samples, **kwargs):
         logits,_ = self.forward(fusion_feat_visual,visual_mask, fusion_feat_language, language_mask,fusion_feat_pooler, batch_data_samples)
         pred_scores = F.softmax(logits,dim=1)

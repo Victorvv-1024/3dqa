@@ -96,3 +96,60 @@ class BiModalUniquenessLoss(nn.Module):
 
         # Loss is the negative of the error. Minimizing this maximizes the error.
         return -adversary_error
+    
+class TaskAwareUniquenessLoss(nn.Module):
+    """
+    Enforces uniqueness by pushing the auxiliary predictions from two unique
+    representations to be as different as possible.
+    
+    It maximizes the KL Divergence between their output probability distributions.
+    Loss = -KL(P_unique1 || P_unique2)
+    """
+    def __init__(self, logit_scale: float = 5.0):
+        super().__init__()
+        # A shared, lightweight prediction head used only for this loss.
+        self.log_softmax = nn.LogSoftmax(dim=-1)
+        self.softmax = nn.Softmax(dim=-1)
+        
+        self.logit_scale = nn.Parameter(torch.ones([]) * logit_scale)
+
+    def forward(self, 
+                aux_head: nn.Module,
+                unique_repr1: torch.Tensor, 
+                unique_repr2: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            unique_repr1 (Tensor): The first unique representation (e.g., U_P).
+            unique_repr2 (Tensor): The second unique representation (e.g., U_I).
+        """
+        # Pool the per-point features to get a global representation for prediction.
+        global_unique1 = unique_repr1.mean(dim=1)
+        global_unique2 = unique_repr2.mean(dim=1)
+
+        # Get the "predictions" from each unique representation.
+        logits1 = aux_head(global_unique1)
+        logits2 = aux_head(global_unique2)
+        
+        # 1. Normalize the logits. This helps prevent saturation of tanh.
+        logits1 = F.normalize(logits1, p=2, dim=1)
+        logits2 = F.normalize(logits2, p=2, dim=1)
+        # 2. Squash the logits into a bounded range using tanh and scale them.
+        # This is the critical step that makes the loss stable.
+        logits1 = self.logit_scale * torch.tanh(logits1)
+        logits2 = self.logit_scale * torch.tanh(logits2)
+        
+        # Convert logits to probability distributions.
+        # The first distribution for KL-Div should be in log-space.
+        log_p1 = self.log_softmax(logits1)
+        # The second should be a standard probability distribution.
+        # We detach it to treat it as a fixed target, preventing the gradients
+        # from trying to push it in the "wrong" direction.
+        p2 = self.softmax(logits2).detach()
+
+        # Calculate the KL Divergence. This measures how different p1 is from p2.
+        # A high KL-Div means the distributions are very different (good for uniqueness).
+        kl_divergence = F.kl_div(log_p1, p2, reduction='batchmean')
+
+        # We want to MAXIMIZE the divergence. To do this with a minimizer,
+        # we return the NEGATIVE of the divergence.
+        return -kl_divergence

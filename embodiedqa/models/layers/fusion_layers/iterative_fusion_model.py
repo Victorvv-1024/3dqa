@@ -29,17 +29,27 @@ class IterativeFusionLayer(nn.Module):
         self.vis_cross_attn_norm = nn.LayerNorm(hidden_size)
 
         # Standard FFN for refinement after attention steps
-        self.ffn = BaseTransformerLayer(
-            attn_cfgs=dict(type='MultiheadAttention', embed_dims=hidden_size, num_heads=num_attention_heads, batch_first=True),
-            ffn_cfgs=dict(type='FFN', embed_dims=hidden_size, feedforward_channels=hidden_size * 4),
-            operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm'), # We'll only use the self_attn and ffn parts
+        # This BaseTransformerLayer will handle self-attention, residuals, and the FFN internally.
+        self.refinement_block = BaseTransformerLayer(
+            attn_cfgs=dict(
+                type='MultiheadAttention',
+                embed_dims=hidden_size,
+                num_heads=num_attention_heads,
+                batch_first=True
+            ),
+            ffn_cfgs=dict(
+                type='FFN',
+                embed_dims=hidden_size,
+                feedforward_channels=hidden_size * 4,
+            ),
+            operation_order=('self_attn', 'norm', 'ffn', 'norm'), # Standard transformer block
             norm_cfg=dict(type='LN'),
             batch_first=True
         )
 
     def forward(self, queries, lang_feats, vis_feats, lang_mask=None, vis_mask=None):
         # 1. Ground queries in the question
-        lang_attended_queries, _ = self.lang_cross_attn(
+        lang_attended_queries = self.lang_cross_attn(
             query=queries,
             key=lang_feats,
             value=lang_feats,
@@ -48,7 +58,7 @@ class IterativeFusionLayer(nn.Module):
         queries = self.lang_cross_attn_norm(queries + lang_attended_queries)
 
         # 2. Use language-aware queries to probe the visual atoms
-        vis_attended_queries, _ = self.vis_cross_attn(
+        vis_attended_queries = self.vis_cross_attn(
             query=queries,
             key=vis_feats,
             value=vis_feats,
@@ -56,13 +66,8 @@ class IterativeFusionLayer(nn.Module):
         )
         queries = self.vis_cross_attn_norm(queries + vis_attended_queries)
 
-        # 3. Refine the queries through a self-attention and FFN block
-        # The BaseTransformerLayer's forward expects a cross-attention step we don't need,
-        # so we call its internal modules directly.
-        queries = queries + self.ffn.attentions[0](query=queries, key=queries, value=queries)[0]
-        queries = self.ffn.norms[0](queries)
-        queries = self.ffn.ffns[0](queries)
-        queries = self.ffn.norms[2](queries) # norm after ffn
+        # 3. Refine the queries through a standard self-attention + FFN block
+        queries = self.refinement_block(query=queries)
         
         return queries
 
@@ -72,7 +77,7 @@ class IterativeFusionLayer(nn.Module):
 
 @MODELS.register_module()
 class IterativeFusionEncoder(BaseModule):
-    def __init__(self, hidden_size=768, num_attention_heads=12, num_hidden_layers=3, hidden_dropout_prob=0.1, num_reasoning_queries=64):
+    def __init__(self, hidden_size=768, num_attention_heads=12, num_hidden_layers=3, hidden_dropout_prob=0.1, num_reasoning_queries=256):
         super().__init__()
         self.config = ConfigDict(
             hidden_size=hidden_size,
@@ -114,12 +119,12 @@ class IterativeFusionEncoder(BaseModule):
         # The language features remain unchanged.
         
         # Pool the queries to get a single vector for the QA head
-        pooled_output = torch.tanh(self.pooler(queries[:, 0])) # Use the first query as the [CLS] token
+        # pooled_output = torch.tanh(self.pooler(queries[:, 0])) # Use the first query as the [CLS] token
 
         output = {
             'lang_feats': lang_feats,
             'visual_feats': queries,  # The full set of queries for e.g. bbox prediction
-            'pooler_feat': pooled_output # The pooled feature for the QA classification head
+            # 'pooler_feat': pooled_output # The pooled feature for the QA classification head
         }
 
         return output
