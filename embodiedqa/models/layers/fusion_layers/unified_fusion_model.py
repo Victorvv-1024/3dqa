@@ -54,10 +54,11 @@ class CrossModalityEncoder(BaseModule):
             lang_attention_mask = torch.ones(lang_feats.shape[:2],device=lang_feats.device)
         if  full_visual_attention_mask is None:
             full_visual_attention_mask = torch.ones(full_visual_feats.shape[:2],device=full_visual_feats.device)
-        for fusion_block in self.fusion_blocks:
+        for i, fusion_block in enumerate(self.fusion_blocks):
             lang_feats, visual_feats = fusion_block(
                 lang_feats, visual_feats, full_visual_feats,
                 lang_attention_mask, visual_attention_mask, full_visual_attention_mask,
+                is_first_block=(i == 0)
             )
 
         output = {
@@ -91,7 +92,18 @@ class FusionBlock(nn.Module):
                 batch_first=True
             )
             self.cross_attention_norm = nn.LayerNorm(hidden_size)
-        
+            
+        # add a new cross-attention layer
+        self.atom_query_attention = MultiheadAttention(
+            hidden_size,
+            num_attention_heads,
+            attn_drop=hidden_dropout_prob,
+            proj_drop=hidden_dropout_prob,
+            batch_first=True
+        )
+
+        self.atom_query_norm = nn.LayerNorm(hidden_size)
+            
         self.transformer_layer = BaseTransformerLayer(
             attn_cfgs=dict(
                 type='MultiheadAttention',
@@ -120,6 +132,8 @@ class FusionBlock(nn.Module):
                 lang_attention_mask=None, 
                 visual_attention_mask=None, 
                 full_visual_attention_mask=None,
+                # direction of improvement
+                is_first_block: bool=False
                 ): 
         if self.use_full_visual_feat:
             # Cross-attention between visual_feats and full_visual_feats
@@ -132,8 +146,28 @@ class FusionBlock(nn.Module):
             new_visual_feats = self.cross_attention_norm(new_visual_feats)
         else:
             new_visual_feats = visual_feats
+            
+        if is_first_block:
+            # The question (lang_feats) acts as the QUERY.
+            # The PID atoms (refined_visual_feats) act as the KEY and VALUE (the context).
+            atom_query_output = self.atom_query_attention(
+                query=lang_feats,
+                key=new_visual_feats,
+                value=new_visual_feats,
+                key_padding_mask=visual_attention_mask.bool().logical_not() if visual_attention_mask is not None else None
+            )
+            
+            # The output is an "atom-aware" question representation.
+            # We update the original question features using a standard residual connection.
+            updated_lang_feats = self.atom_query_norm(lang_feats + atom_query_output)
+        else:
+            # For all subsequent blocks, the language features are passed through unchanged.
+            updated_lang_feats = lang_feats
+
+        
         # Concatenate visual and language features (visual first, language second)
-        concat_feats = torch.cat([new_visual_feats, lang_feats], dim=1)
+        # concat_feats = torch.cat([new_visual_feats, lang_feats], dim=1)
+        concat_feats = torch.cat([new_visual_feats, updated_lang_feats], dim=1)
         concat_mask = torch.cat([visual_attention_mask, lang_attention_mask], dim=-1)
         concat_padding_mask = concat_mask.bool().logical_not()
         # Pass through transformer layer

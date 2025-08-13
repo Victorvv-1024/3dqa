@@ -13,13 +13,15 @@ classes = ('cabinet', 'bed', 'chair', 'sofa', 'table', 'door',
             'window','bookshelf','picture', 'counter', 'desk', 'curtain',
             'refrigerator', 'shower curtain', 'toilet', 'sink', 'bathtub', 'others')
 model = dict(
-    # type='MultiViewVLMBase3DQA',
-    type='DSPNet3DQA',
+    # Model selection:
+    # 'PIDNet' - PIDNet model
+    # 'DSPNet3DQA' - Baseline DSPNet model
+    type='PIDMoE',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM
                         #    use_imagenet_standard_mean_std=True,#BeiT
-                           use_imagenet_default_mean_std = True,#Segformer,DinoV2,resnet
+                           use_imagenet_default_mean_std = True,#Segformer,DinoV2,Swin
                            mean=[123.675, 116.28, 103.53], 
                            std=[58.394, 57.12, 57.375],
                            bgr_to_rgb=True,
@@ -27,6 +29,13 @@ model = dict(
                            furthest_point_sample=True, #only for test
                            num_points=n_points,
                            ),
+    # backbone = dict(type='ViTModelWrapper', 
+    #                 name='microsoft/beit-base-patch16-224-pt22k-ft22k',
+    #                 out_channels=[768],
+    #                 add_map=True,
+    #                 used_hidden_layers=[12],
+    #                 frozen=True,
+    #                 ),
     backbone = dict(type='SwinModelWrapper', 
                     name='microsoft/swin-base-patch4-window7-224-in22k',
                     out_channels=[1024],
@@ -37,11 +46,15 @@ model = dict(
                          name='sentence-transformers/all-mpnet-base-v2', 
                          frozen=False,
                          ),
-    # backbone_fusion = dict(type='CrossModalityEncoder',
-    #                        hidden_size=768, 
-    #                        num_attention_heads=12,
-    #                        num_hidden_layers = 4,
-    #                        ),
+    # backbone_text = dict(type='TextModelWrapper', 
+    #                      name='facebook/bart-base', 
+    #                      frozen=False),
+
+    backbone_fusion = dict(type='CrossModalityEncoder',
+                           hidden_size=768, 
+                           num_attention_heads=12,
+                           num_hidden_layers = 4 #4,
+                           ),
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -60,12 +73,50 @@ model = dict(
                     frozen = False,
                     ),
     text_max_length=512,
+    target_bbox_head=dict(type='RefLocHead',
+                        bbox_coder=dict(
+                            type='PartialBinBasedBBoxCoder',
+                            num_sizes=18,
+                            num_dir_bins=10,
+                            with_rot=True,
+                            mean_sizes=[[0.775, 0.949, 0.9654], 
+                                        [1.869, 1.8321, 1.1922], 
+                                        [0.6121, 0.6193, 0.7048], 
+                                        [1.4411, 1.6045, 0.8365], 
+                                        [1.0478, 1.2016, 0.6346], 
+                                        [0.561, 0.6085, 1.7195], 
+                                        [1.0789, 0.8203, 1.1692], 
+                                        [0.8417, 1.3505, 1.6899], 
+                                        [0.2305, 0.4764, 0.5657], 
+                                        [1.4548, 1.9712, 0.2864], 
+                                        [1.0786, 1.5371, 0.865], 
+                                        [1.4312, 0.7692, 1.6498], 
+                                        [0.6297, 0.7087, 1.3143], 
+                                        [0.4393, 0.4157, 1.7], 
+                                        [0.585, 0.5788, 0.7203], 
+                                        [0.5116, 0.5096, 0.3129], 
+                                        [1.1732, 1.0599, 0.5181], 
+                                        [0.4329, 0.5193, 0.4844]]),
+                        train_cfg=dict(
+                            pos_distance_thr=0.3, neg_distance_thr=0.6),
+                        num_classes = 1,
+                        in_channels = 768,
+                        hidden_channels = 768,
+                        dropout = 0.3,
+                        loss_weight=1.0,
+                        ),
+    target_cls_head=dict(type='RefClsHead',
+                          num_classes = 18,
+                          in_channels = 768*2,
+                          hidden_channels = 768,
+                          dropout = 0.3,
+                          loss_weight=1.0,
+                        ),
     qa_head = dict(type='QAHead',
-                   num_classes=706,
+                   num_classes=8864,
                    in_channels = 768,
                    hidden_channels = 768,
                    dropout=0.3,
-                   only_use_fusion_feat_pooler=False,
                    ),
     # model training and testing settings
     train_cfg=dict(
@@ -75,13 +126,16 @@ model = dict(
         nms_thr=0.25,
         score_thr=0.05,
         per_class_proposal=True),
-    coord_type='DEPTH')
+    coord_type='DEPTH',
+    load_balancing_loss_weight=0.1,
+    gate_supervision_loss_weight=1.0,
+    geometric_pid_loss_weight=1.0,)
 
-dataset_type = 'MultiViewSQADataset'
+dataset_type = 'MultiViewScanQADataset'
 data_root = 'data'
 
 train_pipeline = [
-    dict(type='LoadAnnotations3D',with_answer_labels=True,with_situation_label=True),
+    dict(type='LoadAnnotations3D',with_answer_labels=True,with_target_objects_mask=True),
     dict(type='MultiViewPipeline',
          n_images=20,
          transforms=[
@@ -99,7 +153,7 @@ train_pipeline = [
          translation_std=[.1, .1, .1],
          shift_height=False),
     dict(type='Pack3DDetInputs',
-         keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels','situation_label'])
+         keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels','target_objects_mask'])
 ]
 test_pipeline = [
     dict(type='LoadAnnotations3D',with_answer_labels=True),
@@ -119,10 +173,10 @@ test_pipeline = [
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels'])
 ]
 
-
+BATCH_SIZE = 4 # 12
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
-    batch_size=12,
+    batch_size=BATCH_SIZE,
     num_workers=12,
     persistent_workers=True,
     pin_memory=True,
@@ -133,18 +187,16 @@ train_dataloader = dict(
                  dataset=dict(type=dataset_type,
                               data_root=data_root,
                               ann_file='mv_scannetv2_infos_train.pkl',
-                              question_file='sqa_task/balanced/v1_balanced_questions_train_scannetv2.json',
-                              answer_file='sqa_task/balanced/v1_balanced_sqa_annotations_train_scannetv2.json',
+                              qa_file='qa/ScanQA_v1.0_train.json',
                               metainfo = dict(classes=classes),
                               pipeline=train_pipeline,
                               anno_indices=None,
                               test_mode=False,
                               filter_empty_gt=True,
                               box_type_3d='Depth',
-                              remove_dontcare=True)
-                 ))
+                              remove_dontcare=True)))
 
-val_dataloader = dict(batch_size=12,
+val_dataloader = dict(batch_size=BATCH_SIZE,
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,
@@ -153,8 +205,7 @@ val_dataloader = dict(batch_size=12,
                       dataset=dict(type=dataset_type,
                                    data_root=data_root,
                                    ann_file='mv_scannetv2_infos_val.pkl',
-                                   question_file='sqa_task/balanced/v1_balanced_questions_test_scannetv2.json',
-                                   answer_file='sqa_task/balanced/v1_balanced_sqa_annotations_test_scannetv2.json',
+                                   qa_file='qa/ScanQA_v1.0_val.json',
                                    metainfo = dict(classes=classes),
                                    pipeline=test_pipeline,
                                    anno_indices=None,
@@ -162,16 +213,37 @@ val_dataloader = dict(batch_size=12,
                                    filter_empty_gt=True,
                                    box_type_3d='Depth',
                                    remove_dontcare=True))
+test_dataloader = dict(batch_size=12,
+                      num_workers=12,
+                      persistent_workers=True,
+                      pin_memory=True,
+                      drop_last=False,
+                      sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
+                      dataset=dict(type=dataset_type,
+                                   data_root=data_root,
+                                   # test w object
+                                #    ann_file='mv_scannetv2_infos_val.pkl',
+                                #    qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+                                    # test w/o object
+                                   ann_file='mv_scannetv2_infos_test.pkl',
+                                   qa_file='qa/ScanQA_v1.0_test_wo_obj.json',
+                                   metainfo = dict(classes=classes),
+                                   pipeline=test_pipeline,
+                                   anno_indices=None,
+                                   test_mode=True,
+                                   filter_empty_gt=False,
+                                   box_type_3d='Depth',
+                                   remove_dontcare=False))
+val_evaluator = dict(type='ScanQAMetric',
+                     )
+test_evaluator = dict(type='ScanQAMetric',
+                     format_only=True,
+                    )
 
-test_dataloader = val_dataloader
 
-val_evaluator = dict(type='SQAMetric')
-test_evaluator = val_evaluator
-
-
-# training schedule for 2x
+# training schedule for 1x
 max_epochs = 12
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1, dynamic_intervals = [(max_epochs//2, 1)])
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
@@ -186,7 +258,7 @@ optim_wrapper = dict(
                             'text_encoder': dict(lr_mult=0.1),
                          }),
                      clip_grad=dict(max_norm=10, norm_type=2),
-                     accumulative_counts=1)
+                     accumulative_counts=1)  # 1
 # learning rate
 param_scheduler = [
     # 在 [0, max_epochs) Epoch时使用余弦学习率

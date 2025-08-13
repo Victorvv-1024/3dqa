@@ -17,7 +17,6 @@ model = dict(
     # 'MultiViewVLMBase3DQA' - Advanced framework with PID regularization and uniqueness loss
     # 'DSPNet3DQA' - Baseline DSPNet model
     type='MultiViewVLMBase3DQA',
-    # type='DSPNet3DQA',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM
@@ -30,6 +29,7 @@ model = dict(
                            furthest_point_sample=True, #only for test
                            num_points=n_points,
                            ),
+    # ==================== BACKBONE CONFIGS ====================
     # backbone = dict(type='ViTModelWrapper', 
     #                 name='microsoft/beit-base-patch16-224-pt22k-ft22k',
     #                 out_channels=[768],
@@ -37,25 +37,6 @@ model = dict(
     #                 used_hidden_layers=[12],
     #                 frozen=True,
     #                 ),
-    backbone = dict(type='SwinModelWrapper', 
-                    name='microsoft/swin-base-patch4-window7-224-in22k',
-                    out_channels=[1024],
-                    add_map=True,
-                    frozen=True,
-                    ),
-    backbone_text = dict(type='TextModelWrapper', 
-                         name='sentence-transformers/all-mpnet-base-v2', 
-                         frozen=False,
-                         ),
-    # backbone_text = dict(type='TextModelWrapper', 
-    #                      name='facebook/bart-base', 
-    #                      frozen=False),
-
-    backbone_fusion = dict(type='CrossModalityEncoder',
-                           hidden_size=768, 
-                           num_attention_heads=12,
-                           num_hidden_layers = 4,
-                           ),
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -73,6 +54,72 @@ model = dict(
                         normalize_xyz=True),
                     frozen = False,
                     ),
+    backbone = dict(type='SwinModelWrapper', 
+                    name='microsoft/swin-base-patch4-window7-224-in22k',
+                    out_channels=[1024],
+                    add_map=True,
+                    frozen=False,
+                    ),
+    backbone_text = dict(type='TextModelWrapper', 
+                         name='sentence-transformers/all-mpnet-base-v2', 
+                         frozen=False,
+                         ),
+    # backbone_text = dict(type='TextModelWrapper', 
+    #                      name='facebook/bart-base', 
+    #                      frozen=False),
+    # ==================== FUSION MODULE CONFIGS ====================
+    pv_fusion=dict(
+        type='PointViewFusion',
+        point_dim=256,  # From PointNet++ output
+        view_dim=1024,   # Aggregated view features (D_fus)
+        fusion_dim=768,
+        hidden_dim=512,
+        num_heads=8,
+        dropout=0.1,
+    ),
+    tv_fusion=dict(
+        type='TextViewFusion',
+        text_dim=768,   # From SBERT
+        view_dim=1024, 
+        fusion_dim=768,
+        hidden_dim=512,
+        num_heads=8,
+        dropout=0.1,
+        # return_aggregated_views=True,  # For use in other modules
+    ),
+    pt_fusion=dict(
+        type='PointTextFusion',
+        point_dim=768,  # After processing through pv_fusion
+        text_dim=768,   # From SBERT
+        fusion_dim=768,
+        hidden_dim=512,
+        num_heads=8,
+        dropout=0.1,
+    ),
+    tri_modal_fusion=dict(
+        type='TrimodalFusion',
+        point_dim=256,      # From PointNet++ backbone (raw)
+        view_dim=1024,      
+        text_dim=768,       # From SBERT backbone
+        synergy_dim=768,    # Synergy feature dimension
+        fusion_dim=768,     # Final fusion dimension
+        hidden_dim=512,     # Hidden layer dimension
+        num_heads=8,        # Multi-head attention heads
+        dropout=0.1,        # Dropout rate
+    ),
+    # ==================== MCGR ====================
+    backbone_fusion = dict(type='CrossModalityEncoder',
+                           hidden_size=768, 
+                           num_attention_heads=12,
+                           num_hidden_layers = 4,
+                           ),
+    # backbone_fusion = dict(type='PIDGroundedReasoningModule',
+    #                        hidden_dim=768, 
+    #                        num_heads=12,
+    #                        vision_num_queries=256,
+    #                        num_layers=4,
+    #                        ),
+    # ==================== TASK HEADS ====================
     text_max_length=512,
     target_bbox_head=dict(type='RefLocHead',
                         bbox_coder=dict(
@@ -119,7 +166,7 @@ model = dict(
                    hidden_channels = 768,
                    dropout=0.3,
                    ),
-    # model training and testing settings
+    # ==================== TRAINING/TESTING CONFIGS ====================
     train_cfg=dict(
         pos_distance_thr=0.3, neg_distance_thr=0.6, sample_mode='seed'),
     test_cfg=dict(
@@ -171,7 +218,7 @@ test_pipeline = [
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels'])
 ]
 
-BATCH_SIZE = 8 # 12
+BATCH_SIZE = 10  # Physical batch size (limited by memory)
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
     batch_size=BATCH_SIZE,
@@ -211,7 +258,7 @@ val_dataloader = dict(batch_size=BATCH_SIZE,
                                    filter_empty_gt=True,
                                    box_type_3d='Depth',
                                    remove_dontcare=True))
-test_dataloader = dict(batch_size=12,
+test_dataloader = dict(batch_size=BATCH_SIZE,
                       num_workers=12,
                       persistent_workers=True,
                       pin_memory=True,
@@ -220,11 +267,11 @@ test_dataloader = dict(batch_size=12,
                       dataset=dict(type=dataset_type,
                                    data_root=data_root,
                                    # test w object
-                                   ann_file='mv_scannetv2_infos_val.pkl',
-                                   qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+                                #    ann_file='mv_scannetv2_infos_val.pkl',
+                                #    qa_file='qa/ScanQA_v1.0_test_w_obj.json',
                                     # test w/o object
-                                #    ann_file='mv_scannetv2_infos_test.pkl',
-                                #    qa_file='qa/ScanQA_v1.0_test_wo_obj.json',
+                                   ann_file='mv_scannetv2_infos_test.pkl',
+                                   qa_file='qa/ScanQA_v1.0_test_wo_obj.json',
                                    metainfo = dict(classes=classes),
                                    pipeline=test_pipeline,
                                    anno_indices=None,
@@ -240,13 +287,13 @@ test_evaluator = dict(type='ScanQAMetric',
 
 
 # training schedule for 1x
-max_epochs = 12
+max_epochs = 12 # 12
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
 # optimizer
-lr = (1e-4) * (BATCH_SIZE / 12)  # 12 is the base batch size, scale lr according to batch size
+lr = 1e-4
 optim_wrapper = dict(
                      type='OptimWrapper',
                      optimizer=dict(type='AdamW', lr=lr, weight_decay=1e-5),
@@ -257,6 +304,7 @@ optim_wrapper = dict(
                          }),
                      clip_grad=dict(max_norm=10, norm_type=2),
                      accumulative_counts=1)  # 1
+
 # learning rate
 param_scheduler = [
     # 在 [0, max_epochs) Epoch时使用余弦学习率
@@ -275,12 +323,32 @@ param_scheduler = [
          end=500),
 ]
 
-custom_hooks = [dict(type='EmptyCacheHook', after_iter=True),
-                ]
+custom_hooks = [
+    dict(type='EmptyCacheHook', after_iter=True),
+    dict(
+        type='EarlyStoppingHook',
+        monitor='EM@1',  # Metric to monitor (same as save_best)
+        patience=3,      # Stop if no improvement for 4 epochs
+        min_delta=0.001, # Minimum change to qualify as improvement
+        rule='greater',  # 'greater' for metrics like accuracy, 'less' for loss
+        check_finite=True,
+        strict=False,    # Don't raise error if metric is missing
+        stopping_threshold=None,  # Optional: stop if metric reaches this value
+    ),
+]
 
 # hooks
 default_hooks = dict(
-    checkpoint=dict(type='CheckpointHook', save_best='EM@1',rule='greater', interval=1, max_keep_ckpts=3))
+    checkpoint=dict(
+        type='CheckpointHook', 
+        save_best='EM@1',
+        rule='greater', 
+        interval=1, 
+        max_keep_ckpts=3,  # Keep more checkpoints for early stopping
+        save_last=True,    # Always save the last checkpoint
+        save_optimizer=True,  # Save optimizer state for resuming
+    )
+)
 
 
 find_unused_parameters = True

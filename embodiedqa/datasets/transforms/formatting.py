@@ -79,7 +79,7 @@ class Pack3DDetInputs(BaseTransform):
             'ego2global', 'fov_ori2aug', 'ego2cam', 'axis_align_matrix',
             'text', 'tokens_positive', 'scan_id','text_graph_node',
             'text_graph_edge','views_points','question','img_caption','answer_list',
-            'situation')): # add this due to we need situation separately. 
+            'situation')): # add this due to we need situation separately.
         self.keys = keys
         self.meta_keys = meta_keys
 

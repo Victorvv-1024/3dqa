@@ -14,9 +14,9 @@ classes = ('cabinet', 'bed', 'chair', 'sofa', 'table', 'door',
             'refrigerator', 'shower curtain', 'toilet', 'sink', 'bathtub', 'others')
 model = dict(
     # Model selection:
-    # 'MultiViewVLMBase3DQA' - Advanced framework with PID regularization and uniqueness loss
+    # 'PIDNet' - PIDNet model
     # 'DSPNet3DQA' - Baseline DSPNet model
-    type='MultiViewVLMBase3DQA',
+    type='PIDNet',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM
@@ -55,6 +55,13 @@ model = dict(
                            num_attention_heads=12,
                            num_hidden_layers = 4,
                            ),
+    # backbone_fusion = dict(
+    #                     type='IterativeFusionEncoder',
+    #                     hidden_size=768,
+    #                     num_attention_heads=12,
+    #                     num_hidden_layers=5,
+    #                     num_reasoning_queries=256    
+    #                 ),
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -170,7 +177,7 @@ test_pipeline = [
          keys=['img', 'points', 'gt_bboxes_3d', 'gt_labels_3d','gt_answer_labels'])
 ]
 
-BATCH_SIZE = 8 # 12
+BATCH_SIZE = 12 # 12
 # TODO: to determine a reasonable batch size
 train_dataloader = dict(
     batch_size=BATCH_SIZE,
@@ -248,20 +255,12 @@ test_cfg = dict(type='TestLoop')
 lr = 1e-4
 optim_wrapper = dict(
                      type='OptimWrapper',
-                     optimizer=dict(type='AdamW', lr=lr, weight_decay=5e-4),
+                     optimizer=dict(type='AdamW', lr=lr, weight_decay=1e-5),
                      paramwise_cfg=dict(
                          bypass_duplicate=True,
                          custom_keys={
-                            # Pre-trained: Preserve learned representations
-                            'backbone_lidar': dict(lr_mult=0.1),    # PointNet++ 
-                            'text_encoder': dict(lr_mult=0.1),      # SBERT
-                            
-                            # New modules: Accelerate learning
-                            'pv_fusion': dict(lr_mult=1.2),         # @MODELS.register_module() ✓
-                            'tv_fusion': dict(lr_mult=1.2),         # @MODELS.register_module() ✓  
-                            'pt_fusion': dict(lr_mult=1.2),         # @MODELS.register_module() ✓
-                            'tri_modal_fusion': dict(lr_mult=1.2),  # @MODELS.register_module() ✓
-                        }),
+                            'text_encoder': dict(lr_mult=0.1),
+                         }),
                      clip_grad=dict(max_norm=10, norm_type=2),
                      accumulative_counts=1)  # 1
 # learning rate

@@ -149,14 +149,15 @@ class PIDNet(BaseModel):
 
         # --- Task-Specific PID Branches and Aggregator ---
         if self.use_sqa:
+            self.k_atoms = 7
             # --- SQA Path: Initialize TriModal Components ---
             # SQA requires an additional projector for the description text
             self.description_proj = nn.Sequential(nn.Linear(self.text_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
 
-            # Initialize the extractors to handle 1 target and 2 contexts
-            # self.uniqueness_point_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            # self.uniqueness_image_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            # self.uniqueness_desc_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # # Initialize the extractors to handle 1 target and 2 contexts
+            # # self.uniqueness_point_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # # self.uniqueness_image_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # # self.uniqueness_desc_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
             # Shared TriModalUniquenessExtractor, reused for all three modalities.
             self.uniqueness_extractor = TriModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
             
@@ -166,65 +167,70 @@ class PIDNet(BaseModel):
             self.redundancy_PD_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
             self.redundancy_ID_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
             
-            # 3. Synergy Extractor: ONE instance of TriModalSynergyExtractor for emergent information.
+            # # 3. Synergy Extractor: ONE instance of TriModalSynergyExtractor for emergent information.
             self.synergy_extractor = TriModalSynergyExtractor(self.fusion_dim, self.hidden_dim)
 
-            # The SQA gate weighs the 5 primary components we can extract
-            # self.gate_dim = self.fusion_dim * 7 + self.fusion_dim # U_p, U_i, U_d, R_pid, S_pid + Question
-            # self.pid_aggregator_gate = nn.Sequential(
-            #     nn.Linear(self.gate_dim, self.hidden_dim), nn.GELU(),
-            #     nn.Linear(self.hidden_dim, 7), nn.Softmax(dim=-1)
+            # --- Modified SQA path ---
+            # self.description_proj = nn.Sequential(nn.Linear(self.text_dim, self.fusion_dim), nn.LayerNorm(self.fusion_dim))
+            # 1. Module to fuse Point and Image representations
+            # self.sqa_vision_fusion_mlp = nn.Sequential(
+            #     nn.Linear(self.fusion_dim * 2, self.hidden_dim),
+            #     nn.ReLU(inplace=True),
+            #     nn.Linear(self.hidden_dim, self.fusion_dim),
+            #     nn.LayerNorm(self.fusion_dim)
             # )
             
-            # --- ADD (Version 2) ---
-            # Define the input dimension for the new "wide" decomposed feature vector
-            self.decomposed_dim = self.fusion_dim * 7 # 7 atoms for SQA
+            # self.film_generator = nn.Sequential(
+            #     nn.Linear(self.fusion_dim, self.hidden_dim),
+            #     nn.ReLU(inplace=True),
+            #     nn.Linear(self.hidden_dim, self.fusion_dim * 2)
+            # )
+            
+            # 2. Reduce it to 2-source problem
+            # self.uniqueness_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # # self.uniqueness_vision_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # # self.uniqueness_description_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # self.redundancy_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
+            # self.synergy_extractor = BiModalSynergyExtractor(self.fusion_dim, self.hidden_dim)
+            
+            # self.k_atoms = 4 # 4 atoms: Visual, Context, Synergy, Redundancy
             
         else:
             # --- VQA Path: Initialize BiModal Components ---
-            self.uniqueness_point_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
-            self.uniqueness_image_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            self.k_atoms = 4
+            # self.uniqueness_point_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            # self.uniqueness_image_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
+            self.uniqueness_extractor = BiModalUniquenessExtractor(self.fusion_dim, self.hidden_dim, 'cross_attention')
             self.redundancy_extractor = BiModalRedundancyExtractor(self.fusion_dim, self.hidden_dim)
             self.synergy_extractor = BiModalSynergyExtractor(self.fusion_dim, self.hidden_dim)
-
-            # The VQA gate weighs the 4 visual components
-            # self.gate_dim = self.fusion_dim * 4 + self.fusion_dim # U_p, U_i, R_pi, S_pi + Question
-            # self.pid_aggregator_gate = nn.Sequential(
-            #     nn.Linear(self.gate_dim, self.hidden_dim), nn.GELU(),
-            #     nn.Linear(self.hidden_dim, 4), nn.Softmax(dim=-1)
-            # )
             
-            # --- ADD (Version 2) ---
-            self.decomposed_dim = self.fusion_dim * 4 # 4 atoms for VQA
         
         # --- Version 2 feat map ---
+        self.decomposed_dim = self.fusion_dim * self.k_atoms # 7 atoms for SQA, 4 atoms for VQA
         self.visual_feat_map = nn.Linear(self.decomposed_dim, self.Df)
         self.full_visual_feat_map = nn.Linear(self.decomposed_dim, self.Df)
     
-        
-        # --- Common Final Layers ---
-        # self.final_refinement = nn.TransformerEncoderLayer(
-        #     d_model=self.fusion_dim, nhead=8, dim_feedforward=self.hidden_dim,
-        #     batch_first=True, activation='gelu'
-        # )
-        # self.final_proj = nn.Linear(self.fusion_dim, self.Df)
-        
-        # PID consistency loss module
-        # if self.use_sqa:
-        #     # self.pid_uniqueness_loss = UniquenessLoss(self.fusion_dim, self.hidden_dim)
-        #     self.pid_uniqueness_loss = UniquenessLoss()
-        # else:
-        #     self.pid_uniqueness_loss = BiModalUniquenessLoss(self.fusion_dim, self.hidden_dim)
-        # self.auxiliary_qa_head = nn.Linear(self.fusion_dim, qa_head['num_classes'])
+
         # --- Version 2 --- PID consistency loss (proved to work)
         self.pid_uniqueness_loss = UniquenessLoss() # Use the new UniquenessLoss class
         self.pid_redundancy_loss = RedundancyLoss(self.fusion_dim, self.hidden_dim)
         self.pid_synergy_loss = SynergyLoss()
         
-        # NEW PID Losses
-        # self.pid_uniqueness_loss = TaskAwareUniquenessLoss()
-        # self.pid_redundancy_loss = TaskAwareRedundancyLoss()
-        # no synergy loss in the new version   
+        
+        # --- Dynamic Atom Modulation (DAM) Gate ---
+        # This gate will predict the importance of each PID atom.
+        # It takes a global scene summary and the question as input.
+        # Input dim = (dim of scene summary) + (dim of question)
+        # Scene summary is pooled from the wide feature vector (Df * k_atoms)
+        # Question is from the global token (fusion_dim, which is Df)
+        gate_input_dim = self.fusion_dim * self.k_atoms + self.fusion_dim
+        self.dam_gate = nn.Sequential(
+            nn.Linear(gate_input_dim, self.hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.hidden_dim, self.k_atoms) # Output raw logits for k atoms
+        )
+        
+        
     @property
     def with_qa_head(self):
         """Whether the detector has a qa head."""
@@ -299,6 +305,24 @@ class PIDNet(BaseModel):
             ))
 
         return text_dict
+    
+    # def extract_text_feat(
+    #     self, batch_inputs_dict: Dict[str,
+    #                                   Tensor], batch_data_samples: SampleList,):
+    #     text_prompts = [
+    #         data_samples.question for data_samples in batch_data_samples
+    #     ]  # txt list
+    #     tokenized = self.tokenizer.batch_encode_plus(
+    #         text_prompts, padding='longest',max_length=self.text_max_length, truncation=True,
+    #         return_tensors='pt').to(batch_inputs_dict['points'][0].device)
+    #     encoded_text = self.text_encoder(**tokenized)
+    #     text_feats = self.text_feat_map(encoded_text.last_hidden_state)
+    #     text_token_mask = tokenized.attention_mask.bool()
+    #     text_dict = dict(text_feats=text_feats,
+    #                      text_token_mask=text_token_mask,
+    #                      text_global_token=(text_feats*text_token_mask.unsqueeze(2)).sum(1)/text_token_mask.sum(1,keepdim=True)
+    #                      )# (bs, max_text_length)
+    #     return text_dict
     
     # The fully integrated forward pass for both VQA and SQA
     def extract_feat(
@@ -404,6 +428,7 @@ class PIDNet(BaseModel):
         point_repr = self.point_proj(point_feats)  # -> [B, Np, fusion_dim]
 
         question_feats_global = text_dict['question_global_token']
+        # question_feats_global = text_dict['text_global_token']
         question_repr = self.question_proj(question_feats_global)  # -> [B, fusion_dim]
         
         # Create broadcast versions of text features to match the per-point structure.
@@ -420,22 +445,19 @@ class PIDNet(BaseModel):
         
         if self.use_sqa:
             # --- SQA PATH: 7 Information Atoms ---
-
             # --- 2a. SQA-Specific Projections & Broadcast ---
             # Project the description and broadcast it, just like the question.
             description_feats_global = text_dict['description_global_token']
             description_repr = self.description_proj(description_feats_global)  # -> [B, fusion_dim]
             description_broadcast = description_repr.unsqueeze(1).expand(-1, Np, -1) # -> [B, Np, fusion_dim]
 
-            # --- 2b. Compute the 7 Parallel PID Streams ---
+            # # --- 2b. Compute the 7 Parallel PID Streams ---
             
-            # Uniqueness (U): Using the single shared TriModalUniquenessExtractor three times.
+            # # Uniqueness (U): Using the single shared TriModalUniquenessExtractor three times.
             U_point = self.uniqueness_extractor(point_repr, image_repr, description_broadcast, question_broadcast)
             U_image = self.uniqueness_extractor(image_repr, point_repr, description_broadcast, question_broadcast)
             U_description = self.uniqueness_extractor(description_broadcast, point_repr, image_repr, question_broadcast)
-            # U_point = self.uniqueness_point_extractor(point_repr, image_repr, description_broadcast, question_broadcast)
-            # U_image = self.uniqueness_image_extractor(image_repr, point_repr, description_broadcast, question_broadcast)
-            # U_description = self.uniqueness_desc_extractor(description_broadcast, point_repr, image_repr, question_broadcast)
+
 
             # Redundancy (R): Using the three distinct BiModalRedundancyExtractor instances.
             # Note: These are not guided by the question, by definition.
@@ -447,25 +469,20 @@ class PIDNet(BaseModel):
             # We unsqueeze the description to treat it as a sequence of length 1 for the fusion transformer.
             S_pid = self.synergy_extractor(point_repr, image_repr, description_repr.unsqueeze(1), question_broadcast)
 
-            # --- 3a. Aggregate SQA PID Features ---
+            # # --- 3a. Aggregate SQA PID Features ---
             pid_streams = [U_point, U_image, U_description, R_pi, R_pd, R_id, S_pid]
-            # --- Version 1: Early Fusion ---
-            # gate_input = torch.cat(pid_streams + [question_broadcast], dim=-1)
+            # # --- Version 1: Early Fusion ---
+            # # gate_input = torch.cat(pid_streams + [question_broadcast], dim=-1)
             
-            # # Apply the 7-way gating mechanism
+            # Apply the 7-way gating mechanism
             # pid_weights = self.pid_aggregator_gate(gate_input) # -> [B, Np, 7]
             
-            # # Reshape for weighted sum
-            # pid_stack = torch.stack(pid_streams, dim=2) # -> [B, Np, 7, fusion_dim]
-            # pid_weights_reshaped = pid_weights.unsqueeze(-1) # -> [B, Np, 7, 1]
+            # # # Reshape for weighted sum
+            # # pid_stack = torch.stack(pid_streams, dim=2) # -> [B, Np, 7, fusion_dim]
+            # # pid_weights_reshaped = pid_weights.unsqueeze(-1) # -> [B, Np, 7, 1]
             
-            # # Create the final visual feature by weighted sum
-            # visual_feat = (pid_weights_reshaped * pid_stack).sum(dim=2) # -> [B, Np, fusion_dim]
-
-            # --- Version 2: Late Fusion ---
-            # Concatenate all atoms along the feature dimension to create a "wide" feature vector.
-            decomposed_visual_feat = torch.cat(pid_streams, dim=-1) # Shape: [B, Np, Df * 7]
-            pid_weights = None # No weights are computed at this stage.
+            # # # Create the final visual feature by weighted sum
+            # # visual_feat = (pid_weights_reshaped * pid_stack).sum(dim=2) # -> [B, Np, fusion_dim]
             
             pid_atoms_dict = {
                 'U_P': U_point, 'U_I': U_image, 'U_D': U_description,
@@ -475,12 +492,79 @@ class PIDNet(BaseModel):
                 'point': point_repr, 'image': image_repr, 'description': description_broadcast
             }
 
+            # --- Updated version 2 of SQA path ---
+            # Create a Unified Visual Representation
+            # combined_visual_repr = torch.cat([point_repr, image_repr], dim=-1) # Shape: [B, Np, 2 * fusion_dim]
+            # # fuse them into a single, powerful visual source
+            # vision_repr_fused = self.sqa_vision_fusion_mlp(combined_visual_repr) # Shape: [B, Np, fusion_dim]
+            
+            # # define the situation context source
+            # description_feats_global = text_dict['description_global_token']
+            # description_repr = self.description_proj(description_feats_global)  # -> [B, fusion_dim
+            # description_broadcast = description_repr.unsqueeze(1).expand(-1, Np, -1) # -> [B, Np, fusion_dim]
+            
+            # # apply FiLM: Condition the Vision with Context
+            # # Generate gamma and beta from the global description token
+            # film_params = self.film_generator(description_repr) # Shape: [B, Df * 2]
+            # gamma, beta = torch.chunk(film_params, 2, dim=-1) # Each is [B, Df]
+            
+            # # Reshape for broadcasting over the points dimension
+            # gamma = gamma.unsqueeze(1) # -> [B, 1, Df]
+            # beta = beta.unsqueeze(1) # -> [B, 1, Df]
+            
+            # # Apply the modulation
+            # vision_conditioned = gamma * vision_repr_fused + beta
+            
+            # # Compute the 4 Parallel PID Streams
+            # # U_vision = self.uniqueness_extractor(vision_repr_fused, description_broadcast, question_broadcast)
+            # # U_description = self.uniqueness_extractor(description_broadcast, vision_repr_fused, question_broadcast)
+            # # R_shared = self.redundancy_extractor(vision_repr_fused, description_broadcast)
+            # # S_synergy = self.synergy_extractor(vision_repr_fused, description_broadcast, question_broadcast)
+            
+            # U_vision = self.uniqueness_extractor(vision_conditioned, description_broadcast, question_broadcast)
+            # U_description = self.uniqueness_extractor(description_broadcast, vision_conditioned, question_broadcast)
+            # R_shared = self.redundancy_extractor(vision_conditioned, description_broadcast)
+            # S_synergy = self.synergy_extractor(vision_conditioned, description_broadcast, question_broadcast)
+            
+            # pid_streams = [U_vision, U_description, R_shared, S_synergy]
+            
+            # pid_atoms_dict = {
+            #     'U_vision': U_vision, 'U_description': U_description,
+            #     'R_shared': R_shared, 'S_synergy': S_synergy
+            # }
+            
+            # source_repr_dict = {
+            #     'vision': vision_conditioned, 'description': description_broadcast,
+            #     'point': point_repr, 'image': image_repr
+            # }
+            
+            # source_repr_dict = {
+            #     'vision': vision_repr_fused, 'description': description_broadcast,
+            #     'point': point_repr, 'image': image_repr
+            # }
+            
+            # Updated SQA path: don't use description
+            # U_point = self.uniqueness_extractor(point_repr, image_repr, question_broadcast)
+            # U_image = self.uniqueness_extractor(image_repr, point_repr, question_broadcast)
+            # R_shared = self.redundancy_extractor(point_repr, image_repr)
+            # S_synergy = self.synergy_extractor(point_repr, image_repr, question_broadcast)
+            
+            # pid_streams = [U_point, U_image, R_shared, S_synergy]
+            
+            # pid_atoms_dict = {
+            #     'U_P': U_point, 'U_I': U_image, 'R_PI': R_shared, 'S_PI': S_synergy
+            # }
+            # source_repr_dict = {
+            #     'point': point_repr, 'image': image_repr
+            # }
+
         else:
             # --- VQA PATH: 4 Information Atoms (Your original code, remains correct) ---
-
             # --- 2c. Compute the 4 Parallel PID Streams ---
-            U_point = self.uniqueness_point_extractor(point_repr, image_repr, question_broadcast)
-            U_image = self.uniqueness_image_extractor(image_repr, point_repr, question_broadcast)
+            # U_point = self.uniqueness_point_extractor(point_repr, image_repr, question_broadcast)
+            # U_image = self.uniqueness_image_extractor(image_repr, point_repr, question_broadcast)
+            U_point = self.uniqueness_extractor(point_repr, image_repr, question_broadcast)
+            U_image = self.uniqueness_extractor(image_repr, point_repr, question_broadcast)
             R_shared = self.redundancy_extractor(point_repr, image_repr)
             S_synergy = self.synergy_extractor(point_repr, image_repr, question_broadcast)
             
@@ -496,10 +580,6 @@ class PIDNet(BaseModel):
             
             # visual_feat = (pid_weights_reshaped * pid_stack).sum(dim=2)
             
-            # --- Version 2: Late Fusion ---
-            decomposed_visual_feat = torch.cat(pid_streams, dim=-1) # Shape: [B, Np, Df * 4]
-            pid_weights = None
-            
             # Add VQA atoms to the output dict
             # feat_dict.update({
             #     "U_P": U_point, "U_I": U_image, "R_PI": R_shared, "S_PI": S_synergy,
@@ -511,18 +591,38 @@ class PIDNet(BaseModel):
             source_repr_dict = {
                 'point': point_repr, 'image': image_repr
             }
-            
-
-        # --- 4. Final Refinement and Projection ---
-        # --- Commented out for Version 2 ---
-        # final_visual_feat = self.final_refinement(visual_feat)
-        # final_visual_feat = self.final_proj(final_visual_feat)        
-        # feat_dict['visual_features'] = final_visual_feat
-        # feat_dict['pid_weights'] = pid_weights
         
         # --- Version 2: Use the decomposed visual feature directly ---
-        feat_dict['visual_features'] = decomposed_visual_feat
-        feat_dict['pid_weights'] = pid_weights # This will be None
+        # Common Logic for Both VQA and SQA
+        # Concatenate all atoms along the feature dimension to create a "wide" feature vector.
+        decomposed_visual_feat = torch.cat(pid_streams, dim=-1) # Shape: [B, Np, Df * k_atoms]
+        # 2. Create the input for the DAM gate.
+        #    - Global Scene Summary: Mean-pool the decomposed features over the point dimension.
+        #    - Global Question: Use the projected question representation.
+        scene_summary = torch.mean(decomposed_visual_feat, dim=1) # Shape: [B, Df * k_atoms]
+        gate_input = torch.cat([scene_summary, question_repr], dim=-1) # Shape: [B, Df*k + Df]
+        # 3. Predict the modulation weights.
+        #    We use softmax to ensure weights are positive and interpretable as a distribution.
+        raw_weights = self.dam_gate(gate_input) # Shape: [B, k_atoms]
+        modulation_weights = F.softmax(raw_weights, dim=-1) # Shape: [B, k_atoms]
+        # 4. Apply the modulation to the decomposed features.
+        #    This is the core of DAM: re-scaling each atom's feature lane.
+        B, Np, _ = decomposed_visual_feat.shape
+        
+        # Reshape for broadcasting:
+        # - Features: [B, Np, Df * k] -> [B, Np, k, Df]
+        # - Weights:  [B, k]          -> [B, 1, k, 1]
+        decomposed_reshaped = decomposed_visual_feat.view(B, Np, self.k_atoms, self.fusion_dim)
+        weights_reshaped = modulation_weights.view(B, 1, self.k_atoms, 1)
+
+        # Apply modulation via element-wise multiplication (broadcasting takes care of dimensions)
+        modulated_atoms = decomposed_reshaped * (weights_reshaped + 1)
+        
+        # Reshape back to the "wide" format for the downstream encoder
+        modulated_visual_feat = modulated_atoms.view(B, Np, -1) # Shape: [B, Np, Df * k_atoms]
+        
+        feat_dict['visual_features'] = modulated_visual_feat
+        feat_dict['pid_weights'] = modulation_weights # Store the interpretable weights!
         
         return feat_dict, pid_atoms_dict, source_repr_dict
     
@@ -552,22 +652,27 @@ class PIDNet(BaseModel):
         full_point_feats += self.full_pos_embedding(full_point_pos)
         full_point_feats = self.fusion_encoder_full_visual_pre_norm(full_point_feats)
         
-        if self.use_sqa:
-            # Concatenate description and question to form the full language context
-            lang_feats = torch.cat([text_dict['description_feats'], text_dict['question_feats']], dim=1)
-            lang_attention_mask = torch.cat([text_dict['description_token_mask'], text_dict['question_token_mask']], dim=1)
-        else:
-            # Original behavior for VQA
-            lang_feats = text_dict['question_feats']
-            lang_attention_mask = text_dict['question_token_mask']
+        # if self.use_sqa:
+        #     # Concatenate description and question to form the full language context
+        #     lang_feats = torch.cat([text_dict['description_feats'], text_dict['question_feats']], dim=1)
+        #     lang_attention_mask = torch.cat([text_dict['description_token_mask'], text_dict['question_token_mask']], dim=1)
+        # else:
+        #     # Original behavior for VQA
+        #     lang_feats = text_dict['question_feats']
+        #     lang_attention_mask = text_dict['question_token_mask']
+        
+        # lang_feats = text_dict['text_feats']
+        # lang_attention_mask = text_dict['text_token_mask']
+        lang_feats = text_dict['question_feats']
+        lang_attention_mask = text_dict['question_token_mask']
             
         fusion_encoder_inputs_dict = dict(
-            lang_feats = lang_feats,
-            lang_attention_mask = lang_attention_mask,
-            visual_feats = point_feats,
-            visual_attention_mask = point_mask,
-            full_visual_feats = full_point_feats,
-            full_visual_attention_mask = full_point_mask,
+            lang_feats=lang_feats,
+            lang_attention_mask=lang_attention_mask,
+            visual_feats=point_feats,
+            visual_attention_mask=point_mask,
+            full_visual_feats=full_point_feats,
+            full_visual_attention_mask=full_point_mask,
             )
         fusion_output = self.fusion_encoder(**fusion_encoder_inputs_dict)
         head_inputs_dict = dict(fusion_feat_visual=fusion_output['visual_feats'],
@@ -618,7 +723,7 @@ class PIDNet(BaseModel):
         
         head_inputs_dict = self.forward_transformer(
             point_feats=point_feats,
-            point_pos=point_pos, # Pass None here since we are not using specific XYZ positions when using DETR-style sampling
+            point_pos=point_pos,
             point_mask=point_mask,
             text_dict=text_dict,
             full_point_feats=full_point_feats,
@@ -666,20 +771,39 @@ class PIDNet(BaseModel):
             total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PID'], non_synergy_atoms)
             losses['loss_pid_synergy'] = total_synergy_loss * 0.1 # Apply a weight
             
-            
-            """ Refined pid losses (Not working as well as the above) """ 
-            # loss_u_pi = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_P'], pid_atoms_dict['U_I'])
-            # loss_u_pd = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_P'], pid_atoms_dict['U_D'])
-            # loss_u_id = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_I'], pid_atoms_dict['U_D'])
-            # total_uniqueness_loss = loss_u_pi + loss_u_pd + loss_u_id
+            # --- Updated version 2 of SQA path ---
+            # 1. Uniqueness Loss
+            # loss_u_v = self.pid_uniqueness_loss(pid_atoms_dict['U_vision'], source_repr_dict['description'])
+            # loss_u_d = self.pid_uniqueness_loss(pid_atoms_dict['U_description'], source_repr_dict['vision'])
+            # total_uniqueness_loss = loss_u_v + loss_u_d
             # losses['loss_pid_uniqueness'] = total_uniqueness_loss * 0.1
             
-            # loss_r_pi = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
-            # loss_r_pd = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_PD'], source_repr_dict['point'], source_repr_dict['description'])
-            # loss_r_id = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_ID'], source_repr_dict['image'], source_repr_dict['description'])
-            # total_redundancy_loss = loss_r_pi + loss_r_pd + loss_r_id
-            # losses['loss_pid_redundancy'] = total_redundancy_loss * 0.1
+            # # 2. Redundancy Loss
+            # total_redundancy_loss = self.pid_redundancy_loss(
+            #     pid_atoms_dict['R_shared'], source_repr_dict['vision'], source_repr_dict['description'])
+            # losses['loss_pid_redundancy'] = total_redundancy_loss * 0.1 # Apply a weight
+
+
+            # # 3. Synergy Loss
+            # non_synergy_atoms = [pid_atoms_dict['U_vision'], pid_atoms_dict['U_description'], pid_atoms_dict['R_shared']]
+            # total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_synergy'], non_synergy_atoms)
+            # losses['loss_pid_synergy'] = total_synergy_loss * 0.1 # Apply a weight
             
+            
+            # Updated version 2 of SQA path no description
+            # loss_u_p = self.pid_uniqueness_loss(pid_atoms_dict['U_P'], source_repr_dict['image'])
+            # loss_u_i = self.pid_uniqueness_loss(pid_atoms_dict['U_I'], source_repr_dict['point'])
+            # total_uniqueness_loss = loss_u_p + loss_u_i
+            # losses['loss_pid_uniqueness'] = total_uniqueness_loss * 0.1 # Apply a weight
+            
+            # total_redundancy_loss = self.pid_redundancy_loss(
+            #     pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
+            # losses['loss_pid_redundancy'] = total_redundancy_loss * 0.1 # Apply a weight
+            
+            # non_synergy_atoms = [pid_atoms_dict['U_P'], pid_atoms_dict['U_I'], pid_atoms_dict['R_PI']]
+            # total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PI'], non_synergy_atoms)
+            # losses['loss_pid_synergy'] = total_synergy_loss * 0.1 # Apply a weight
+
         else:
             """ Proved PID consistency loss works well for VQA """
             # 1. Uniqueness Loss (using the bimodal class)
@@ -698,12 +822,6 @@ class PIDNet(BaseModel):
             total_synergy_loss = self.pid_synergy_loss(pid_atoms_dict['S_PI'], non_synergy_atoms)
             losses['loss_pid_synergy'] = total_synergy_loss * 0.1 # Apply a weight
             
-            """ Refined PID losses (Not working as well as the above) """
-            # loss_u_pi = self.pid_uniqueness_loss(self.auxiliary_qa_head, pid_atoms_dict['U_P'], pid_atoms_dict['U_I'])
-            # losses['loss_pid_uniqueness'] = loss_u_pi * 0.1
-
-            # loss_r_pi = self.pid_redundancy_loss(self.auxiliary_qa_head, pid_atoms_dict['R_PI'], source_repr_dict['point'], source_repr_dict['image'])
-            # losses['loss_pid_redundancy'] = loss_r_pi * 0.1
             
         losses = self.loss_collect(losses)
 

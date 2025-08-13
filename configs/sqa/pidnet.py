@@ -13,7 +13,8 @@ classes = ('cabinet', 'bed', 'chair', 'sofa', 'table', 'door',
             'window','bookshelf','picture', 'counter', 'desk', 'curtain',
             'refrigerator', 'shower curtain', 'toilet', 'sink', 'bathtub', 'others')
 model = dict(
-    type='MultiViewVLMBase3DQA',
+    # type='MultiViewVLMBase3DQA',
+    type='PIDNet',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
                         #    use_clip_mean_std = True,#VLM
@@ -120,7 +121,7 @@ test_pipeline = [
 
 
 # TODO: to determine a reasonable batch size
-BATCH_SIZE=8 # 12
+BATCH_SIZE=10 # 12
 train_dataloader = dict(
     batch_size=BATCH_SIZE,
     num_workers=12,
@@ -179,22 +180,14 @@ test_cfg = dict(type='TestLoop')
 lr = 1e-4
 optim_wrapper = dict(
                      type='OptimWrapper',
-                     optimizer=dict(type='AdamW', lr=lr, weight_decay=5e-4),
+                     optimizer=dict(type='AdamW', lr=lr, weight_decay=1e-5),
                      paramwise_cfg=dict(
                          bypass_duplicate=True,
                          custom_keys={
-                            # Pre-trained: Preserve learned representations
-                            'backbone_lidar': dict(lr_mult=0.1),    # PointNet++ 
-                            'text_encoder': dict(lr_mult=0.1),      # SBERT
-                            
-                            # New modules: Accelerate learning
-                            'pv_fusion': dict(lr_mult=1.2),         # @MODELS.register_module() ✓
-                            'tv_fusion': dict(lr_mult=1.2),         # @MODELS.register_module() ✓  
-                            'pt_fusion': dict(lr_mult=1.2),         # @MODELS.register_module() ✓
-                            'tri_modal_fusion': dict(lr_mult=1.2),  # @MODELS.register_module() ✓
-                        }),
+                            'text_encoder': dict(lr_mult=0.1),
+                         }),
                      clip_grad=dict(max_norm=10, norm_type=2),
-                     accumulative_counts=1)  # 1
+                     accumulative_counts=1)
 # learning rate
 param_scheduler = [
     # 在 [0, max_epochs) Epoch时使用余弦学习率
