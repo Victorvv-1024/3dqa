@@ -14,8 +14,6 @@ classes = ('cabinet', 'bed', 'chair', 'sofa', 'table', 'door',
             'refrigerator', 'shower curtain', 'toilet', 'sink', 'bathtub', 'others')
 model = dict(
     # Model selection:
-    # 'PIDNet' - PIDNet model
-    # 'DSPNet3DQA' - Baseline DSPNet model
     type='PIDNet',
     voxel_size=voxel_size,
     data_preprocessor=dict(type='Det3DDataPreprocessor',
@@ -55,13 +53,6 @@ model = dict(
                            num_attention_heads=12,
                            num_hidden_layers = 4,
                            ),
-    # backbone_fusion = dict(
-    #                     type='IterativeFusionEncoder',
-    #                     hidden_size=768,
-    #                     num_attention_heads=12,
-    #                     num_hidden_layers=5,
-    #                     num_reasoning_queries=256    
-    #                 ),
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -226,11 +217,11 @@ test_dataloader = dict(batch_size=12,
                       dataset=dict(type=dataset_type,
                                    data_root=data_root,
                                    # test w object
-                                #    ann_file='mv_scannetv2_infos_val.pkl',
-                                #    qa_file='qa/ScanQA_v1.0_test_w_obj.json',
+                                   ann_file='mv_scannetv2_infos_val.pkl',
+                                   qa_file='qa/ScanQA_v1.0_test_w_obj.json',
                                     # test w/o object
-                                   ann_file='mv_scannetv2_infos_test.pkl',
-                                   qa_file='qa/ScanQA_v1.0_test_wo_obj.json',
+                                #    ann_file='mv_scannetv2_infos_test.pkl',
+                                #    qa_file='qa/ScanQA_v1.0_test_wo_obj.json',
                                    metainfo = dict(classes=classes),
                                    pipeline=test_pipeline,
                                    anno_indices=None,

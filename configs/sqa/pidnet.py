@@ -42,6 +42,11 @@ model = dict(
                            num_attention_heads=12,
                            num_hidden_layers = 4,
                            ),
+    # backbone_fusion = dict(type='DAMOFusion',
+    #                        hidden_size=768, 
+    #                        num_attention_heads=12,
+    #                        num_hidden_layers = 4,
+    #                        ),
     backbone_lidar=dict(
                     type='PointNet2SASSG',
                     in_channels=backbone_lidar_inchannels,
@@ -121,7 +126,7 @@ test_pipeline = [
 
 
 # TODO: to determine a reasonable batch size
-BATCH_SIZE=10 # 12
+BATCH_SIZE=12 # 12
 train_dataloader = dict(
     batch_size=BATCH_SIZE,
     num_workers=12,
